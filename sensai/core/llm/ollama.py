@@ -41,6 +41,14 @@ class OllamaClient:
         except ollama.ResponseError as e:
             raise LLMError(f"Ollama error: {e.error}") from None
 
+    def ensure_model(self, model: str) -> None:
+        """Raise ModelNotFoundError if `model` is not installed."""
+        available = self.list_models()
+        # "llama3" and "llama3:latest" designate the same model.
+        normalized = {name.removesuffix(":latest") for name in available}
+        if model.removesuffix(":latest") not in normalized:
+            raise ModelNotFoundError(model, available)
+
     def chat_stream(self, model: str, messages: list[dict]) -> Iterator[str]:
         """Yield the assistant's answer chunk by chunk."""
         try:
