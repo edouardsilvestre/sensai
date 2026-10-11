@@ -25,6 +25,19 @@ def error(message: str) -> None:
 
 def chat_turn(agent: Agent, line: str) -> None:
     """wrapper of agent run"""
+    try:
+        for event in agent.run(line):
+            if isinstance(event, TokenEvent):
+                print(event.text, end="", flush=True)
+            elif isinstance(event, DoneEvent):
+                print()
+    except EmptyInputError:
+        error("Empty message, please type something.")
+    except LLMError as e:
+        print()
+        error(str(e))
+    except KeyboardInterrupt:
+        print("\n[interrupted]")
 
 
 def main(argv: list[str] | None = None) -> int:
