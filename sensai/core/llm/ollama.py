@@ -33,6 +33,14 @@ class OllamaClient:
         self.host = host
         self._client = ollama.Client(host=host)
 
+    def list_models(self) -> list[str]:
+        try:
+            return [m.model for m in self._client.list().models if m.model]
+        except (ConnectionError, httpx.HTTPError):
+            raise LLMConnectionError(f"Cannot reach Ollama at {self.host}. Is `ollama serve` running?") from None
+        except ollama.ResponseError as e:
+            raise LLMError(f"Ollama error: {e.error}") from None
+
     def chat_stream(self, model: str, messages: list[dict]) -> Iterator[str]:
         """Yield the assistant's answer chunk by chunk."""
         try:
