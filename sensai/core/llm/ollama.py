@@ -21,10 +21,16 @@ class LLMConnectionError(LLMError):
 class ModelNotFoundError(LLMError):
     """The requested model is not available on the Ollama server."""
 
-    def __init__(self, model: str, available: list[str]):
+    def __init__(self, model: str, available: list[str] | None):
+        """`available` is None when the list of installed models could not be fetched."""
         self.model = model
         self.available = available
-        hint = ", ".join(available) if available else "none (use `ollama pull <model>`)"
+        if available is None:
+            hint = "unknown (run `ollama list`)"
+        elif available:
+            hint = ", ".join(available)
+        else:
+            hint = f"none (run `ollama pull {model}`)"
         super().__init__(f"Model '{model}' is not available. Installed models: {hint}")
 
 
@@ -36,10 +42,10 @@ class OllamaClient:
     def list_models(self) -> list[str]:
         try:
             return [m.model for m in self._client.list().models if m.model]
-        except (ConnectionError, httpx.HTTPError):
-            raise LLMConnectionError(f"Cannot reach Ollama at {self.host}. Is `ollama serve` running?") from None
+        except (ConnectionError, httpx.HTTPError) as e:
+            raise LLMConnectionError(f"Cannot reach Ollama at {self.host}. Is `ollama serve` running?") from e
         except ollama.ResponseError as e:
-            raise LLMError(f"Ollama error: {e.error}") from None
+            raise LLMError(f"Ollama error: {e.error}") from e
 
     def ensure_model(self, model: str) -> None:
         """Raise ModelNotFoundError if `model` is not installed."""
@@ -55,9 +61,13 @@ class OllamaClient:
             for chunk in self._client.chat(model=model, messages=messages, stream=True):
                 if chunk.message.content:
                     yield chunk.message.content
-        except (ConnectionError, httpx.HTTPError):
-            raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from None
+        except (ConnectionError, httpx.HTTPError) as e:
+            raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from e
         except ollama.ResponseError as e:
             if e.status_code == 404:
-                raise ModelNotFoundError(model, []) from None
-            raise LLMError(f"Ollama error: {e.error}") from None
+                try:
+                    available = self.list_models()
+                except LLMError:
+                    available = None
+                raise ModelNotFoundError(model, available) from e
+            raise LLMError(f"Ollama error: {e.error}") from e
