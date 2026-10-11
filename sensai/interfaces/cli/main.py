@@ -43,7 +43,7 @@ def chat_turn(agent: Agent, line: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        config = load_config(args.env_file)
+        config = load_config(args.env_path)
     except ConfigError as e:
         error(str(e))
         return 1

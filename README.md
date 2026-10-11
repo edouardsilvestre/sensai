@@ -15,7 +15,6 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 📂 **Living investigation file**: a case document that grows as the investigation progresses, gathering findings, leads and their supporting evidence.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
-
 ## How does it work?
 
 [Explain how this project is working]
@@ -24,15 +23,29 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 
 ### Installation
 
-[Explain how to install all of the project's dependencies]
+Requirements: Python 3.10+ and a running [Ollama](https://ollama.com/download) server.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+ollama pull llama3
+```
 
 ### Quickstart
 
-[Explain how to run this project]
+```bash
+python -m sensai                 # uses .env
+SENSAI_MODEL=qwen3.8 python -m sensai   # override the model for one run
+python -m sensai -e other.env    # use another env file
+```
 
 ### Usage
 
-[Explain how to use this project]
+Type a message and press Enter: the answer is streamed as it is generated, and previous turns are sent as context. Type `/exit` or press `Ctrl+D` to quit; `Ctrl+C` during an answer interrupts it.
+
+Configuration lives in `.env` (see `.env.example`): `SENSAI_MODEL`, `OLLAMA_HOST` and an optional `SENSAI_SYSTEM_PROMPT`. Environment variables take precedence over the file.
 
 ## Get involved
 
