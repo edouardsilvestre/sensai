@@ -4,9 +4,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from sensai.core.agent import Agent
+from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.config import ConfigError, load_config
+from sensai.core.events import DoneEvent, TokenEvent
 from sensai.core.llm.ollama import LLMError
+
+PROMPT = "\n> "
+EXIT_COMMANDS = {"/exit", "/quit"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -18,6 +22,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def error(message: str) -> None:
     print(f"[error] {message}", file=sys.stderr)
 
+
+def chat_turn(agent: Agent, line: str) -> None:
+    """wrapper of agent run"""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +42,16 @@ def main(argv: list[str] | None = None) -> int:
         error(str(e))
         return 1
 
+    print(f"Sensai — model: {config.model}. Type /exit or press Ctrl+D to quit.")
+    while True:
+        try:
+            line = input(PROMPT)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if line.strip() in EXIT_COMMANDS:
+            return 0
+        chat_turn(agent, line)
 
 
 if __name__ == "__main__":
