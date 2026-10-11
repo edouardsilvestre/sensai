@@ -57,3 +57,7 @@ class OllamaClient:
                     yield chunk.message.content
         except (ConnectionError, httpx.HTTPError):
             raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from None
+        except ollama.ResponseError as e:
+            if e.status_code == 404:
+                raise ModelNotFoundError(model, []) from None
+            raise LLMError(f"Ollama error: {e.error}") from None
