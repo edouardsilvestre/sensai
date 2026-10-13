@@ -1,0 +1,124 @@
+import os
+
+import pytest
+
+from sensai.core.rag.index import DocumentIndex
+from sensai.core.rag.store import IndexMismatchError
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    folder = tmp_path / "leak"
+    (folder / "emails").mkdir(parents=True)
+    (folder / "emails" / "transfer.txt").write_text("Alice approved the transfer to Delta Holding.", encoding="utf-8")
+    (folder / "minutes.md").write_text("# Board minutes\nThe board discussed the annual budget.", encoding="utf-8")
+    (folder / "accounts.csv").write_text("owner,bank\nDelta Holding,Geneva Private Bank\n", encoding="utf-8")
+    (folder / "photo.png").write_bytes(b"\x89PNG")
+    (folder / ".hidden.txt").write_text("should not be indexed", encoding="utf-8")
+    return folder
+
+
+@pytest.fixture
+def index(config, client):
+    index = DocumentIndex.open(config, client)
+    yield index
+    index.close()
+
+
+def test_ingest_indexes_supported_visible_files(index, corpus):
+    report = index.ingest([corpus])
+    assert (report.added, report.unsupported, report.failed) == (3, 1, [])
+    assert index.stats().documents == 3
+
+
+def test_search_finds_the_relevant_document(index, corpus):
+    index.ingest([corpus])
+    results = index.search("who approved the transfer to Delta?", k=1)
+    assert results[0].source == "leak/emails/transfer.txt"
+
+
+def test_only_the_chunk_text_is_embedded(index, corpus, client):
+    index.ingest([corpus])
+    assert "Alice approved the transfer to Delta Holding." in client.embedded
+    assert not any("leak/" in text for text in client.embedded)
+
+
+def test_unchanged_files_are_not_embedded_again(index, corpus, client):
+    index.ingest([corpus])
+    embedded = len(client.embedded)
+
+    report = index.ingest([corpus])
+    assert (report.added, report.unchanged) == (0, 3)
+    assert len(client.embedded) == embedded
+
+
+def test_touched_file_with_same_content_is_unchanged(index, corpus, client):
+    index.ingest([corpus])
+    embedded = len(client.embedded)
+    os.utime(corpus / "minutes.md", (1, 1))
+
+    assert index.ingest([corpus]).unchanged == 3
+    assert len(client.embedded) == embedded
+
+
+def test_modified_file_is_reindexed(index, corpus):
+    index.ingest([corpus])
+    (corpus / "minutes.md").write_text("The board approved a loan to Omega.", encoding="utf-8")
+
+    report = index.ingest([corpus])
+    assert (report.updated, report.unchanged) == (1, 2)
+    assert "Omega" in index.search("loan to Omega", k=1)[0].text
+
+
+def test_deleted_file_is_removed_from_the_index(index, corpus):
+    index.ingest([corpus])
+    (corpus / "accounts.csv").unlink()
+
+    assert index.ingest([corpus]).removed == 1
+    assert index.stats().documents == 2
+
+
+def test_unreadable_file_is_reported_without_stopping(index, corpus):
+    (corpus / "broken.pdf").write_bytes(b"garbage")
+    report = index.ingest([corpus])
+    assert report.added == 3
+    assert [name for name, _ in report.failed] == ["leak/broken.pdf"]
+
+
+def test_single_files_and_missing_paths(index, corpus, tmp_path):
+    report = index.ingest([corpus / "minutes.md", corpus / "photo.png", tmp_path / "nope"])
+    assert report.added == 1
+    assert len(report.failed) == 2
+    assert index.search("budget", k=1)[0].source == "minutes.md"
+
+
+def test_progress_is_reported_per_file(index, corpus):
+    seen = []
+    index.ingest([corpus], on_progress=seen.append)
+    assert [(p.position, p.total) for p in seen] == [(1, 3), (2, 3), (3, 3)]
+    assert {p.status for p in seen} == {"added"}
+
+
+def test_embedding_window_fits_a_chunk(index, corpus, client, config):
+    index.ingest([corpus])
+    assert client.embed_options == {"num_ctx": config.chunk_size}
+    index.search("budget", k=1)
+    assert client.embed_options == {"num_ctx": config.chunk_size}
+
+
+def test_empty_index_search_does_not_embed(index, client):
+    assert index.search("anything", k=3) == []
+    assert client.embedded == []
+
+
+def test_changing_the_embedding_model_needs_a_rebuild(config, client, corpus):
+    index = DocumentIndex.open(config, client)
+    index.ingest([corpus])
+    index.close()
+
+    config.embed_model = "another-model"
+    with pytest.raises(IndexMismatchError):
+        DocumentIndex.open(config, client)
+    rebuilt = DocumentIndex.open(config, client, rebuild=True)
+    assert rebuilt.stats().documents == 0
+    rebuilt.close()
