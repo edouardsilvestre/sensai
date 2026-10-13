@@ -1,9 +1,3 @@
-"""Thin wrapper around the Ollama client.
-
-This is the only module that imports `ollama`: the rest of the code talks to
-`OllamaClient` and only sees the exceptions defined here.
-"""
-
 from collections.abc import Iterator
 
 import httpx
@@ -11,18 +5,15 @@ import ollama
 
 
 class LLMError(Exception):
-    """Base class for every model-related error."""
+    pass
 
 
 class LLMConnectionError(LLMError):
-    """The Ollama server cannot be reached."""
+    pass
 
 
 class ModelNotFoundError(LLMError):
-    """The requested model is not available on the Ollama server."""
-
     def __init__(self, model: str, available: list[str] | None):
-        """`available` is None when the list of installed models could not be fetched."""
         self.model = model
         self.available = available
         if available is None:
@@ -48,26 +39,39 @@ class OllamaClient:
             raise LLMError(f"Ollama error: {e.error}") from e
 
     def ensure_model(self, model: str) -> None:
-        """Raise ModelNotFoundError if `model` is not installed."""
         available = self.list_models()
-        # "llama3" and "llama3:latest" designate the same model.
         normalized = {name.removesuffix(":latest") for name in available}
         if model.removesuffix(":latest") not in normalized:
             raise ModelNotFoundError(model, available)
 
-    def chat_stream(self, model: str, messages: list[dict]) -> Iterator[str]:
-        """Yield the assistant's answer chunk by chunk."""
+    def chat_stream(
+        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None
+    ) -> Iterator[str]:
         try:
-            for chunk in self._client.chat(model=model, messages=messages, stream=True):
+            for chunk in self._client.chat(model=model, messages=messages, stream=True, options=options, think=think):
                 if chunk.message.content:
                     yield chunk.message.content
         except (ConnectionError, httpx.HTTPError) as e:
             raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from e
         except ollama.ResponseError as e:
-            if e.status_code == 404:
-                try:
-                    available = self.list_models()
-                except LLMError:
-                    available = None
-                raise ModelNotFoundError(model, available) from e
-            raise LLMError(f"Ollama error: {e.error}") from e
+            raise self._response_error(model, e) from e
+
+    def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
+        try:
+            response = self._client.embed(model=model, input=texts, options=options)
+        except (ConnectionError, httpx.HTTPError) as e:
+            raise LLMConnectionError(f"Cannot reach Ollama at {self.host}. Is `ollama serve` running?") from e
+        except ollama.ResponseError as e:
+            raise self._response_error(model, e) from e
+        if len(response.embeddings) != len(texts):
+            raise LLMError(f"Ollama returned {len(response.embeddings)} embeddings for {len(texts)} texts")
+        return [list(vector) for vector in response.embeddings]
+
+    def _response_error(self, model: str, error: ollama.ResponseError) -> LLMError:
+        if error.status_code == 404:
+            try:
+                available = self.list_models()
+            except LLMError:
+                available = None
+            return ModelNotFoundError(model, available)
+        return LLMError(f"Ollama error: {error.error}")
