@@ -9,7 +9,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 ### Key features
 
 - 🔒 **Fully offline**: no network access, no cloud, no data ever leaves the machine.
-- 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets…), with every answer cited to its source.
+- 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: a structured knowledge graph of people, companies, accounts and their relationships: who is linked to whom, and how.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
 - 📂 **Living investigation file**: a case document that grows as the investigation progresses, gathering findings, leads and their supporting evidence.
@@ -17,7 +17,20 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
-[Explain how this project is working]
+`sensai/core` runs the conversation and emits events, `sensai/interfaces` displays them. Only `sensai/core/llm/ollama.py` talks to Ollama.
+
+### Document search (RAG)
+
+Indexing (`python -m sensai ingest`):
+
+1. `rag/loaders.py` extracts the text of PDF, eml, csv, tsv, xlsx, html, md and txt files, with page numbers, sheet and row numbers, and email headers.
+2. `rag/chunker.py` splits the text into sentences or rows and groups them into chunks of about 1200 characters, with 200 characters of overlap.
+3. `rag/embedder.py` computes one vector per chunk with Ollama (`/api/embed`).
+4. `rag/store.py` saves documents, chunks and vectors in one SQLite file, the vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table.
+
+Files that did not change are skipped on the next run, and deleted files are removed from the index.
+
+Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
 
 ## Getting Started
 
@@ -31,6 +44,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ollama pull llama3
+ollama pull qwen3-embedding:0.6b   # embedding model for document search
 ```
 
 ### Quickstart
@@ -39,13 +53,67 @@ ollama pull llama3
 python -m sensai                 # uses .env
 SENSAI_MODEL=qwen3.8 python -m sensai   # override the model for one run
 python -m sensai -e other.env    # use another env file
+
+python -m sensai ingest ~/leak/          # index a folder (or files) for document search
+python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
+python -m sensai status                  # what the index contains
 ```
 
 ### Usage
 
 Type a message and press Enter: the answer is streamed as it is generated, and previous turns are sent as context. Type `/exit` or press `Ctrl+D` to quit; `Ctrl+C` during an answer interrupts it.
 
-Configuration lives in `.env` (see `.env.example`): `SENSAI_MODEL`, `OLLAMA_HOST` and an optional `SENSAI_SYSTEM_PROMPT`. Environment variables take precedence over the file.
+Once documents are indexed, every message is answered from the closest excerpts, and the sources cited by the answer are listed below it:
+
+```
+> Qui a demandé le virement de 480 000 EUR vers Alvor Consulting, et y avait-il une facture ?
+[search] 5 excerpts from 5 documents
+D'après les documents fournis :
+
+1.  **Qui a demandé (ou initié) le virement :** C'est Marc Vidal qui a demandé à Claire Benoit de valider le virement par email du 3 avril 2023 [1]. Le mouvement bancaire confirme que l'autorisation ("approved_by") est signée par M. Vidal [3].
+2.  **Y avait-il une facture :** Non, il n'y avait pas de facture au moment du paiement. Marc Vidal l'indiquait explicitement dans son email : "Pas de facture pour l'instant" [1], et le rapport d'audit confirme que le paiement a été effectué "sans facture" [2]. De plus, Claire Benoit rejette la validation en déclarant qu'elle ne peut pas valider sans facture [5].
+
+Sources:
+  [1] leak/emails/001.eml
+  [2] leak/audit_report.pdf, p. 1-3
+  [3] leak/transfers.csv, rows 2-4
+  [5] leak/emails/002.eml
+```
+
+| Command | Effect |
+|---|---|
+| `/ingest PATH...` | index files or folders without leaving the chat |
+| `/sources` | show the full excerpts retrieved for the last message |
+| `/rag [on\|off]` | turn document search on or off |
+| `/help` | list the commands |
+
+Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
+
+### Configuration
+
+Configuration lives in `.env` (see `.env.example`). Environment variables take precedence over the file.
+
+| Variable | Default | Role |
+|---|---|---|
+| `SENSAI_MODEL` | `llama3` | chat model |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
+| `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation |
+| `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
+| `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
+| `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
+| `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
+| `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
+| `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
+| `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests use a fake Ollama client, Ollama does not need to run.
 
 ## Get involved
 
