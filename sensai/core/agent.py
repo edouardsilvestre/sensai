@@ -4,6 +4,7 @@ from typing import Protocol
 from sensai.core.config import Config
 from sensai.core.events import DoneEvent, Event, SourcesEvent, TokenEvent
 from sensai.core.llm.ollama import OllamaClient
+from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
 
@@ -22,9 +23,11 @@ class Agent:
         self.client = client or OllamaClient(config.host)
         self.retriever = retriever
         self.rag_enabled = True
-        self.messages: list[dict] = []
-        if config.system_prompt:
-            self.messages.append({"role": "system", "content": config.system_prompt})
+        self.memory = ConversationMemory(config.system_prompt)
+
+    @property
+    def messages(self) -> list[dict]:
+        return self.memory.messages()
 
     def run(self, user_input: str) -> Iterator[Event]:
         user_input = user_input.strip()
@@ -38,7 +41,7 @@ class Agent:
                 yield SourcesEvent(sources)
                 prompt = build_prompt(user_input, sources)
 
-        pending = self.messages + [{"role": "user", "content": prompt}]
+        pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         answer: list[str] = []
         options = {"num_ctx": self.config.num_ctx}
         for chunk in self.client.chat_stream(self.config.model, pending, options, think=self.config.think):
@@ -46,8 +49,5 @@ class Agent:
             yield TokenEvent(chunk)
 
         content = "".join(answer)
-        self.messages = self.messages + [
-            {"role": "user", "content": user_input},
-            {"role": "assistant", "content": content},
-        ]
+        self.memory.commit(user_input, content)
         yield DoneEvent(content)
