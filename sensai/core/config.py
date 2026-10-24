@@ -19,6 +19,10 @@ class Config:
     num_ctx: int = 8192
     think: bool | None = None
 
+    compact_threshold: int = 75
+    keep_recent_turns: int = 4
+    response_reserve: int = 1024
+
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
     rag_top_k: int = 5
@@ -63,12 +67,17 @@ def load_config(path: Path | None = None) -> Config:
         system_prompt=os.getenv("SENSAI_SYSTEM_PROMPT", Config.system_prompt),
         num_ctx=_int_env("SENSAI_NUM_CTX", Config.num_ctx, minimum=512),
         think=_bool_env("SENSAI_THINK"),
+        compact_threshold=_int_env("SENSAI_COMPACT_THRESHOLD", Config.compact_threshold, minimum=10, maximum=95),
+        keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
+        response_reserve=_int_env("SENSAI_RESPONSE_RESERVE", Config.response_reserve, minimum=0),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
     )
+    if config.response_reserve >= config.num_ctx:
+        raise ConfigError("SENSAI_RESPONSE_RESERVE must be smaller than SENSAI_NUM_CTX")
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")
     return config
