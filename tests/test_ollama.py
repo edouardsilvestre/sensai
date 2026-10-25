@@ -6,7 +6,9 @@ from sensai.core.llm.ollama import OllamaClient, Usage
 class FakeOllama:
     def chat(self, stream: bool, **kwargs):
         if not stream:
-            return ChatResponse(message=Message(role="assistant", content="A summary."), done=True)
+            return ChatResponse(
+                message=Message(role="assistant", content="A summary."), done=True, prompt_eval_count=300, eval_count=20
+            )
         return self._stream()
 
     def _stream(self):
@@ -39,3 +41,9 @@ def test_usage_is_optional():
 
 def test_chat_returns_the_whole_answer():
     assert make_client().chat("model", []) == "A summary."
+
+
+def test_chat_fills_usage():
+    usage = Usage()
+    make_client().chat("model", [], usage=usage)
+    assert usage == Usage(prompt_tokens=300, completion_tokens=20)

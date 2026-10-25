@@ -40,8 +40,12 @@ class FakeClient:
         if usage is not None:
             usage.prompt_tokens, usage.completion_tokens = self.usage
 
-    def chat(self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None) -> str:
+    def chat(
+        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None
+    ) -> str:
         self.summaries.append(messages)
+        if usage is not None:
+            usage.prompt_tokens, usage.completion_tokens = 300, 20
         return self.summary
 
     def ensure_model(self, model: str) -> None:

@@ -101,7 +101,7 @@ def over_budget(config, client) -> None:
 def test_usage_of_the_last_turn_is_recorded(config, client):
     agent = Agent(config, client)
     list(agent.run("Hi"))
-    assert agent.last_usage.total_tokens == 110
+    assert agent.memory.last_usage.total_tokens == 110
 
 
 def test_citations_of_the_turn_are_kept_for_the_summary(config, client):
