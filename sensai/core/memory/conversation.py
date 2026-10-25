@@ -1,4 +1,9 @@
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from sensai.core.config import Config
+from sensai.core.llm.ollama import OllamaClient
+from sensai.core.memory.prompt import build_summary_prompt, summary_words
 
 SUMMARY_HEADER = "Summary of the earlier conversation (older turns were condensed into it):"
 
@@ -7,19 +12,32 @@ SUMMARY_HEADER = "Summary of the earlier conversation (older turns were condense
 class Turn:
     user: str
     assistant: str
+    citations: list[str] = field(default_factory=list)
 
     def messages(self) -> list[dict]:
         return [{"role": "user", "content": self.user}, {"role": "assistant", "content": self.assistant}]
 
 
+Summarizer = Callable[[str, list[Turn]], str]
+
+
 class ConversationMemory:
-    def __init__(self, system_prompt: str = ""):
-        self.system_prompt = system_prompt
+    def __init__(self, config: Config, client: OllamaClient | None = None):
+        self.config = config
+        self.client = client
         self.summary = ""
         self.turns: list[Turn] = []
 
+    @property
+    def keep_recent(self) -> int:
+        return self.config.keep_recent_turns
+
+    @property
+    def limit(self) -> int:
+        return self.config.num_ctx * self.config.compact_threshold / 100
+
     def system_message(self) -> dict | None:
-        parts = [self.system_prompt] if self.system_prompt else []
+        parts = [self.config.system_prompt] if self.config.system_prompt else []
         if self.summary:
             parts.append(f"{SUMMARY_HEADER}\n{self.summary}")
         return {"role": "system", "content": "\n\n".join(parts)} if parts else None
@@ -31,5 +49,26 @@ class ConversationMemory:
             messages += turn.messages()
         return messages
 
-    def commit(self, user: str, assistant: str) -> None:
-        self.turns = self.turns + [Turn(user, assistant)]
+    def commit(self, user: str, assistant: str, citations: list[str] | None = None) -> None:
+        self.turns = self.turns + [Turn(user, assistant, list(citations or []))]
+
+    def needs_compaction(self, used_tokens: int) -> bool:
+        return len(self.turns) > self.keep_recent and used_tokens >= self.limit
+
+    def compact(self, summarize: Summarizer | None = None) -> int:
+        summarize = summarize or self.summarize
+        # Nothing changes until `summarize` has returned, so a failed or interrupted summary leaves the memory intact.
+        old, recent = self.turns[: -self.keep_recent], self.turns[-self.keep_recent :]
+        if not old:
+            return 0
+        summary = summarize(self.summary, old).strip()
+        if not summary:
+            raise ValueError("The summary is empty")
+        self.summary, self.turns = summary, recent
+        return len(old)
+
+    def summarize(self, previous_summary: str, turns: list[Turn]) -> str:
+        prompt = build_summary_prompt(previous_summary, turns, summary_words(self.config.num_ctx))
+        options = {"num_ctx": self.config.num_ctx}
+        messages = [{"role": "user", "content": prompt}]
+        return self.client.chat(self.config.model, messages, options, think=self.config.think)
