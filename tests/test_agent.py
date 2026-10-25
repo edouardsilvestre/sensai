@@ -61,12 +61,12 @@ def test_no_results_means_a_plain_prompt(config, client):
     assert client.chats[0][0][-1]["content"] == "Hi"
 
 
-def test_disabled_rag_does_not_search(config, client):
+def test_disabled_rag_feature_does_not_search(config, client):
     retriever = FakeRetriever([RESULT])
-    agent = Agent(config, client, retriever)
-    agent.rag_enabled = False
-    list(agent.run("Hi"))
+    config.features["rag"] = False
+    list(Agent(config, client, retriever).run("Hi"))
     assert retriever.queries == []
+    assert client.chats[0][0][-1]["content"] == "Hi"
 
 
 def test_failed_turn_leaves_history_unchanged(config, client):
