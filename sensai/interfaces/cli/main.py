@@ -7,7 +7,14 @@ from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.config import Config, ConfigError, load_config
-from sensai.core.events import DoneEvent, SourcesEvent, TokenEvent
+from sensai.core.events import (
+    CompactionEvent,
+    CompactionFailedEvent,
+    CompactionStartedEvent,
+    DoneEvent,
+    SourcesEvent,
+    TokenEvent,
+)
 from sensai.core.llm.ollama import LLMError, OllamaClient
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -21,6 +28,7 @@ Commands:
   /ingest PATH...   index files or folders so that answers can draw on them
   /sources          show the excerpts retrieved for the last message
   /rag [on|off]     turn document search on or off
+  /context          show the context usage and the summary of older turns
   /exit, /quit      leave (or press Ctrl+D)"""
 
 
@@ -175,6 +183,12 @@ def chat_turn(session: Session, line: str) -> None:
                 print()
                 if sources:
                     print_sources(sources, event.content)
+            elif isinstance(event, CompactionStartedEvent):
+                print(f"[memory] context at {event.tokens}/{session.config.num_ctx} tokens, condensing the oldest turns...")
+            elif isinstance(event, CompactionEvent):
+                print(f"[memory] {plural(event.turns, 'turn')} condensed into the summary.")
+            elif isinstance(event, CompactionFailedEvent):
+                warning(f"Could not condense the history, retrying after the next message: {event.message}")
     except EmptyInputError:
         error("Empty message, please type something.")
     except (LLMError, StoreError) as e:
@@ -216,6 +230,20 @@ def rag_command(session: Session, argument: str) -> None:
         print(f"Document search is {state}.")
 
 
+def context_command(session: Session) -> None:
+    memory = session.agent.memory
+    usage = session.agent.last_usage
+    used = usage.total_tokens if usage else 0
+    print(
+        f"Context: {used}/{session.config.num_ctx} tokens used by the last message, "
+        f"older turns are condensed from {int(memory.limit)}."
+    )
+    print(f"History: {plural(len(memory.turns), 'turn')} kept verbatim.")
+    if memory.summary:
+        print("Summary of older turns:")
+        print(textwrap.indent(memory.summary, "    "))
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -229,6 +257,8 @@ def handle_command(session: Session, line: str) -> bool:
         rag_command(session, argument)
     elif name == "/ingest":
         ingest_command(session, argument)
+    elif name == "/context":
+        context_command(session)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
