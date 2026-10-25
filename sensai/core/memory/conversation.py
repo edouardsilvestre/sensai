@@ -53,14 +53,14 @@ class ConversationMemory:
         self.turns = self.turns + [Turn(user, assistant, list(citations or []))]
 
     def needs_compaction(self, used_tokens: int) -> bool:
-        return len(self.turns) > self.keep_recent and used_tokens >= self.limit
+        return bool(self.turns) and used_tokens >= self.limit
 
     def compact(self, summarize: Summarizer | None = None) -> int:
         summarize = summarize or self.summarize
+        # Keep the most recent turns verbatim when possible; past the limit with only recent turns, condense them too.
         # Nothing changes until `summarize` has returned, so a failed or interrupted summary leaves the memory intact.
-        old, recent = self.turns[: -self.keep_recent], self.turns[-self.keep_recent :]
-        if not old:
-            return 0
+        split = len(self.turns) - self.keep_recent if len(self.turns) > self.keep_recent else len(self.turns)
+        old, recent = self.turns[:split], self.turns[split:]
         summary = summarize(self.summary, old).strip()
         if not summary:
             raise ValueError("The summary is empty")

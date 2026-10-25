@@ -51,10 +51,15 @@ def test_compaction_is_needed_only_past_the_threshold():
     assert memory.needs_compaction(6144)
 
 
-def test_recent_turns_alone_are_never_compacted():
+def test_recent_turns_alone_are_compacted_past_the_threshold():
     memory = make(num_ctx=8192, threshold=75, keep_recent=4)
-    fill(memory, 4)
-    assert not memory.needs_compaction(8192)
+    fill(memory, 2)
+    assert not memory.needs_compaction(6143)
+    assert memory.needs_compaction(6144)
+
+
+def test_empty_history_is_never_compacted():
+    assert not make().needs_compaction(8192)
 
 
 def test_compaction_condenses_old_turns_and_keeps_recent_ones():
@@ -86,11 +91,14 @@ def test_summary_is_rolled_into_the_next_compaction():
     assert memory.summary == "second summary"
 
 
-def test_nothing_to_compact_with_only_recent_turns():
+def test_only_recent_turns_are_all_condensed():
     memory = make(keep_recent=4)
     fill(memory, 2)
-    assert memory.compact(lambda previous, turns: "unused") == 0
-    assert memory.summary == ""
+    seen = []
+    assert memory.compact(lambda previous, turns: seen.extend(turns) or "summary") == 2
+    assert [turn.user for turn in seen] == ["question 0", "question 1"]
+    assert memory.turns == []
+    assert memory.summary == "summary"
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("model crashed"), KeyboardInterrupt()])
