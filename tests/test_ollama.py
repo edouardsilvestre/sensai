@@ -4,7 +4,12 @@ from sensai.core.llm.ollama import OllamaClient, Usage
 
 
 class FakeOllama:
-    def chat(self, **kwargs):
+    def chat(self, stream: bool, **kwargs):
+        if not stream:
+            return ChatResponse(message=Message(role="assistant", content="A summary."), done=True)
+        return self._stream()
+
+    def _stream(self):
         yield ChatResponse(message=Message(role="assistant", content="Hello "), done=False)
         yield ChatResponse(message=Message(role="assistant", content="there"), done=False)
         yield ChatResponse(
@@ -30,3 +35,7 @@ def test_usage_is_filled_from_the_final_chunk():
 def test_usage_is_optional():
     assert list(make_client().chat_stream("model", [])) == ["Hello ", "there"]
 
+
+
+def test_chat_returns_the_whole_answer():
+    assert make_client().chat("model", []) == "A summary."
