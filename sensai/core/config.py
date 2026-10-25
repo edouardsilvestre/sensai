@@ -19,6 +19,9 @@ class Config:
     num_ctx: int = 8192
     think: bool | None = None
 
+    compact_threshold: int = 75
+    keep_recent_turns: int = 4
+
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
     rag_top_k: int = 5
@@ -63,6 +66,8 @@ def load_config(path: Path | None = None) -> Config:
         system_prompt=os.getenv("SENSAI_SYSTEM_PROMPT", Config.system_prompt),
         num_ctx=_int_env("SENSAI_NUM_CTX", Config.num_ctx, minimum=512),
         think=_bool_env("SENSAI_THINK"),
+        compact_threshold=_int_env("SENSAI_COMPACT_THRESHOLD", Config.compact_threshold, minimum=10, maximum=95),
+        keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),

@@ -1,7 +1,14 @@
 import pytest
 
 from sensai.core.agent import Agent
-from sensai.core.events import DoneEvent, SourcesEvent, TokenEvent
+from sensai.core.events import (
+    CompactionEvent,
+    CompactionFailedEvent,
+    CompactionStartedEvent,
+    DoneEvent,
+    SourcesEvent,
+    TokenEvent,
+)
 from sensai.core.llm.ollama import LLMError
 from sensai.core.rag.models import SearchResult
 
@@ -70,7 +77,7 @@ def test_disabled_rag_does_not_search(config, client):
 
 
 def test_failed_turn_leaves_history_unchanged(config, client):
-    def broken_stream(model, messages, options=None, think=None):
+    def broken_stream(model, messages, options=None, think=None, usage=None):
         yield "partial"
         raise LLMError("connection lost")
 
@@ -79,3 +86,65 @@ def test_failed_turn_leaves_history_unchanged(config, client):
     with pytest.raises(LLMError):
         list(agent.run("Who approved it?"))
     assert agent.messages == []
+
+
+def history(agent: Agent, turns: int) -> None:
+    for number in range(turns):
+        agent.memory.commit(f"question {number}", f"answer {number}")
+
+
+def over_budget(config, client) -> None:
+    config.keep_recent_turns = 2
+    client.usage = (config.num_ctx * config.compact_threshold // 100, 0)
+
+
+def test_usage_of_the_last_turn_is_recorded(config, client):
+    agent = Agent(config, client)
+    list(agent.run("Hi"))
+    assert agent.memory.last_usage.total_tokens == 110
+
+
+def test_citations_of_the_turn_are_kept_for_the_summary(config, client):
+    agent = Agent(config, client, FakeRetriever([RESULT]))
+    list(agent.run("Who approved it?"))
+    assert agent.memory.turns[0].citations == ["leak/mail.eml, p. 2"]
+
+
+def test_no_compaction_under_the_threshold(config, client):
+    agent = Agent(config, client)
+    history(agent, 5)
+    events = list(agent.run("Hi"))
+    assert not any(isinstance(event, CompactionStartedEvent) for event in events)
+    assert client.summaries == []
+
+
+def test_history_is_compacted_after_the_turn_that_crossed_the_threshold(config, client):
+    over_budget(config, client)
+    agent = Agent(config, client)
+    history(agent, 4)
+
+    events = list(agent.run("And then?"))
+
+    kinds = [type(event) for event in events]
+    assert kinds.index(DoneEvent) < kinds.index(CompactionStartedEvent) < kinds.index(CompactionEvent)
+    assert events[-1] == CompactionEvent(turns=3, tokens=client.usage[0])
+    assert [turn.user for turn in agent.memory.turns] == ["question 3", "And then?"]
+    assert "question 0" in client.summaries[0][0]["content"]
+
+    list(agent.run("Next"))
+    system = client.chats[-1][0][0]
+    assert system["role"] == "system" and "Alice approved the transfer." in system["content"]
+
+
+def test_failed_compaction_keeps_the_turn_and_the_history(config, client):
+    over_budget(config, client)
+    client.summary = "  "
+    agent = Agent(config, client)
+    history(agent, 4)
+
+    events = list(agent.run("And then?"))
+
+    assert isinstance(events[-1], CompactionFailedEvent)
+    assert len(agent.memory.turns) == 5
+    assert agent.memory.summary == ""
+

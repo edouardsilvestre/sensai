@@ -9,10 +9,13 @@ from sensai.core.config import Config
 class FakeClient:
     DIMENSIONS = 256
 
-    def __init__(self, answer: str = "Hello there"):
+    def __init__(self, answer: str = "Hello there", summary: str = "Facts: Alice approved the transfer."):
         self.answer = answer
+        self.summary = summary
+        self.usage = (100, 10)
         self.embedded: list[str] = []
         self.chats: list[tuple[list[dict], dict | None]] = []
+        self.summaries: list[list[dict]] = []
 
     def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
         self.embedded += texts
@@ -27,11 +30,23 @@ class FakeClient:
             vector[int(hashlib.md5(word.encode()).hexdigest(), 16) % cls.DIMENSIONS] += 1.0
         return vector
 
-    def chat_stream(self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None):
+    def chat_stream(
+        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None
+    ):
         self.chats.append((messages, options))
         self.think = think
         for word in self.answer.split(" "):
             yield word + " "
+        if usage is not None:
+            usage.prompt_tokens, usage.completion_tokens = self.usage
+
+    def chat(
+        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None
+    ) -> str:
+        self.summaries.append(messages)
+        if usage is not None:
+            usage.prompt_tokens, usage.completion_tokens = 300, 20
+        return self.summary
 
     def ensure_model(self, model: str) -> None:
         pass

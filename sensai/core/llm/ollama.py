@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 import httpx
 import ollama
@@ -25,6 +26,16 @@ class ModelNotFoundError(LLMError):
         super().__init__(f"Model '{model}' is not available. Installed models: {hint}")
 
 
+@dataclass
+class Usage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
 class OllamaClient:
     def __init__(self, host: str):
         self.host = host
@@ -45,16 +56,43 @@ class OllamaClient:
             raise ModelNotFoundError(model, available)
 
     def chat_stream(
-        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict | None = None,
+        think: bool | None = None,
+        usage: Usage | None = None,
     ) -> Iterator[str]:
         try:
             for chunk in self._client.chat(model=model, messages=messages, stream=True, options=options, think=think):
                 if chunk.message.content:
                     yield chunk.message.content
+                if chunk.done and usage is not None:
+                    usage.prompt_tokens = chunk.prompt_eval_count or 0
+                    usage.completion_tokens = chunk.eval_count or 0
         except (ConnectionError, httpx.HTTPError) as e:
             raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from e
         except ollama.ResponseError as e:
             raise self._response_error(model, e) from e
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict | None = None,
+        think: bool | None = None,
+        usage: Usage | None = None,
+    ) -> str:
+        try:
+            response = self._client.chat(model=model, messages=messages, stream=False, options=options, think=think)
+        except (ConnectionError, httpx.HTTPError) as e:
+            raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from e
+        except ollama.ResponseError as e:
+            raise self._response_error(model, e) from e
+        if usage is not None:
+            usage.prompt_tokens = response.prompt_eval_count or 0
+            usage.completion_tokens = response.eval_count or 0
+        return response.message.content or ""
 
     def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
         try:

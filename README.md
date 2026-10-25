@@ -85,7 +85,15 @@ Sources:
 | `/ingest PATH...` | index files or folders without leaving the chat |
 | `/sources` | show the full excerpts retrieved for the last message |
 | `/rag [on\|off]` | turn document search on or off |
+| `/context` | show the tokens used by the last message and the summary of older turns |
 | `/help` | list the commands |
+
+Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
+
+```
+[memory] context at 6230/8192 tokens, condensing the oldest turns...
+[memory] 3 turns condensed into the summary.
+```
 
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
 
@@ -100,6 +108,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation |
 | `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
+| `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
+| `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
