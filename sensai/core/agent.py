@@ -21,7 +21,6 @@ class Agent:
         self.config = config
         self.client = client or OllamaClient(config.host)
         self.retriever = retriever
-        self.rag_enabled = True
         self.messages: list[dict] = []
         if config.system_prompt:
             self.messages.append({"role": "system", "content": config.system_prompt})
@@ -32,7 +31,7 @@ class Agent:
             raise EmptyInputError("Empty message")
 
         prompt = user_input
-        if self.retriever is not None and self.rag_enabled:
+        if self.retriever is not None and self.config.features["rag"]:
             sources = self.retriever.search(user_input, self.config.rag_top_k)
             if sources:
                 yield SourcesEvent(sources)

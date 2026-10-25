@@ -1,14 +1,30 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 DEFAULT_ENV_PATH = Path(".env")
+FEATURE_PREFIX = "SENSAI_FEATURE_"
+
+
+@dataclass(frozen=True)
+class Feature:
+    description: str
+    default: bool = True
+
+
+FEATURES = {
+    "rag": Feature("answer from the indexed documents"),
+}
 
 
 class ConfigError(Exception):
     pass
+
+
+def default_features() -> dict[str, bool]:
+    return {name: feature.default for name, feature in FEATURES.items()}
 
 
 @dataclass
@@ -18,6 +34,7 @@ class Config:
     system_prompt: str = ""
     num_ctx: int = 8192
     think: bool | None = None
+    features: dict[str, bool] = field(default_factory=default_features)
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
@@ -51,6 +68,20 @@ def _bool_env(name: str) -> bool | None:
     raise ConfigError(f"{name} must be true or false, got '{raw}'")
 
 
+def _features_env() -> dict[str, bool]:
+    names = [name.removeprefix(FEATURE_PREFIX).lower() for name in os.environ if name.startswith(FEATURE_PREFIX)]
+    unknown = sorted(FEATURE_PREFIX + name.upper() for name in names if name not in FEATURES)
+    if unknown:
+        known = ", ".join(FEATURE_PREFIX + name.upper() for name in FEATURES)
+        raise ConfigError(f"Unknown feature {', '.join(unknown)}. Known features: {known}")
+    features = default_features()
+    for name in FEATURES:
+        value = _bool_env(FEATURE_PREFIX + name.upper())
+        if value is not None:
+            features[name] = value
+    return features
+
+
 def load_config(path: Path | None = None) -> Config:
     file_path = path or DEFAULT_ENV_PATH
     if path is not None and not file_path.exists():
@@ -63,6 +94,7 @@ def load_config(path: Path | None = None) -> Config:
         system_prompt=os.getenv("SENSAI_SYSTEM_PROMPT", Config.system_prompt),
         num_ctx=_int_env("SENSAI_NUM_CTX", Config.num_ctx, minimum=512),
         think=_bool_env("SENSAI_THINK"),
+        features=_features_env(),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
