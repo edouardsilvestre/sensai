@@ -6,7 +6,7 @@ from sensai.core.config import Config, ConfigError, load_config
 
 VARIABLES = [
     "SENSAI_MODEL", "OLLAMA_HOST", "SENSAI_SYSTEM_PROMPT", "SENSAI_NUM_CTX", "SENSAI_THINK", "SENSAI_COMPACT_THRESHOLD",
-    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_RESPONSE_RESERVE", "SENSAI_EMBED_MODEL",
+    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_EMBED_MODEL",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
 ]
 
@@ -35,9 +35,8 @@ def test_rag_settings_from_environment(env_file, monkeypatch):
 def test_budget_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_COMPACT_THRESHOLD", "60")
     monkeypatch.setenv("SENSAI_KEEP_RECENT_TURNS", "2")
-    monkeypatch.setenv("SENSAI_RESPONSE_RESERVE", "512")
     config = load_config(env_file)
-    assert (config.compact_threshold, config.keep_recent_turns, config.response_reserve) == (60, 2, 512)
+    assert (config.compact_threshold, config.keep_recent_turns) == (60, 2)
 
 
 @pytest.mark.parametrize(("value", "expected"), [("", None), ("false", False), ("0", False), ("True", True)])
@@ -57,8 +56,6 @@ def test_think_setting(env_file, monkeypatch, value, expected):
         ("SENSAI_COMPACT_THRESHOLD", "5"),
         ("SENSAI_COMPACT_THRESHOLD", "100"),
         ("SENSAI_KEEP_RECENT_TURNS", "0"),
-        ("SENSAI_RESPONSE_RESERVE", "-1"),
-        ("SENSAI_RESPONSE_RESERVE", "8192"),
     ],
 )
 def test_invalid_values_are_rejected(env_file, monkeypatch, name, value):
