@@ -75,13 +75,23 @@ class OllamaClient:
         except ollama.ResponseError as e:
             raise self._response_error(model, e) from e
 
-    def chat(self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None) -> str:
+    def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict | None = None,
+        think: bool | None = None,
+        usage: Usage | None = None,
+    ) -> str:
         try:
             response = self._client.chat(model=model, messages=messages, stream=False, options=options, think=think)
         except (ConnectionError, httpx.HTTPError) as e:
             raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from e
         except ollama.ResponseError as e:
             raise self._response_error(model, e) from e
+        if usage is not None:
+            usage.prompt_tokens = response.prompt_eval_count or 0
+            usage.completion_tokens = response.eval_count or 0
         return response.message.content or ""
 
     def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
