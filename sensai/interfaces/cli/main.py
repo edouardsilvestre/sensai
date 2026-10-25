@@ -232,7 +232,7 @@ def rag_command(session: Session, argument: str) -> None:
 
 def context_command(session: Session) -> None:
     memory = session.agent.memory
-    usage = session.agent.last_usage
+    usage = memory.last_usage
     used = usage.total_tokens if usage else 0
     print(
         f"Context: {used}/{session.config.num_ctx} tokens used by the last message, "
@@ -240,7 +240,8 @@ def context_command(session: Session) -> None:
     )
     print(f"History: {plural(len(memory.turns), 'turn')} kept verbatim.")
     if memory.summary:
-        print("Summary of older turns:")
+        size = f" ({memory.summary_usage.completion_tokens} tokens)" if memory.summary_usage else ""
+        print(f"Summary of older turns{size}:")
         print(textwrap.indent(memory.summary, "    "))
 
 
