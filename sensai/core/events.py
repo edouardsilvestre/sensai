@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
+from sensai.core.llm.ollama import ToolCall
 from sensai.core.rag.models import SearchResult
+from sensai.core.tools.registry import ToolResult
 
 
 @dataclass
@@ -11,6 +13,17 @@ class SourcesEvent:
 @dataclass
 class TokenEvent:
     text: str
+
+
+@dataclass
+class ToolCallEvent:
+    call: ToolCall
+
+
+@dataclass
+class ToolResultEvent:
+    call: ToolCall
+    result: ToolResult
 
 
 @dataclass
@@ -37,6 +50,8 @@ class CompactionFailedEvent:
 Event = (
     SourcesEvent
     | TokenEvent
+    | ToolCallEvent
+    | ToolResultEvent
     | DoneEvent
     | CompactionStartedEvent
     | CompactionEvent

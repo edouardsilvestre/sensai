@@ -10,11 +10,14 @@ from sensai.core.events import (
     Event,
     SourcesEvent,
     TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
 )
-from sensai.core.llm.ollama import LLMError, OllamaClient, Usage
+from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
+from sensai.core.tools.registry import ToolRegistry
 
 
 class EmptyInputError(ValueError):
@@ -26,11 +29,19 @@ class Retriever(Protocol):
 
 
 class Agent:
-    def __init__(self, config: Config, client: OllamaClient | None = None, retriever: Retriever | None = None):
+    def __init__(
+        self,
+        config: Config,
+        client: OllamaClient | None = None,
+        retriever: Retriever | None = None,
+        tools: ToolRegistry | None = None,
+    ):
         self.config = config
-        self.client = client or OllamaClient(config.host)
+        self.client = client or OllamaClient(config.host, config.ollama_api_key)
         self.retriever = retriever
         self.rag_enabled = True
+        self.tools = tools or ToolRegistry()
+        self.tools_enabled = True
         self.memory = ConversationMemory(config, self.client)
 
     @property
@@ -51,12 +62,30 @@ class Agent:
                 prompt = build_prompt(user_input, sources)
 
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
-        answer: list[str] = []
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
-        for chunk in self.client.chat_stream(self.config.model, pending, options, think=self.config.think, usage=usage):
-            answer.append(chunk)
-            yield TokenEvent(chunk)
+        functions = self.tools.tools() if self.tools_enabled else []
+        # After `max_tool_rounds` calls that requested tools, the next call has to answer.
+        max_rounds = self.config.max_tool_rounds
+        for round_number in range(max_rounds + 1):
+            answer: list[str] = []
+            calls: list[ToolCall] = []
+            tools = functions if round_number < max_rounds else []
+            for chunk in self.client.chat_stream(
+                self.config.model, pending, options, think=self.config.think, usage=usage,
+                tools=tools or None, tool_calls=calls,
+            ):
+                answer.append(chunk)
+                yield TokenEvent(chunk)
+            if not calls:
+                break
+            # Tool calls and results only live in this turn's messages, like the excerpts.
+            pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
+            for call in calls:
+                yield ToolCallEvent(call)
+                result = self.tools.execute(call)
+                yield ToolResultEvent(call, result)
+                pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
