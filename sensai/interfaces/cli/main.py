@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import Config, ConfigError, load_config
+from sensai.core.config import FEATURES, Config, ConfigError, load_config
 from sensai.core.events import DoneEvent, SourcesEvent, TokenEvent
 from sensai.core.llm.ollama import LLMError, OllamaClient
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
@@ -18,10 +18,11 @@ PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
 HELP = """\
 Commands:
-  /ingest PATH...   index files or folders so that answers can draw on them
-  /sources          show the excerpts retrieved for the last message
-  /rag [on|off]     turn document search on or off
-  /exit, /quit      leave (or press Ctrl+D)"""
+  /ingest PATH...         index files or folders so that answers can draw on them
+  /sources                show the excerpts retrieved for the last message
+  /features               list the features and whether they are on
+  /feature NAME on|off    turn a feature on or off for this session
+  /exit, /quit            leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -105,7 +106,12 @@ def run_ingest(config: Config, paths: list[Path], rebuild: bool) -> int:
         index.close()
 
 
+def feature_states(config: Config) -> str:
+    return ", ".join(f"{name} {'on' if enabled else 'off'}" for name, enabled in config.features.items())
+
+
 def run_status(config: Config) -> int:
+    print(f"Features: {feature_states(config)}")
     if not config.index_path.exists():
         print(f"No index at {config.index_path}. Create one with: python -m sensai ingest PATH")
         return 0
@@ -200,20 +206,31 @@ def ingest_command(session: Session, argument: str) -> None:
             error(str(e))
             return
         session.agent.retriever = session.index
-    ingest(session.index, paths)
+    if ingest(session.index, paths) and not session.config.features["rag"]:
+        print("The rag feature is off: /feature rag on to answer from these documents.")
 
 
-def rag_command(session: Session, argument: str) -> None:
-    if argument in ("on", "off"):
-        session.agent.rag_enabled = argument == "on"
-    elif argument:
-        error("Usage: /rag [on|off]")
+def list_features(session: Session) -> None:
+    width = max(len(name) for name in FEATURES)
+    for name, feature in FEATURES.items():
+        state = "on" if session.config.features[name] else "off"
+        print(f"  {name:<{width}}  {state:<3}  {feature.description}")
+
+
+def feature_command(session: Session, argument: str) -> None:
+    name, _, value = argument.lower().partition(" ")
+    value = value.strip()
+    if name not in FEATURES or value not in ("on", "off"):
+        error(f"Usage: /feature NAME on|off, with NAME among: {', '.join(FEATURES)}")
         return
-    state = "on" if session.agent.rag_enabled else "off"
-    if session.index is None:
-        print(f"Document search is {state}, but there is no index yet: use /ingest PATH.")
-    else:
-        print(f"Document search is {state}.")
+    session.config.features[name] = value == "on"
+    print(f"{name} is {value}.")
+    if name == "rag" and value == "on" and session.index is None:
+        if session.config.index_path.exists():
+            session.index = load_existing_index(session.config, session.agent.client)
+            session.agent.retriever = session.index
+        else:
+            print("No documents indexed yet: /ingest PATH to search your files.")
 
 
 def handle_command(session: Session, line: str) -> bool:
@@ -225,8 +242,10 @@ def handle_command(session: Session, line: str) -> bool:
         print(HELP)
     elif name == "/sources":
         show_excerpts(session.last_sources)
-    elif name == "/rag":
-        rag_command(session, argument)
+    elif name == "/features":
+        list_features(session)
+    elif name == "/feature":
+        feature_command(session, argument)
     elif name == "/ingest":
         ingest_command(session, argument)
     else:
@@ -252,14 +271,20 @@ def run_chat(config: Config) -> int:
         error(str(e))
         return 1
 
-    session = Session(config, agent, index=load_existing_index(config, agent.client))
-    agent.retriever = session.index
+    session = Session(config, agent)
+    if config.features["rag"]:
+        session.index = load_existing_index(config, agent.client)
+        agent.retriever = session.index
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
-    if session.index is not None:
-        stats = session.index.stats()
-        print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
-    else:
-        print("No documents indexed yet: /ingest PATH to search your files.")
+    disabled = [name for name, enabled in config.features.items() if not enabled]
+    if disabled:
+        print(f"Disabled features: {', '.join(disabled)}. /features to list them.")
+    if config.features["rag"]:
+        if session.index is not None:
+            stats = session.index.stats()
+            print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
+        else:
+            print("No documents indexed yet: /ingest PATH to search your files.")
 
     try:
         while True:
