@@ -18,4 +18,27 @@ class DoneEvent:
     content: str
 
 
-Event = SourcesEvent | TokenEvent | DoneEvent
+@dataclass
+class CompactionStartedEvent:
+    tokens: int
+
+
+@dataclass
+class CompactionEvent:
+    turns: int
+    tokens: int
+
+
+@dataclass
+class CompactionFailedEvent:
+    message: str
+
+
+Event = (
+    SourcesEvent
+    | TokenEvent
+    | DoneEvent
+    | CompactionStartedEvent
+    | CompactionEvent
+    | CompactionFailedEvent
+)
