@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 from sensai.core.config import Config
 from sensai.core.llm.ollama import OllamaClient
-from sensai.core.memory.prompt import build_summary_prompt, summary_words
+from sensai.core.memory.prompt import build_summary_prompt, summary_word_limit
 
 SUMMARY_HEADER = "Summary of the earlier conversation (older turns were condensed into it):"
 
@@ -68,7 +68,7 @@ class ConversationMemory:
         return len(old)
 
     def summarize(self, previous_summary: str, turns: list[Turn]) -> str:
-        prompt = build_summary_prompt(previous_summary, turns, summary_words(self.config.num_ctx))
+        prompt = build_summary_prompt(previous_summary, turns, summary_word_limit(self.config.num_ctx))
         options = {"num_ctx": self.config.num_ctx}
         messages = [{"role": "user", "content": prompt}]
         return self.client.chat(self.config.model, messages, options, think=self.config.think)
