@@ -32,7 +32,6 @@ class Agent:
         self.retriever = retriever
         self.rag_enabled = True
         self.memory = ConversationMemory(config, self.client)
-        self.last_usage: Usage | None = None
 
     @property
     def messages(self) -> list[dict]:
@@ -60,8 +59,7 @@ class Agent:
             yield TokenEvent(chunk)
 
         content = "".join(answer)
-        self.memory.commit(user_input, content, [source.citation for source in sources])
-        self.last_usage = usage
+        self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
 
         # The turn is saved: from here on, a failure only delays the compaction to the next turn.

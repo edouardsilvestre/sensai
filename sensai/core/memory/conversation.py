@@ -2,7 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sensai.core.config import Config
-from sensai.core.llm.ollama import OllamaClient
+from sensai.core.llm.ollama import OllamaClient, Usage
 from sensai.core.memory.prompt import build_summary_prompt, summary_word_limit
 
 SUMMARY_HEADER = "Summary of the earlier conversation (older turns were condensed into it):"
@@ -26,6 +26,8 @@ class ConversationMemory:
         self.config = config
         self.client = client
         self.summary = ""
+        self.last_usage: Usage | None = None
+        self.summary_usage: Usage | None = None
         self.turns: list[Turn] = []
 
     @property
@@ -36,21 +38,24 @@ class ConversationMemory:
     def limit(self) -> int:
         return self.config.num_ctx * self.config.compact_threshold / 100
 
-    def system_message(self) -> dict | None:
+    def _system_message(self) -> dict | None:
         parts = [self.config.system_prompt] if self.config.system_prompt else []
         if self.summary:
             parts.append(f"{SUMMARY_HEADER}\n{self.summary}")
         return {"role": "system", "content": "\n\n".join(parts)} if parts else None
 
     def messages(self) -> list[dict]:
-        system = self.system_message()
+        system = self._system_message()
         messages = [system] if system else []
         for turn in self.turns:
             messages += turn.messages()
         return messages
 
-    def commit(self, user: str, assistant: str, citations: list[str] | None = None) -> None:
+    def commit(
+        self, user: str, assistant: str, citations: list[str] | None = None, usage: Usage | None = None
+    ) -> None:
         self.turns = self.turns + [Turn(user, assistant, list(citations or []))]
+        self.last_usage = usage
 
     def needs_compaction(self, used_tokens: int) -> bool:
         return bool(self.turns) and used_tokens >= self.limit
@@ -71,4 +76,5 @@ class ConversationMemory:
         prompt = build_summary_prompt(previous_summary, turns, summary_word_limit(self.config.num_ctx))
         options = {"num_ctx": self.config.num_ctx}
         messages = [{"role": "user", "content": prompt}]
-        return self.client.chat(self.config.model, messages, options, think=self.config.think)
+        self.summary_usage = Usage()
+        return self.client.chat(self.config.model, messages, options, think=self.config.think, usage=self.summary_usage)
