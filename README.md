@@ -84,7 +84,8 @@ Sources:
 |---|---|
 | `/ingest PATH...` | index files or folders without leaving the chat |
 | `/sources` | show the full excerpts retrieved for the last message |
-| `/rag [on\|off]` | turn document search on or off |
+| `/features` | list the features and whether they are on |
+| `/feature NAME on\|off` | turn a feature on or off for the session |
 | `/help` | list the commands |
 
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
@@ -100,11 +101,27 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation |
 | `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
+| `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
 | `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
+
+### Features
+
+Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`true` or `false`), or during a chat with `/feature NAME on|off`. A misspelled feature variable stops Sensai with an error.
+
+To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
+
+```python
+FEATURES = {
+    "rag": Feature("answer from the indexed documents"),
+    "compaction": Feature("summarize older turns when the context fills up"),
+}
+```
+
+Then check `config.features["compaction"]` where the feature runs. `SENSAI_FEATURE_COMPACTION`, `/features` and `/feature compaction off` work without other changes.
 
 ### Tests
 
