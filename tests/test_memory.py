@@ -124,5 +124,5 @@ def test_the_model_writes_the_summary_by_default(config, client):
     assert memory.compact() == 2
     assert memory.summary == client.summary
     prompt = client.summaries[0][0]["content"]
-    assert "Journalist: question 0" in prompt and "Journalist: question 1" in prompt
+    assert "User: question 0" in prompt and "User: question 1" in prompt
     assert "question 2" not in prompt

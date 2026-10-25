@@ -15,16 +15,16 @@ def test_unknown_excerpt_numbers_are_not_resolved():
     assert "Excerpts cited" not in build_summary_prompt("", [turn], words=300)
 
 
-def test_previous_summary_transcript_and_size_are_included():
+def test_previous_summary_conversation_and_size_are_included():
     prompt = build_summary_prompt("Bob owns Acme.", [Turn("Hi", "Hello")], words=300)
 
-    assert "<previous_summary>\nBob owns Acme.\n</previous_summary>" in prompt
-    assert "Journalist: Hi\nAssistant: Hello" in prompt
+    assert "Previous summary:\nBob owns Acme." in prompt
+    assert "Conversation:\nUser: Hi\nAssistant: Hello" in prompt
     assert "at most 300 words" in prompt
 
 
 def test_first_summary_has_no_previous_one():
-    assert "(none yet)" in build_summary_prompt("", [Turn("Hi", "Hello")], words=300)
+    assert "Previous summary" not in build_summary_prompt("", [Turn("Hi", "Hello")], words=300)
 
 
 def test_summary_size_follows_the_context_window():
