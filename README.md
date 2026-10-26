@@ -8,7 +8,8 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 
 ### Key features
 
-- 🔒 **Fully offline**: no network access, no cloud, no data ever leaves the machine.
+- 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
+- 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: a structured knowledge graph of people, companies, accounts and their relationships: who is linked to whom, and how.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
@@ -31,6 +32,34 @@ Indexing (`python -m sensai ingest`):
 Files that did not change are skipped on the next run, and deleted files are removed from the index.
 
 Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
+
+### Tools
+
+The model can call tools with [Ollama's tool calling](https://docs.ollama.com/capabilities/tool-calling). A tool is a plain Python function: the Ollama SDK builds the description sent to the model from its type hints and its docstring (`Args:`, `Returns:`). The model answers with tool calls instead of text, Sensai runs them and sends the results back, and the model continues with them. A turn allows up to `SENSAI_MAX_TOOL_ROUNDS` rounds of calls, then the model has to answer.
+
+- `tools/registry.py`: `ToolRegistry` finds the function by name, checks the arguments against its signature and calls it. An unknown tool, a wrong argument or a `ToolError` is sent back to the model as the result, so it can fix its call instead of the turn crashing.
+- `tools/catalog.py`: `build_registry` lists the tools enabled in the configuration. Adding a tool is a documented function in a new module and one line there:
+
+```python
+def web_search(query: str) -> ToolResult:
+    """
+    Search the public web for recent or public facts that are not in the user's documents: ...
+
+    Args:
+      query: Keywords to search for
+
+    Returns:
+      The title, URL and content of the first results
+    """
+```
+
+A tool returns the text sent to the model, or a `ToolResult(content, summary)` when the CLI should also show a short summary (`[web_search] 5 results: ...`). A tool that needs settings is a method of a class that holds them: `catalog.py` registers `WebSearch(backend, max_results).web_search`, and Ollama only sees the `query` parameter.
+
+Like the excerpts, tool calls and results are only sent for the current message: the history keeps the question and the final answer.
+
+Tools need a model that supports them (`qwen3`, `llama3.1`, `mistral`...). With a model that does not, like `llama3`, Sensai warns at startup and chats without tools.
+
+**Web search** (`tools/web_search.py`) uses [Ollama's web search API](https://docs.ollama.com/capabilities/web-search), which needs a free API key from [ollama.com/settings/keys](https://ollama.com/settings/keys) in `OLLAMA_API_KEY`. The model gets the title, URL and content of the first `SENSAI_WEB_SEARCH_RESULTS` results, each page cut to 1500 characters so that they fit in the context window, and marked as untrusted data so that instructions hidden in a page are not followed. `SearchBackend` keeps the search engine separate from the tool, so it can be replaced without touching the rest.
 
 ## Getting Started
 
@@ -86,6 +115,7 @@ Sources:
 | `/sources` | show the full excerpts retrieved for the last message |
 | `/rag [on\|off]` | turn document search on or off |
 | `/context` | show the tokens used by the last message and the summary of older turns |
+| `/tools [on\|off]` | list the tools the model can call, or turn them on or off |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -93,6 +123,17 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 ```
 [memory] context at 6230/8192 tokens, condensing the oldest turns...
 [memory] 3 turns condensed into the summary.
+```
+
+With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
+
+```
+> Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
+[web_search] query="la dernière version stable de Python"
+[web_search] 5 results: www.python.org, devguide.python.org, docs.python.org
+La dernière version stable de Python publiée est Python 3.15.1 [...]
+
+URL de référence : https://www.python.org/downloads/latest/
 ```
 
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
@@ -115,6 +156,11 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
 | `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
+| `SENSAI_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
+| `SENSAI_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
+| `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
+| `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
+| `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 
 ### Tests
 

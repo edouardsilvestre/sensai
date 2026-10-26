@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,6 +27,12 @@ class Config:
     rag_top_k: int = 5
     chunk_size: int = 1200
     chunk_overlap: int = 200
+
+    tools: bool = True
+    web_search: bool = False
+    ollama_api_key: str = field(default="", repr=False)
+    web_search_results: int = 5
+    max_tool_rounds: int = 5
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -73,7 +79,14 @@ def load_config(path: Path | None = None) -> Config:
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
+        tools=_bool_env("SENSAI_TOOLS") is not False,
+        web_search=_bool_env("SENSAI_WEB_SEARCH") or False,
+        ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
+        web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
+        max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")
+    if config.tools and config.web_search and not config.ollama_api_key:
+        raise ConfigError("SENSAI_WEB_SEARCH needs OLLAMA_API_KEY: create a key on https://ollama.com/settings/keys")
     return config

@@ -16,6 +16,10 @@ class FakeClient:
         self.embedded: list[str] = []
         self.chats: list[tuple[list[dict], dict | None]] = []
         self.summaries: list[list[dict]] = []
+        # Tool calls returned by the next calls made with tools, one list per call.
+        self.tool_rounds: list[list] = []
+        self.tools_seen: list[list[dict] | None] = []
+        self.capable = True
 
     def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
         self.embedded += texts
@@ -31,12 +35,23 @@ class FakeClient:
         return vector
 
     def chat_stream(
-        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict | None = None,
+        think: bool | None = None,
+        usage=None,
+        tools: list | None = None,
+        tool_calls: list | None = None,
     ):
-        self.chats.append((messages, options))
+        self.chats.append((list(messages), options))
         self.think = think
-        for word in self.answer.split(" "):
-            yield word + " "
+        self.tools_seen.append(tools)
+        if tools and self.tool_rounds:
+            tool_calls += self.tool_rounds.pop(0)
+        else:
+            for word in self.answer.split(" "):
+                yield word + " "
         if usage is not None:
             usage.prompt_tokens, usage.completion_tokens = self.usage
 
@@ -50,6 +65,9 @@ class FakeClient:
 
     def ensure_model(self, model: str) -> None:
         pass
+
+    def can_call_tools(self, model: str) -> bool:
+        return self.capable
 
 
 @pytest.fixture

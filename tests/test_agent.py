@@ -8,9 +8,12 @@ from sensai.core.events import (
     DoneEvent,
     SourcesEvent,
     TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
 )
-from sensai.core.llm.ollama import LLMError
+from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.rag.models import SearchResult
+from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 
 class FakeRetriever:
@@ -77,7 +80,7 @@ def test_disabled_rag_does_not_search(config, client):
 
 
 def test_failed_turn_leaves_history_unchanged(config, client):
-    def broken_stream(model, messages, options=None, think=None, usage=None):
+    def broken_stream(model, messages, options=None, think=None, usage=None, **kwargs):
         yield "partial"
         raise LLMError("connection lost")
 
@@ -148,3 +151,98 @@ def test_failed_compaction_keeps_the_turn_and_the_history(config, client):
     assert len(agent.memory.turns) == 5
     assert agent.memory.summary == ""
 
+
+
+class Lookup:
+    def __init__(self):
+        self.queries: list[str] = []
+
+        def lookup(query: str) -> str:
+            """
+            Look a company up.
+
+            Args:
+              query: The company name
+
+            Returns:
+              Where the company is registered
+            """
+            self.queries.append(query)
+            return f"{query} is registered in Lisbon."
+
+        self.function = lookup
+
+
+def tool_agent(config, client) -> tuple[Agent, Lookup]:
+    tool = Lookup()
+    return Agent(config, client, tools=ToolRegistry([tool.function])), tool
+
+
+def test_without_tools_no_schema_is_sent(config, client):
+    list(Agent(config, client).run("Hi"))
+    assert client.tools_seen == [None]
+
+
+def test_tool_call_is_run_and_its_result_sent_back(config, client):
+    agent, tool = tool_agent(config, client)
+    client.tool_rounds = [[ToolCall("lookup", {"query": "Alvor"})]]
+
+    events = list(agent.run("Where is Alvor based?"))
+
+    call = ToolCall("lookup", {"query": "Alvor"})
+    assert events[0] == ToolCallEvent(call)
+    assert events[1] == ToolResultEvent(call, ToolResult("Alvor is registered in Lisbon."))
+    assert events[-1] == DoneEvent("Hello there ")
+    assert tool.queries == ["Alvor"]
+    assert client.tools_seen[0] == [tool.function]
+    messages = client.chats[1][0]
+    assert messages[-2] == {
+        "role": "assistant", "content": "", "tool_calls": [{"function": {"name": "lookup", "arguments": {"query": "Alvor"}}}],
+    }
+    assert messages[-1] == {"role": "tool", "tool_name": "lookup", "content": "Alvor is registered in Lisbon."}
+
+
+def test_only_the_final_answer_is_kept_in_memory(config, client):
+    agent, _ = tool_agent(config, client)
+    client.tool_rounds = [[ToolCall("lookup", {"query": "Alvor"})]]
+    list(agent.run("Where is Alvor based?"))
+    assert agent.messages == [
+        {"role": "user", "content": "Where is Alvor based?"},
+        {"role": "assistant", "content": "Hello there "},
+    ]
+
+
+def test_parallel_calls_each_get_a_result(config, client):
+    agent, tool = tool_agent(config, client)
+    client.tool_rounds = [[ToolCall("lookup", {"query": "Alvor"}), ToolCall("lookup", {"query": "Vidal"})]]
+    list(agent.run("Alvor and Vidal?"))
+    assert tool.queries == ["Alvor", "Vidal"]
+    assert [m["role"] for m in client.chats[1][0][-3:]] == ["assistant", "tool", "tool"]
+
+
+def test_failed_tool_call_is_sent_back_to_the_model(config, client):
+    agent, _ = tool_agent(config, client)
+    client.tool_rounds = [[ToolCall("unknown", {})]]
+    events = list(agent.run("Hi"))
+    result = next(event for event in events if isinstance(event, ToolResultEvent)).result
+    assert result.error
+    assert client.chats[1][0][-1]["content"] == result.content
+
+
+def test_tool_rounds_are_capped(config, client):
+    config.max_tool_rounds = 2
+    agent, tool = tool_agent(config, client)
+    client.tool_rounds = [[ToolCall("lookup", {"query": str(n)})] for n in range(5)]
+
+    events = list(agent.run("Search forever"))
+
+    assert len(tool.queries) == 2
+    assert client.tools_seen[-1] is None
+    assert events[-1] == DoneEvent("Hello there ")
+
+
+def test_disabled_tools_are_not_offered(config, client):
+    agent, _ = tool_agent(config, client)
+    agent.tools_enabled = False
+    list(agent.run("Hi"))
+    assert client.tools_seen == [None]
