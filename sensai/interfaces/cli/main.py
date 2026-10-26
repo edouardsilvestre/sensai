@@ -25,7 +25,7 @@ from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.tools.catalog import build_registry
-from sensai.core.tools.registry import ToolRegistry
+from sensai.core.tools.registry import ToolError, ToolRegistry
 
 PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
@@ -175,7 +175,15 @@ def show_excerpts(sources: list[SearchResult]) -> None:
 
 
 def describe_call(call: ToolCall) -> str:
-    return ", ".join(f"{name}={json.dumps(value, ensure_ascii=False)}" for name, value in call.arguments.items())
+    # Multi-line arguments, like code, are shown as indented blocks instead of one escaped line.
+    inline = []
+    blocks = []
+    for name, value in call.arguments.items():
+        if isinstance(value, str) and "\n" in value.strip():
+            blocks.append(f"\n  {name}:\n" + textwrap.indent(value.strip("\n"), "    "))
+        else:
+            inline.append(f"{name}={json.dumps(value, ensure_ascii=False)}")
+    return f"[{call.name}] {', '.join(inline)}".rstrip() + "".join(blocks)
 
 
 def chat_turn(session: Session, line: str) -> None:
@@ -196,7 +204,7 @@ def chat_turn(session: Session, line: str) -> None:
                 if mid_line:
                     print()
                     mid_line = False
-                print(f"[{event.call.name}] {describe_call(event.call)}")
+                print(describe_call(event.call))
             elif isinstance(event, ToolResultEvent):
                 if event.result.error:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
@@ -264,7 +272,8 @@ def tools_command(session: Session, argument: str) -> None:
         if not session.config.tools:
             print("Tools are disabled by SENSAI_TOOLS=false.")
         else:
-            print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web.")
+            print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web,")
+            print("or SENSAI_CODE_EXEC=true to let it run Python code in Docker.")
         return
     print(f"Tools are {'on' if agent.tools_enabled else 'off'}:")
     for tool in agent.tools.tools():
@@ -324,6 +333,14 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
+    if "run_python" in tools.names():
+        # The tool is a bound method: its object is the CodeRunner that holds the settings.
+        runner = next(tool.__self__ for tool in tools.tools() if tool.__name__ == "run_python")
+        try:
+            runner.prepare()
+        except ToolError as e:
+            warning(f"Code execution disabled: {e}")
+            return ToolRegistry(tool for tool in tools.tools() if tool.__name__ != "run_python")
     return tools
 
 
