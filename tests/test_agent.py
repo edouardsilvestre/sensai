@@ -13,6 +13,7 @@ from sensai.core.events import (
 )
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.rag.models import SearchResult
+from sensai.core.tools.code_runner import CodeRunner, Execution
 from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 
@@ -246,3 +247,25 @@ def test_disabled_tools_are_not_offered(config, client):
     agent.tools_enabled = False
     list(agent.run("Hi"))
     assert client.tools_seen == [None]
+
+
+def test_the_model_sees_its_traceback_and_runs_fixed_code(config, client):
+    def execute(code: str, image: str, timeout: int) -> Execution:
+        if "/ 0" in code:
+            return Execution("", "Traceback (most recent call last):\nZeroDivisionError: division by zero\n", 1)
+        return Execution("2.5\n", "", 0)
+
+    runner = CodeRunner("python:3.12-slim", 10, execute)
+    agent = Agent(config, client, tools=ToolRegistry([runner.run_python]))
+    client.tool_rounds = [
+        [ToolCall("run_python", {"code": "print(5 / 0)"})],
+        [ToolCall("run_python", {"code": "print(5 / 2)"})],
+    ]
+
+    events = list(agent.run("What is 5 divided by 2?"))
+
+    results = [event.result for event in events if isinstance(event, ToolResultEvent)]
+    assert [result.summary for result in results] == ["exit 1: ZeroDivisionError", "ok"]
+    assert "ZeroDivisionError" in client.chats[1][0][-1]["content"]
+    assert "2.5" in client.chats[2][0][-1]["content"]
+    assert events[-1] == DoneEvent("Hello there ")

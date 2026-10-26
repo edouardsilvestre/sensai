@@ -9,6 +9,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_EMBED_MODEL",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
+    "SENSAI_CODE_EXEC", "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE",
 ]
 
 
@@ -80,6 +81,15 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
     assert (config.max_tool_rounds, config.web_search_results) == (3, 8)
 
 
+def test_code_exec_settings_from_environment(env_file, monkeypatch):
+    assert load_config(env_file).code_exec is False
+    monkeypatch.setenv("SENSAI_CODE_EXEC", "true")
+    monkeypatch.setenv("SENSAI_CODE_TIMEOUT", "30")
+    monkeypatch.setenv("SENSAI_SANDBOX_IMAGE", "python:3.13-slim")
+    config = load_config(env_file)
+    assert (config.code_exec, config.code_timeout, config.sandbox_image) == (True, 30, "python:3.13-slim")
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -97,6 +107,9 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
         ("SENSAI_MAX_TOOL_ROUNDS", "50"),
         ("SENSAI_WEB_SEARCH_RESULTS", "0"),
         ("SENSAI_WEB_SEARCH_RESULTS", "11"),
+        ("SENSAI_CODE_EXEC", "maybe"),
+        ("SENSAI_CODE_TIMEOUT", "0"),
+        ("SENSAI_CODE_TIMEOUT", "61"),
     ],
 )
 def test_invalid_values_are_rejected(env_file, monkeypatch, name, value):
