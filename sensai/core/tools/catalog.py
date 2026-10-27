@@ -9,6 +9,6 @@ def build_registry(config: Config, client: OllamaClient) -> ToolRegistry:
     tools = []
     if not config.features["tools"]:
         return ToolRegistry()
-    if config.web_search:
+    if config.features["web_search"]:
         tools.append(WebSearch(OllamaSearchBackend(client), config.web_search_results).web_search)
     return ToolRegistry(tools)
