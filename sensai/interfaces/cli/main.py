@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import FEATURES, Config, ConfigError, load_config
+from sensai.core.config import API_KEY_HELP, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
@@ -253,7 +253,7 @@ def tools_command(session: Session) -> None:
         print("The tools feature is off: /feature tools on to let the model call tools.")
         return
     if not agent.tools:
-        print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web.")
+        print("No tool is enabled: /feature web_search on to let the model search the web.")
         return
     print("Tools:")
     for tool in agent.tools.tools():
@@ -289,25 +289,31 @@ def feature_command(session: Session, argument: str) -> None:
     if name not in FEATURES or value not in ("on", "off"):
         error(f"Usage: /feature NAME on|off, with NAME among: {', '.join(FEATURES)}")
         return
-    session.config.features[name] = value == "on"
-    print(f"{name} is {value}.")
-    if value == "off":
+    config = session.config
+    if name == "web_search" and value == "on" and not config.ollama_api_key:
+        error(f"web_search needs OLLAMA_API_KEY in .env: {API_KEY_HELP}")
         return
-    if name == "rag" and session.index is None:
-        if session.config.index_path.exists():
-            session.index = load_existing_index(session.config, session.agent.client)
+    config.features[name] = value == "on"
+    print(f"{name} is {value}.")
+    if name in ("tools", "web_search") and config.features["tools"]:
+        # The registry only holds the tools enabled when it was built: build it again to add or remove one.
+        reload_tools(session)
+    if name == "rag" and value == "on" and session.index is None:
+        if config.index_path.exists():
+            session.index = load_existing_index(config, session.agent.client)
             session.agent.retriever = session.index
         else:
             print("No documents indexed yet: /ingest PATH to search your files.")
-    elif name == "tools" and not session.agent.tools:
-        # Turned off at startup, the tools were never built.
-        try:
-            session.agent.tools = load_tools(session.config, session.agent.client)
-        except LLMError as e:
-            error(str(e))
-            return
-        if session.agent.tools:
-            print(f"Tools: {', '.join(session.agent.tools.names())}. /tools to see what they do.")
+
+
+def reload_tools(session: Session) -> None:
+    try:
+        session.agent.tools = load_tools(session.config, session.agent.client)
+    except LLMError as e:
+        error(str(e))
+        return
+    if session.agent.tools:
+        print(f"Tools: {', '.join(session.agent.tools.names())}. /tools to see what they do.")
 
 
 def handle_command(session: Session, line: str) -> bool:

@@ -26,6 +26,7 @@ def test_features_lists_every_feature(session, capsys):
     assert lines == [
         ["rag", "on", "answer from the indexed documents"],
         ["tools", "on", "let the model call the tools enabled in the configuration"],
+        ["web_search", "off", "let the model search the web; the queries are sent to Ollama's web search"],
     ]
 
 
@@ -53,11 +54,28 @@ def test_tools_feature_can_be_turned_off(session, capsys):
 
 def test_turning_tools_on_builds_them(config, client, capsys):
     config.features["tools"] = False
-    config.web_search = True
+    config.features["web_search"] = True
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature tools on")
     assert session.agent.tools.names() == ["web_search"]
     assert "Tools: web_search" in capsys.readouterr().out
+
+
+def test_web_search_can_be_turned_on_and_off_during_a_chat(config, client, capsys):
+    config.ollama_api_key = "secret"
+    session = Session(config, Agent(config, client))
+    handle_command(session, "/feature web_search on")
+    assert session.agent.tools.names() == ["web_search"]
+    handle_command(session, "/feature web_search off")
+    assert not session.agent.tools
+    handle_command(session, "/tools")
+    assert "No tool is enabled: /feature web_search on" in capsys.readouterr().out
+
+
+def test_web_search_needs_the_api_key_to_be_turned_on(session, capsys):
+    handle_command(session, "/feature web_search on")
+    assert session.config.features["web_search"] is False and not session.agent.tools
+    assert "web_search needs OLLAMA_API_KEY" in capsys.readouterr().err
 
 
 def test_tools_lists_the_enabled_tools(session, capsys):
@@ -69,4 +87,4 @@ def test_tools_lists_the_enabled_tools(session, capsys):
 def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
-    assert "Features: rag off, tools on" in capsys.readouterr().out
+    assert "Features: rag off, tools on, web_search off" in capsys.readouterr().out
