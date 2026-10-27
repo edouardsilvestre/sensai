@@ -39,9 +39,7 @@ class Agent:
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
         self.retriever = retriever
-        self.rag_enabled = True
         self.tools = tools or ToolRegistry()
-        self.tools_enabled = True
         self.memory = ConversationMemory(config, self.client)
 
     @property
@@ -55,7 +53,7 @@ class Agent:
 
         prompt = user_input
         sources: list[SearchResult] = []
-        if self.retriever is not None and self.rag_enabled:
+        if self.retriever is not None and self.config.features["rag"]:
             sources = self.retriever.search(user_input, self.config.rag_top_k)
             if sources:
                 yield SourcesEvent(sources)
@@ -64,7 +62,7 @@ class Agent:
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
-        functions = self.tools.tools() if self.tools_enabled else []
+        functions = self.tools.tools() if self.config.features["tools"] else []
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.
         max_rounds = self.config.max_tool_rounds
         for round_number in range(max_rounds + 1):

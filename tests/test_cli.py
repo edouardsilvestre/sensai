@@ -1,6 +1,7 @@
 import pytest
 
 from sensai.core.agent import Agent
+from sensai.core.tools.registry import ToolRegistry
 from sensai.interfaces.cli.main import Session, handle_command, run_status
 
 
@@ -9,9 +10,23 @@ def session(config, client):
     return Session(config, Agent(config, client))
 
 
+def lookup(query: str) -> str:
+    """
+    Look something up.
+
+    Args:
+      query: What to look up
+    """
+    return query
+
+
 def test_features_lists_every_feature(session, capsys):
     handle_command(session, "/features")
-    assert capsys.readouterr().out.split() == ["rag", "on", "answer", "from", "the", "indexed", "documents"]
+    lines = [line.split(maxsplit=2) for line in capsys.readouterr().out.splitlines()]
+    assert lines == [
+        ["rag", "on", "answer from the indexed documents"],
+        ["tools", "on", "let the model call the tools enabled in the configuration"],
+    ]
 
 
 def test_feature_can_be_turned_off_and_on(session, capsys):
@@ -29,7 +44,29 @@ def test_invalid_feature_command(session, capsys, argument):
     assert "Usage: /feature NAME on|off" in capsys.readouterr().err
 
 
+def test_tools_feature_can_be_turned_off(session, capsys):
+    session.agent.tools = ToolRegistry([lookup])
+    handle_command(session, "/feature tools off")
+    handle_command(session, "/tools")
+    assert "The tools feature is off" in capsys.readouterr().out
+
+
+def test_turning_tools_on_builds_them(config, client, capsys):
+    config.features["tools"] = False
+    config.web_search = True
+    session = Session(config, Agent(config, client))
+    handle_command(session, "/feature tools on")
+    assert session.agent.tools.names() == ["web_search"]
+    assert "Tools: web_search" in capsys.readouterr().out
+
+
+def test_tools_lists_the_enabled_tools(session, capsys):
+    session.agent.tools = ToolRegistry([lookup])
+    handle_command(session, "/tools")
+    assert "lookup: Look something up." in capsys.readouterr().out
+
+
 def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
-    assert "Features: rag off" in capsys.readouterr().out
+    assert "Features: rag off, tools on" in capsys.readouterr().out

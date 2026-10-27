@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import Config, ConfigError, load_config
+from sensai.core.config import FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
@@ -31,12 +31,13 @@ PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
 HELP = """\
 Commands:
-  /ingest PATH...   index files or folders so that answers can draw on them
-  /sources          show the excerpts retrieved for the last message
-  /rag [on|off]     turn document search on or off
-  /tools [on|off]   list the tools the model can call, or turn them on or off
-  /context          show the context usage and the summary of older turns
-  /exit, /quit      leave (or press Ctrl+D)"""
+  /ingest PATH...         index files or folders so that answers can draw on them
+  /sources                show the excerpts retrieved for the last message
+  /tools                  list the tools the model can call
+  /context                show the context usage and the summary of older turns
+  /features               list the features and whether they are on
+  /feature NAME on|off    turn a feature on or off for this session
+  /exit, /quit            leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -120,7 +121,12 @@ def run_ingest(config: Config, paths: list[Path], rebuild: bool) -> int:
         index.close()
 
 
+def feature_states(config: Config) -> str:
+    return ", ".join(f"{name} {'on' if enabled else 'off'}" for name, enabled in config.features.items())
+
+
 def run_status(config: Config) -> int:
+    print(f"Features: {feature_states(config)}")
     if not config.index_path.exists():
         print(f"No index at {config.index_path}. Create one with: python -m sensai ingest PATH")
         return 0
@@ -237,36 +243,19 @@ def ingest_command(session: Session, argument: str) -> None:
             error(str(e))
             return
         session.agent.retriever = session.index
-    ingest(session.index, paths)
+    if ingest(session.index, paths) and not session.config.features["rag"]:
+        print("The rag feature is off: /feature rag on to answer from these documents.")
 
 
-def rag_command(session: Session, argument: str) -> None:
-    if argument in ("on", "off"):
-        session.agent.rag_enabled = argument == "on"
-    elif argument:
-        error("Usage: /rag [on|off]")
-        return
-    state = "on" if session.agent.rag_enabled else "off"
-    if session.index is None:
-        print(f"Document search is {state}, but there is no index yet: use /ingest PATH.")
-    else:
-        print(f"Document search is {state}.")
-
-
-def tools_command(session: Session, argument: str) -> None:
+def tools_command(session: Session) -> None:
     agent = session.agent
-    if argument in ("on", "off"):
-        agent.tools_enabled = argument == "on"
-    elif argument:
-        error("Usage: /tools [on|off]")
+    if not session.config.features["tools"]:
+        print("The tools feature is off: /feature tools on to let the model call tools.")
         return
     if not agent.tools:
-        if not session.config.tools:
-            print("Tools are disabled by SENSAI_TOOLS=false.")
-        else:
-            print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web.")
+        print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web.")
         return
-    print(f"Tools are {'on' if agent.tools_enabled else 'off'}:")
+    print("Tools:")
     for tool in agent.tools.tools():
         description = " ".join((inspect.getdoc(tool) or "").split("\n\n")[0].split())
         print(f"  {tool.__name__}: {description}")
@@ -287,6 +276,40 @@ def context_command(session: Session) -> None:
         print(textwrap.indent(memory.summary, "    "))
 
 
+def list_features(session: Session) -> None:
+    width = max(len(name) for name in FEATURES)
+    for name, feature in FEATURES.items():
+        state = "on" if session.config.features[name] else "off"
+        print(f"  {name:<{width}}  {state:<3}  {feature.description}")
+
+
+def feature_command(session: Session, argument: str) -> None:
+    name, _, value = argument.lower().partition(" ")
+    value = value.strip()
+    if name not in FEATURES or value not in ("on", "off"):
+        error(f"Usage: /feature NAME on|off, with NAME among: {', '.join(FEATURES)}")
+        return
+    session.config.features[name] = value == "on"
+    print(f"{name} is {value}.")
+    if value == "off":
+        return
+    if name == "rag" and session.index is None:
+        if session.config.index_path.exists():
+            session.index = load_existing_index(session.config, session.agent.client)
+            session.agent.retriever = session.index
+        else:
+            print("No documents indexed yet: /ingest PATH to search your files.")
+    elif name == "tools" and not session.agent.tools:
+        # Turned off at startup, the tools were never built.
+        try:
+            session.agent.tools = load_tools(session.config, session.agent.client)
+        except LLMError as e:
+            error(str(e))
+            return
+        if session.agent.tools:
+            print(f"Tools: {', '.join(session.agent.tools.names())}. /tools to see what they do.")
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -296,14 +319,16 @@ def handle_command(session: Session, line: str) -> bool:
         print(HELP)
     elif name == "/sources":
         show_excerpts(session.last_sources)
-    elif name == "/rag":
-        rag_command(session, argument)
     elif name == "/tools":
-        tools_command(session, argument)
+        tools_command(session)
     elif name == "/ingest":
         ingest_command(session, argument)
     elif name == "/context":
         context_command(session)
+    elif name == "/features":
+        list_features(session)
+    elif name == "/feature":
+        feature_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -336,14 +361,20 @@ def run_chat(config: Config) -> int:
         error(str(e))
         return 1
 
-    session = Session(config, agent, index=load_existing_index(config, agent.client))
-    agent.retriever = session.index
+    session = Session(config, agent)
+    if config.features["rag"]:
+        session.index = load_existing_index(config, agent.client)
+        agent.retriever = session.index
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
-    if session.index is not None:
-        stats = session.index.stats()
-        print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
-    else:
-        print("No documents indexed yet: /ingest PATH to search your files.")
+    disabled = [name for name, enabled in config.features.items() if not enabled]
+    if disabled:
+        print(f"Disabled features: {', '.join(disabled)}. /features to list them.")
+    if config.features["rag"]:
+        if session.index is not None:
+            stats = session.index.stats()
+            print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
+        else:
+            print("No documents indexed yet: /ingest PATH to search your files.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
 

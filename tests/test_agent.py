@@ -241,8 +241,8 @@ def test_tool_rounds_are_capped(config, client):
     assert events[-1] == DoneEvent("Hello there ")
 
 
-def test_disabled_tools_are_not_offered(config, client):
+def test_disabled_tools_feature_offers_no_tool(config, client):
     agent, _ = tool_agent(config, client)
-    agent.tools_enabled = False
+    config.features["tools"] = False
     list(agent.run("Hi"))
     assert client.tools_seen == [None]
