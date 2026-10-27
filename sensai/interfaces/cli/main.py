@@ -20,6 +20,8 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
+from sensai.core.memory.profile import Profile, ProfileError
+from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
@@ -31,17 +33,27 @@ PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
 HELP = """\
 Commands:
-  /ingest PATH...   index files or folders so that answers can draw on them
-  /sources          show the excerpts retrieved for the last message
-  /rag [on|off]     turn document search on or off
-  /tools [on|off]   list the tools the model can call, or turn them on or off
-  /context          show the context usage and the summary of older turns
-  /exit, /quit      leave (or press Ctrl+D)"""
+  /ingest PATH...         index files or folders so that answers can draw on them
+  /sources                show the excerpts retrieved for the last message
+  /rag [on|off]           turn document search on or off
+  /tools [on|off]         list the tools the model can call, or turn them on or off
+  /context                show the context usage and the summary of older turns
+  /sessions               list the saved conversations
+  /resume [ID]            continue a saved conversation (the last one without ID)
+  /new                    start a new conversation, the current one stays saved
+  /profile                show the instructions the model gets about you
+  /profile add TEXT       add an instruction to your profile
+  /profile remove N       remove instruction N from your profile
+  /exit, /quit            leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="sensai", description="Sensai CLI chatbot")
     parser.add_argument("-e", "--env-file", dest="env_path", type=Path, help="Path to a .env file (default: ./.env)")
+    parser.add_argument(
+        "-r", "--resume", nargs="?", const="last", metavar="ID",
+        help="continue a saved conversation (the last one without ID)",
+    )
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     commands.add_parser("chat", help="chat with the model (default)")
     ingest_parser = commands.add_parser("ingest", help="index documents for search")
@@ -149,6 +161,10 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    store: SessionStore | None = None
+    # Given at the first save, so that a conversation without any message is never saved.
+    session_id: str | None = None
+    profile: Profile | None = None
 
 
 def print_sources(sources: list[SearchResult], answer: str) -> None:
@@ -219,6 +235,113 @@ def chat_turn(session: Session, line: str) -> None:
         error(str(e))
     except KeyboardInterrupt:
         print("\n[interrupted]")
+    save_session(session)
+
+
+def save_session(session: Session) -> None:
+    memory = session.agent.memory
+    if session.store is None or not session.config.features["sessions"] or not (memory.turns or memory.summary):
+        return
+    if session.session_id is None:
+        session.session_id = session.store.new_id()
+    try:
+        session.store.save(session.session_id, memory, session.config.model)
+    except SessionError as e:
+        warning(f"The conversation is not saved: {e}")
+
+
+def sessions_enabled(session: Session) -> bool:
+    if not session.config.features["sessions"]:
+        print("The sessions feature is off: /feature sessions on to save and resume conversations.")
+        return False
+    return session.store is not None
+
+
+def sessions_command(session: Session) -> None:
+    if not sessions_enabled(session):
+        return
+    saved = session.store.list()
+    if not saved:
+        print(f"No saved conversation yet in {session.store.directory}.")
+        return
+    for info in saved:
+        current = "*" if info.id == session.session_id else " "
+        print(f"{current} {info.id}  {info.updated:%Y-%m-%d %H:%M}  {plural(info.turns, 'turn'):>9}  {info.title}")
+    print("/resume ID to continue one of them.")
+
+
+def resume(session: Session, session_id: str) -> bool:
+    if session_id == "last":
+        session_id = session.store.latest()
+        if session_id is None:
+            print("No saved conversation yet: this one is saved after your first message.")
+            return False
+    try:
+        turns = session.store.load(session_id, session.agent.memory)
+    except SessionError as e:
+        error(str(e))
+        return False
+    session.session_id = session_id
+    session.last_sources = []
+    summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
+    print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
+    return True
+
+
+def resume_command(session: Session, argument: str) -> None:
+    if sessions_enabled(session):
+        # The current conversation was saved after its last message: switching loses nothing.
+        resume(session, argument or "last")
+
+
+def new_command(session: Session) -> None:
+    memory = session.agent.memory
+    previous = session.session_id
+    memory.summary, memory.turns, memory.last_usage = "", [], None
+    session.session_id = None
+    session.last_sources = []
+    saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
+    print(f"New conversation.{saved}")
+
+
+def profile_command(session: Session, argument: str) -> None:
+    profile = session.profile
+    if profile is None:
+        error("The profile could not be read at startup: fix the file and restart Sensai.")
+        return
+    action, _, value = argument.partition(" ")
+    try:
+        if action == "add":
+            profile.add(value)
+            print(f"Added as instruction {len(profile.entries)}.")
+        elif action == "remove":
+            if not value.strip().isdigit():
+                error("Usage: /profile remove N")
+                return
+            print(f"Removed: {profile.remove(int(value))}")
+        elif action:
+            error("Usage: /profile [add TEXT | remove N]")
+            return
+    except ProfileError as e:
+        error(str(e))
+        return
+    session.agent.memory.profile = profile.text()
+    if not action:
+        show_profile(session)
+    elif not session.config.features["profile"]:
+        print("The profile feature is off: /feature profile on to send it to the model.")
+
+
+def show_profile(session: Session) -> None:
+    profile = session.profile
+    if not profile.entries:
+        print(f"Your profile is empty ({profile.path}). Add what the model should always know, for example:")
+        print("  /profile add I work on the Alvor Consulting case for Le Monde; answer in French.")
+        return
+    state = "" if session.config.features["profile"] else " (not sent: the profile feature is off)"
+    print(f"Profile ({profile.path}){state}:")
+    for number, entry in enumerate(profile.entries, start=1):
+        print(f"  {number}. {entry}")
 
 
 def ingest_command(session: Session, argument: str) -> None:
@@ -304,6 +427,14 @@ def handle_command(session: Session, line: str) -> bool:
         ingest_command(session, argument)
     elif name == "/context":
         context_command(session)
+    elif name == "/sessions":
+        sessions_command(session)
+    elif name == "/resume":
+        resume_command(session, argument)
+    elif name == "/new":
+        new_command(session)
+    elif name == "/profile":
+        profile_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -327,7 +458,27 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     return tools
 
 
-def run_chat(config: Config) -> int:
+def load_memory(session: Session, resume_id: str | None) -> None:
+    """Loads the profile, then the conversation to resume. Neither can stop the chat from starting."""
+    config = session.config
+    try:
+        session.profile = Profile(config.profile_path)
+    except ProfileError as e:
+        warning(f"{e}. The profile is not sent to the model.")
+    else:
+        session.agent.memory.profile = session.profile.text()
+        if session.profile.entries and config.features["profile"]:
+            print(f"Profile: {plural(len(session.profile.entries), 'instruction')} sent to the model. /profile to see them.")
+    session.store = SessionStore(config.sessions_dir)
+    if resume_id is None:
+        return
+    if config.features["sessions"]:
+        resume(session, resume_id)
+    else:
+        warning("--resume is ignored: the sessions feature is off.")
+
+
+def run_chat(config: Config, resume_id: str | None = None) -> int:
     agent = Agent(config)
     try:
         agent.client.ensure_model(config.model)
@@ -346,6 +497,7 @@ def run_chat(config: Config) -> int:
         print("No documents indexed yet: /ingest PATH to search your files.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
+    load_memory(session, resume_id)
 
     try:
         while True:
@@ -376,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
-    return run_chat(config)
+    return run_chat(config, args.resume)
 
 
 if __name__ == "__main__":
