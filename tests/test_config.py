@@ -6,7 +6,7 @@ from sensai.core.config import Config, ConfigError, load_config
 
 VARIABLES = [
     "SENSAI_MODEL", "OLLAMA_HOST", "SENSAI_SYSTEM_PROMPT", "SENSAI_NUM_CTX", "SENSAI_THINK", "SENSAI_COMPACT_THRESHOLD",
-    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_EMBED_MODEL",
+    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
 ]
@@ -31,6 +31,11 @@ def test_rag_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_RAG_TOP_K", "8")
     config = load_config(env_file)
     assert (config.embed_model, config.index_path, config.rag_top_k) == ("bge-m3", Path("/tmp/case.db"), 8)
+
+
+def test_guardrails_path_from_environment(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_GUARDRAILS_PATH", "/cases/alvor/guardrails.json")
+    assert load_config(env_file).guardrails_path == Path("/cases/alvor/guardrails.json")
 
 
 def test_budget_settings_from_environment(env_file, monkeypatch):
