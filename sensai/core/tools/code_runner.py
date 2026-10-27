@@ -92,6 +92,7 @@ class CodeRunner:
         """
         Run a Python 3 program in a sandbox and see what it prints. Use it to compute, analyse data
         or check an idea instead of guessing. The sandbox has no network and no access to the user's files.
+        The program cannot read input(): write the values in the code.
 
         Args:
           code: The full Python program to run, which prints what you need to see
