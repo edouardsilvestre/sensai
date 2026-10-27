@@ -9,6 +9,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 ### Key features
 
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
+- 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: a structured knowledge graph of people, companies, accounts and their relationships: who is linked to whom, and how.
@@ -32,6 +33,13 @@ Indexing (`python -m sensai ingest`):
 Files that did not change are skipped on the next run, and deleted files are removed from the index.
 
 Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
+
+### Sessions & profile
+
+- `memory/sessions.py`: `SessionStore` writes each conversation to its own JSON file in `SENSAI_SESSIONS_DIR` after every answered message: the summary of older turns and the turns kept verbatim, with the sources each answer cited, exactly as `ConversationMemory` holds them. Resuming puts them back in the memory, so the model gets the same context as before the restart. A file is written next to the session then renamed, so a crash never leaves half a conversation, and an unreadable file is skipped instead of stopping Sensai.
+- `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
+
+Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
 
 ### Tools
 
@@ -82,6 +90,8 @@ ollama pull qwen3-embedding:0.6b   # embedding model for document search
 python -m sensai                 # uses .env
 SENSAI_MODEL=qwen3.8 python -m sensai   # override the model for one run
 python -m sensai -e other.env    # use another env file
+python -m sensai --resume        # continue the last conversation
+python -m sensai --resume 20261027-153012   # continue a given one (/sessions lists them)
 
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
@@ -116,6 +126,10 @@ Sources:
 | `/rag [on\|off]` | turn document search on or off |
 | `/context` | show the tokens used by the last message and the summary of older turns |
 | `/tools [on\|off]` | list the tools the model can call, or turn them on or off |
+| `/sessions` | list the saved conversations, the current one marked with `*` |
+| `/resume [ID]` | continue a saved conversation, the last one without ID |
+| `/new` | start a new conversation; the current one stays saved |
+| `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -123,6 +137,19 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 ```
 [memory] context at 6230/8192 tokens, condensing the oldest turns...
 [memory] 3 turns condensed into the summary.
+```
+
+Every answered message is saved, so a conversation can be continued after a restart, and the profile is sent at the start of every conversation:
+
+```
+> /profile add Réponds en français et n'écris jamais le nom de la source : dis "la source".
+Added as instruction 1.
+> /exit
+
+$ python -m sensai --resume
+Profile: 1 instruction sent to the model. /profile to see them.
+Resumed conversation 20261027-153012: 4 turns. /context shows them.
+> Et la facture, finalement ?
 ```
 
 With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
@@ -151,6 +178,10 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
+| `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
+| `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
+| `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
+| `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
