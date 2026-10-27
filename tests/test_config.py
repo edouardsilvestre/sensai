@@ -6,7 +6,7 @@ from sensai.core.config import Config, ConfigError, load_config
 
 VARIABLES = [
     "SENSAI_MODEL", "OLLAMA_HOST", "SENSAI_SYSTEM_PROMPT", "SENSAI_NUM_CTX", "SENSAI_THINK", "SENSAI_COMPACT_THRESHOLD",
-    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_EMBED_MODEL",
+    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
 ]
@@ -31,6 +31,20 @@ def test_rag_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_RAG_TOP_K", "8")
     config = load_config(env_file)
     assert (config.embed_model, config.index_path, config.rag_top_k) == ("bge-m3", Path("/tmp/case.db"), 8)
+
+
+def test_persona_settings_from_environment(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_PERSONA", " editor ")
+    monkeypatch.setenv("SENSAI_PERSONAS_DIR", "/tmp/newsroom")
+    config = load_config(env_file)
+    assert (config.persona, config.personas_dir) == ("editor", Path("/tmp/newsroom"))
+
+
+def test_empty_persona_settings(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_PERSONA", "")
+    monkeypatch.setenv("SENSAI_PERSONAS_DIR", "")
+    config = load_config(env_file)
+    assert (config.persona, config.personas_dir) == ("", Config.personas_dir)
 
 
 def test_budget_settings_from_environment(env_file, monkeypatch):
