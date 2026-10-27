@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 
 import pytest
 
-from sensai.core.config import Config, ConfigError, load_config
+from sensai.core.config import FEATURES, Config, ConfigError, load_config
 
 VARIABLES = [
     "SENSAI_MODEL", "OLLAMA_HOST", "SENSAI_SYSTEM_PROMPT", "SENSAI_NUM_CTX", "SENSAI_THINK", "SENSAI_COMPACT_THRESHOLD",
@@ -14,7 +15,7 @@ VARIABLES = [
 
 @pytest.fixture
 def env_file(tmp_path, monkeypatch):
-    for name in VARIABLES:
+    for name in VARIABLES + [name for name in os.environ if name.startswith("SENSAI_FEATURE_")]:
         monkeypatch.delenv(name, raising=False)
     path = tmp_path / ".env"
     path.write_text("", encoding="utf-8")
@@ -23,6 +24,10 @@ def env_file(tmp_path, monkeypatch):
 
 def test_defaults(env_file):
     assert load_config(env_file) == Config()
+
+
+def test_features_have_their_default(env_file):
+    assert load_config(env_file).features == {"rag": True, "tools": True, "web_search": False}
 
 
 def test_rag_settings_from_environment(env_file, monkeypatch):
@@ -46,31 +51,57 @@ def test_think_setting(env_file, monkeypatch, value, expected):
     assert load_config(env_file).think is expected
 
 
+@pytest.mark.parametrize(("value", "expected"), [("false", False), ("off", False), ("true", True), ("", None)])
+@pytest.mark.parametrize("feature", list(FEATURES))
+def test_feature_setting(env_file, monkeypatch, feature, value, expected):
+    monkeypatch.setenv(f"SENSAI_FEATURE_{feature.upper()}", value)
+    monkeypatch.setenv("OLLAMA_API_KEY", "secret")
+    default = FEATURES[feature].default
+    assert load_config(env_file).features[feature] is (default if expected is None else expected)
+
+
+def test_feature_from_env_file(env_file):
+    env_file.write_text("SENSAI_FEATURE_RAG=false\n", encoding="utf-8")
+    try:
+        assert load_config(env_file).features["rag"] is False
+    finally:
+        os.environ.pop("SENSAI_FEATURE_RAG", None)
+
+
+def test_unknown_feature_is_rejected(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_FEATURE_RAGG", "false")
+    with pytest.raises(ConfigError, match="SENSAI_FEATURE_RAGG"):
+        load_config(env_file)
+
+
 def test_web_search_is_off_unless_enabled(env_file, monkeypatch):
-    assert load_config(env_file).web_search is False
-    monkeypatch.setenv("SENSAI_WEB_SEARCH", "true")
+    assert load_config(env_file).features["web_search"] is False
+    monkeypatch.setenv("SENSAI_FEATURE_WEB_SEARCH", "true")
     monkeypatch.setenv("OLLAMA_API_KEY", "secret")
     config = load_config(env_file)
-    assert config.web_search is True and config.ollama_api_key == "secret"
+    assert config.features["web_search"] is True and config.ollama_api_key == "secret"
     assert "secret" not in repr(config)
 
 
 def test_web_search_needs_an_api_key(env_file, monkeypatch):
-    monkeypatch.setenv("SENSAI_WEB_SEARCH", "true")
-    with pytest.raises(ConfigError, match="OLLAMA_API_KEY"):
+    monkeypatch.setenv("SENSAI_FEATURE_WEB_SEARCH", "true")
+    with pytest.raises(ConfigError, match="SENSAI_FEATURE_WEB_SEARCH needs OLLAMA_API_KEY"):
         load_config(env_file)
 
 
-@pytest.mark.parametrize(("value", "expected"), [("", True), ("true", True), ("false", False)])
-def test_tools_setting(env_file, monkeypatch, value, expected):
-    monkeypatch.setenv("SENSAI_TOOLS", value)
-    assert load_config(env_file).tools is expected
-
-
 def test_disabled_tools_do_not_need_the_api_key(env_file, monkeypatch):
-    monkeypatch.setenv("SENSAI_TOOLS", "false")
-    monkeypatch.setenv("SENSAI_WEB_SEARCH", "true")
-    assert load_config(env_file).tools is False
+    monkeypatch.setenv("SENSAI_FEATURE_TOOLS", "false")
+    monkeypatch.setenv("SENSAI_FEATURE_WEB_SEARCH", "true")
+    assert load_config(env_file).features["tools"] is False
+
+
+@pytest.mark.parametrize(
+    ("old", "new"), [("SENSAI_TOOLS", "SENSAI_FEATURE_TOOLS"), ("SENSAI_WEB_SEARCH", "SENSAI_FEATURE_WEB_SEARCH")]
+)
+def test_renamed_settings_are_reported(env_file, monkeypatch, old, new):
+    monkeypatch.setenv(old, "false")
+    with pytest.raises(ConfigError, match=f"{old} is now {new}"):
+        load_config(env_file)
 
 
 def test_tool_settings_from_environment(env_file, monkeypatch):
@@ -84,6 +115,8 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
     ("name", "value"),
     [
         ("SENSAI_THINK", "maybe"),
+        ("SENSAI_FEATURE_RAG", "maybe"),
+        ("SENSAI_FEATURE_TOOLS", "maybe"),
         ("SENSAI_RAG_TOP_K", "five"),
         ("SENSAI_RAG_TOP_K", "0"),
         ("SENSAI_RAG_TOP_K", "5000"),
@@ -91,8 +124,7 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
         ("SENSAI_COMPACT_THRESHOLD", "5"),
         ("SENSAI_COMPACT_THRESHOLD", "100"),
         ("SENSAI_KEEP_RECENT_TURNS", "0"),
-        ("SENSAI_WEB_SEARCH", "maybe"),
-        ("SENSAI_TOOLS", "maybe"),
+        ("SENSAI_FEATURE_WEB_SEARCH", "maybe"),
         ("SENSAI_MAX_TOOL_ROUNDS", "0"),
         ("SENSAI_MAX_TOOL_ROUNDS", "50"),
         ("SENSAI_WEB_SEARCH_RESULTS", "0"),
