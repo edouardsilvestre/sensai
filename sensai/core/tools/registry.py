@@ -23,6 +23,14 @@ class ToolResult:
 Tool = Callable[..., str | ToolResult]
 
 
+def requires_approval(reason: str) -> Callable[[Tool], Tool]:
+    def mark(tool: Tool) -> Tool:
+        tool.approval_reason = reason
+        return tool
+
+    return mark
+
+
 class ToolRegistry:
     def __init__(self, tools: Iterable[Tool] = ()):
         self._tools = {tool.__name__: tool for tool in tools}
@@ -35,6 +43,9 @@ class ToolRegistry:
 
     def tools(self) -> list[Tool]:
         return list(self._tools.values())
+
+    def approval_reason(self, name: str) -> str | None:
+        return getattr(self._tools.get(name), "approval_reason", None)
 
     def execute(self, call: ToolCall) -> ToolResult:
         # Failures go back to the model as the tool's answer, so that it can fix its call or answer without it.
