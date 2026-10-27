@@ -25,7 +25,7 @@ from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.tools.catalog import build_registry
-from sensai.core.tools.registry import ToolError, ToolRegistry
+from sensai.core.tools.registry import ToolRegistry
 
 PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
@@ -333,14 +333,8 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
-    if "run_python" in tools.names():
-        # The tool is a bound method: its object is the CodeRunner that holds the settings.
-        runner = next(tool.__self__ for tool in tools.tools() if tool.__name__ == "run_python")
-        try:
-            runner.prepare()
-        except ToolError as e:
-            warning(f"Code execution disabled: {e}")
-            return ToolRegistry(tool for tool in tools.tools() if tool.__name__ != "run_python")
+    for message in tools.prepare():
+        warning(message)
     return tools
 
 

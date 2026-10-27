@@ -63,6 +63,39 @@ def test_tool_errors_are_reported_instead_of_raised():
     assert ToolRegistry([echo]).execute(ToolCall("echo", {"text": ""})) == ToolResult("Error: text is empty", error=True)
 
 
+class Setup:
+    def __init__(self, error: str = ""):
+        self.error = error
+        self.prepared = False
+
+    def prepare(self) -> None:
+        self.prepared = True
+        if self.error:
+            raise ToolError(self.error)
+
+    def check(self) -> str:
+        """
+        Check.
+
+        Returns:
+          ok
+        """
+        return "ok"
+
+
+def test_prepare_runs_the_setup_of_each_tool():
+    setup = Setup()
+    registry = ToolRegistry([echo, setup.check])
+    assert registry.prepare() == []
+    assert setup.prepared and registry.names() == ["echo", "check"]
+
+
+def test_a_tool_whose_setup_fails_is_removed():
+    registry = ToolRegistry([echo, Setup("Docker is not installed").check])
+    assert registry.prepare() == ["check disabled: Docker is not installed"]
+    assert registry.names() == ["echo"]
+
+
 def test_no_tool_is_enabled_by_default(config, client):
     assert not build_registry(config, client)
 
