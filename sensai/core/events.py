@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from sensai.core.guardrails.rules import Hit
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.rag.models import SearchResult
 from sensai.core.tools.registry import ToolResult
@@ -24,6 +25,13 @@ class ToolCallEvent:
 class ToolResultEvent:
     call: ToolCall
     result: ToolResult
+
+
+@dataclass
+class GuardrailEvent:
+    """A rule found something: in the message (input), a tool call (tools) or the answer (output)."""
+
+    hit: Hit
 
 
 @dataclass
@@ -52,6 +60,7 @@ Event = (
     | TokenEvent
     | ToolCallEvent
     | ToolResultEvent
+    | GuardrailEvent
     | DoneEvent
     | CompactionStartedEvent
     | CompactionEvent
