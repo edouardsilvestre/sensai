@@ -2,6 +2,7 @@ import pytest
 
 from sensai.core.config import Config
 from sensai.core.memory.conversation import SUMMARY_HEADER, ConversationMemory, Turn
+from sensai.core.memory.profile import PROFILE_HEADER
 
 
 def make(system_prompt: str = "", keep_recent: int = 4, num_ctx: int = 8192, threshold: int = 75, client=None):
@@ -135,3 +136,23 @@ def test_the_model_writes_the_summary_by_default(config, client):
     prompt = client.summaries[0][0]["content"]
     assert "User: question 0" in prompt and "User: question 1" in prompt
     assert "question 2" not in prompt
+
+
+def test_profile_follows_the_system_prompt():
+    memory = make("Be precise.")
+    memory.profile = "- Answer in French."
+    memory.summary = "Alice approved the transfer."
+    assert memory.messages() == [
+        {
+            "role": "system",
+            "content": f"Be precise.\n\n{PROFILE_HEADER}\n- Answer in French.\n\n{SUMMARY_HEADER}\nAlice approved the transfer.",
+        }
+    ]
+
+
+def test_profile_is_not_sent_when_its_feature_is_off():
+    memory = make()
+    memory.profile = "- Answer in French."
+    memory.config.features["profile"] = False
+    memory.commit("Hi", "Hello")
+    assert memory.messages()[0]["role"] == "user"
