@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 DEFAULT_ENV_PATH = Path(".env")
+APPROVAL_MODES = ("critical", "all", "off")
 
 
 class ConfigError(Exception):
@@ -33,6 +34,7 @@ class Config:
     ollama_api_key: str = field(default="", repr=False)
     web_search_results: int = 5
     max_tool_rounds: int = 5
+    approval: str = "critical"
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -60,6 +62,15 @@ def _bool_env(name: str) -> bool | None:
     raise ConfigError(f"{name} must be true or false, got '{raw}'")
 
 
+def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw not in choices:
+        raise ConfigError(f"{name} must be one of {', '.join(choices)}, got '{raw}'")
+    return raw
+
+
 def load_config(path: Path | None = None) -> Config:
     file_path = path or DEFAULT_ENV_PATH
     if path is not None and not file_path.exists():
@@ -84,6 +95,7 @@ def load_config(path: Path | None = None) -> Config:
         ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
+        approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")

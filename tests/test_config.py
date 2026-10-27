@@ -9,6 +9,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_EMBED_MODEL",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
+    "SENSAI_APPROVAL",
 ]
 
 
@@ -78,6 +79,22 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_WEB_SEARCH_RESULTS", "8")
     config = load_config(env_file)
     assert (config.max_tool_rounds, config.web_search_results) == (3, 8)
+
+
+def test_approval_asks_for_critical_tools_by_default(env_file):
+    assert load_config(env_file).approval == "critical"
+
+
+@pytest.mark.parametrize(("value", "expected"), [("all", "all"), (" OFF ", "off"), ("Critical", "critical")])
+def test_approval_setting(env_file, monkeypatch, value, expected):
+    monkeypatch.setenv("SENSAI_APPROVAL", value)
+    assert load_config(env_file).approval == expected
+
+
+def test_unknown_approval_lists_the_valid_values(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_APPROVAL", "sometimes")
+    with pytest.raises(ConfigError, match="critical, all, off"):
+        load_config(env_file)
 
 
 @pytest.mark.parametrize(
