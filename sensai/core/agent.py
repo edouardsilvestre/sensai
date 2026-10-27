@@ -1,8 +1,10 @@
 from collections.abc import Iterator
 from typing import Protocol
 
+from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
 from sensai.core.config import Config
 from sensai.core.events import (
+    ApprovalEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
@@ -35,6 +37,7 @@ class Agent:
         client: OllamaClient | None = None,
         retriever: Retriever | None = None,
         tools: ToolRegistry | None = None,
+        approver: Approver | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -42,11 +45,20 @@ class Agent:
         self.rag_enabled = True
         self.tools = tools or ToolRegistry()
         self.tools_enabled = True
+        self.approver = approver
         self.memory = ConversationMemory(config, self.client)
 
     @property
     def messages(self) -> list[dict]:
         return self.memory.messages()
+
+    def _approve(self, call: ToolCall) -> Approval | None:
+        reason = approval_reason(self.config.approval, self.tools, call)
+        if reason is None:
+            return None
+        if self.approver is None:
+            return Approval(False, NO_APPROVER_REASON)
+        return self.approver(call, reason)
 
     def run(self, user_input: str) -> Iterator[Event]:
         user_input = user_input.strip()
@@ -83,7 +95,13 @@ class Agent:
             pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
             for call in calls:
                 yield ToolCallEvent(call)
-                result = self.tools.execute(call)
+                approval = self._approve(call)
+                if approval is not None:
+                    yield ApprovalEvent(call, approval)
+                if approval is None or approval.approved:
+                    result = self.tools.execute(call)
+                else:
+                    result = refusal(approval)
                 yield ToolResultEvent(call, result)
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
