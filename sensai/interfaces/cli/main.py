@@ -1,4 +1,6 @@
 import argparse
+import inspect
+import json
 import shlex
 import sys
 import textwrap
@@ -6,23 +8,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import FEATURES, Config, ConfigError, load_config
-from sensai.core.events import DoneEvent, SourcesEvent, TokenEvent
-from sensai.core.llm.ollama import LLMError, OllamaClient
+from sensai.core.config import Config, ConfigError, load_config
+from sensai.core.events import (
+    CompactionEvent,
+    CompactionFailedEvent,
+    CompactionStartedEvent,
+    DoneEvent,
+    SourcesEvent,
+    TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
+from sensai.core.tools.catalog import build_registry
+from sensai.core.tools.registry import ToolRegistry
 
 PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
 HELP = """\
 Commands:
-  /ingest PATH...         index files or folders so that answers can draw on them
-  /sources                show the excerpts retrieved for the last message
-  /features               list the features and whether they are on
-  /feature NAME on|off    turn a feature on or off for this session
-  /exit, /quit            leave (or press Ctrl+D)"""
+  /ingest PATH...   index files or folders so that answers can draw on them
+  /sources          show the excerpts retrieved for the last message
+  /rag [on|off]     turn document search on or off
+  /tools [on|off]   list the tools the model can call, or turn them on or off
+  /context          show the context usage and the summary of older turns
+  /exit, /quit      leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -106,12 +120,7 @@ def run_ingest(config: Config, paths: list[Path], rebuild: bool) -> int:
         index.close()
 
 
-def feature_states(config: Config) -> str:
-    return ", ".join(f"{name} {'on' if enabled else 'off'}" for name, enabled in config.features.items())
-
-
 def run_status(config: Config) -> int:
-    print(f"Features: {feature_states(config)}")
     if not config.index_path.exists():
         print(f"No index at {config.index_path}. Create one with: python -m sensai ingest PATH")
         return 0
@@ -165,10 +174,15 @@ def show_excerpts(sources: list[SearchResult]) -> None:
         print(textwrap.indent(source.text, "    "))
 
 
+def describe_call(call: ToolCall) -> str:
+    return ", ".join(f"{name}={json.dumps(value, ensure_ascii=False)}" for name, value in call.arguments.items())
+
+
 def chat_turn(session: Session, line: str) -> None:
     sources: list[SearchResult] = []
     if line.strip():
         session.last_sources = []
+    mid_line = False
     try:
         for event in session.agent.run(line):
             if isinstance(event, SourcesEvent):
@@ -177,10 +191,27 @@ def chat_turn(session: Session, line: str) -> None:
                 print(f"[search] {len(sources)} excerpts from {documents} documents")
             elif isinstance(event, TokenEvent):
                 print(event.text, end="", flush=True)
+                mid_line = not event.text.endswith("\n")
+            elif isinstance(event, ToolCallEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                print(f"[{event.call.name}] {describe_call(event.call)}")
+            elif isinstance(event, ToolResultEvent):
+                if event.result.error:
+                    warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
+                else:
+                    print(f"[{event.call.name}] {event.result.summary or 'done'}")
             elif isinstance(event, DoneEvent):
                 print()
                 if sources:
                     print_sources(sources, event.content)
+            elif isinstance(event, CompactionStartedEvent):
+                print(f"[memory] context at {event.tokens}/{session.config.num_ctx} tokens, condensing the oldest turns...")
+            elif isinstance(event, CompactionEvent):
+                print(f"[memory] {plural(event.turns, 'turn')} condensed into the summary.")
+            elif isinstance(event, CompactionFailedEvent):
+                warning(f"Could not condense the history, retrying after the next message: {event.message}")
     except EmptyInputError:
         error("Empty message, please type something.")
     except (LLMError, StoreError) as e:
@@ -206,31 +237,54 @@ def ingest_command(session: Session, argument: str) -> None:
             error(str(e))
             return
         session.agent.retriever = session.index
-    if ingest(session.index, paths) and not session.config.features["rag"]:
-        print("The rag feature is off: /feature rag on to answer from these documents.")
+    ingest(session.index, paths)
 
 
-def list_features(session: Session) -> None:
-    width = max(len(name) for name in FEATURES)
-    for name, feature in FEATURES.items():
-        state = "on" if session.config.features[name] else "off"
-        print(f"  {name:<{width}}  {state:<3}  {feature.description}")
-
-
-def feature_command(session: Session, argument: str) -> None:
-    name, _, value = argument.lower().partition(" ")
-    value = value.strip()
-    if name not in FEATURES or value not in ("on", "off"):
-        error(f"Usage: /feature NAME on|off, with NAME among: {', '.join(FEATURES)}")
+def rag_command(session: Session, argument: str) -> None:
+    if argument in ("on", "off"):
+        session.agent.rag_enabled = argument == "on"
+    elif argument:
+        error("Usage: /rag [on|off]")
         return
-    session.config.features[name] = value == "on"
-    print(f"{name} is {value}.")
-    if name == "rag" and value == "on" and session.index is None:
-        if session.config.index_path.exists():
-            session.index = load_existing_index(session.config, session.agent.client)
-            session.agent.retriever = session.index
+    state = "on" if session.agent.rag_enabled else "off"
+    if session.index is None:
+        print(f"Document search is {state}, but there is no index yet: use /ingest PATH.")
+    else:
+        print(f"Document search is {state}.")
+
+
+def tools_command(session: Session, argument: str) -> None:
+    agent = session.agent
+    if argument in ("on", "off"):
+        agent.tools_enabled = argument == "on"
+    elif argument:
+        error("Usage: /tools [on|off]")
+        return
+    if not agent.tools:
+        if not session.config.tools:
+            print("Tools are disabled by SENSAI_TOOLS=false.")
         else:
-            print("No documents indexed yet: /ingest PATH to search your files.")
+            print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web.")
+        return
+    print(f"Tools are {'on' if agent.tools_enabled else 'off'}:")
+    for tool in agent.tools.tools():
+        description = " ".join((inspect.getdoc(tool) or "").split("\n\n")[0].split())
+        print(f"  {tool.__name__}: {description}")
+
+
+def context_command(session: Session) -> None:
+    memory = session.agent.memory
+    usage = memory.last_usage
+    used = usage.total_tokens if usage else 0
+    print(
+        f"Context: {used}/{session.config.num_ctx} tokens used by the last message, "
+        f"older turns are condensed from {int(memory.limit)}."
+    )
+    print(f"History: {plural(len(memory.turns), 'turn')} kept verbatim.")
+    if memory.summary:
+        size = f" ({memory.summary_usage.completion_tokens} tokens)" if memory.summary_usage else ""
+        print(f"Summary of older turns{size}:")
+        print(textwrap.indent(memory.summary, "    "))
 
 
 def handle_command(session: Session, line: str) -> bool:
@@ -242,12 +296,14 @@ def handle_command(session: Session, line: str) -> bool:
         print(HELP)
     elif name == "/sources":
         show_excerpts(session.last_sources)
-    elif name == "/features":
-        list_features(session)
-    elif name == "/feature":
-        feature_command(session, argument)
+    elif name == "/rag":
+        rag_command(session, argument)
+    elif name == "/tools":
+        tools_command(session, argument)
     elif name == "/ingest":
         ingest_command(session, argument)
+    elif name == "/context":
+        context_command(session)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -263,28 +319,33 @@ def load_existing_index(config: Config, client: OllamaClient) -> DocumentIndex |
         return None
 
 
+def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
+    tools = build_registry(config, client)
+    if tools and not client.can_call_tools(config.model):
+        warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
+        return ToolRegistry()
+    return tools
+
+
 def run_chat(config: Config) -> int:
     agent = Agent(config)
     try:
         agent.client.ensure_model(config.model)
+        agent.tools = load_tools(config, agent.client)
     except LLMError as e:
         error(str(e))
         return 1
 
-    session = Session(config, agent)
-    if config.features["rag"]:
-        session.index = load_existing_index(config, agent.client)
-        agent.retriever = session.index
+    session = Session(config, agent, index=load_existing_index(config, agent.client))
+    agent.retriever = session.index
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
-    disabled = [name for name, enabled in config.features.items() if not enabled]
-    if disabled:
-        print(f"Disabled features: {', '.join(disabled)}. /features to list them.")
-    if config.features["rag"]:
-        if session.index is not None:
-            stats = session.index.stats()
-            print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
-        else:
-            print("No documents indexed yet: /ingest PATH to search your files.")
+    if session.index is not None:
+        stats = session.index.stats()
+        print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
+    else:
+        print("No documents indexed yet: /ingest PATH to search your files.")
+    if agent.tools:
+        print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
 
     try:
         while True:
