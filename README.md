@@ -126,7 +126,7 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 [memory] 3 turns condensed into the summary.
 ```
 
-With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
@@ -152,6 +152,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
+| `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
@@ -159,7 +160,6 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
 | `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
-| `SENSAI_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
@@ -171,7 +171,10 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | Feature | What it turns on or off |
 |---|---|
 | `rag` | answers drawn from the indexed documents |
-| `tools` | every tool the model can call; each tool is then enabled by its own setting, like `SENSAI_WEB_SEARCH` |
+| `tools` | every tool the model can call, whatever their own feature or setting |
+| `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
+
+The features are on by default, except `web_search`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 
@@ -179,6 +182,7 @@ To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 FEATURES = {
     "rag": Feature("answer from the indexed documents"),
     "tools": Feature("let the model call the tools enabled in the configuration"),
+    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False),
     "compaction": Feature("summarize older turns when the context fills up"),
 }
 ```
