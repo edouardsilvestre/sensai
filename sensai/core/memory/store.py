@@ -162,6 +162,19 @@ class MemoryStore:
             self._db.execute("UPDATE entities SET type = ? WHERE id = ?", (entity_type, row[0]))
         return row[0]
 
+    def _load(self, entity_id: int, name: str, entity_type: str) -> Entity:
+        facts = self._db.execute("SELECT id, content FROM facts WHERE entity_id = ? ORDER BY id", (entity_id,))
+        relations = self._db.execute(
+            """
+            SELECT s.name, r.predicate, o.name FROM relations r
+            JOIN entities s ON s.id = r.subject_id
+            JOIN entities o ON o.id = r.object_id
+            WHERE r.subject_id = :id OR r.object_id = :id
+            ORDER BY r.id
+            """,
+            {"id": entity_id},
+        )
+        return Entity(name, entity_type, [Fact(*row) for row in facts], [Relation(*row) for row in relations])
 
 
 def _required(value: str, what: str) -> str:
