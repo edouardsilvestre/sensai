@@ -136,9 +136,10 @@ Sources:
 |---|---|
 | `/ingest PATH...` | index files or folders without leaving the chat |
 | `/sources` | show the full excerpts retrieved for the last message |
-| `/rag [on\|off]` | turn document search on or off |
 | `/context` | show the tokens used by the last message and the summary of older turns |
-| `/tools [on\|off]` | list the tools the model can call, or turn them on or off |
+| `/tools` | list the tools the model can call |
+| `/features` | list the features and whether they are on |
+| `/feature NAME on\|off` | turn a feature on or off for the session |
 | `/personas` | list the personas, `*` marks the active one |
 | `/persona [ID]` | show the active persona, or switch to another one; the history is kept |
 | `/help` | list the commands |
@@ -150,7 +151,7 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 [memory] 3 turns condensed into the summary.
 ```
 
-With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
@@ -176,6 +177,9 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation when no persona is active |
 | `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
+| `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
+| `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
+| `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
@@ -183,11 +187,34 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
 | `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
-| `SENSAI_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
-| `SENSAI_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
+
+### Features
+
+Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`true` or `false`), or during a chat with `/feature NAME on|off`. A misspelled feature variable stops Sensai with an error.
+
+| Feature | What it turns on or off |
+|---|---|
+| `rag` | answers drawn from the indexed documents |
+| `tools` | every tool the model can call, whatever their own feature or setting |
+| `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
+
+The features are on by default, except `web_search`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+
+To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
+
+```python
+FEATURES = {
+    "rag": Feature("answer from the indexed documents"),
+    "tools": Feature("let the model call the tools enabled in the configuration"),
+    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False),
+    "compaction": Feature("summarize older turns when the context fills up"),
+}
+```
+
+Then check `config.features["compaction"]` where the feature runs. `SENSAI_FEATURE_COMPACTION`, `/features` and `/feature compaction off` work without other changes.
 
 ### Tests
 

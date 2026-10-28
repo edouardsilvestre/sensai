@@ -6,10 +6,32 @@ from dotenv import load_dotenv
 
 DEFAULT_ENV_PATH = Path(".env")
 DEFAULT_PERSONAS_DIR = Path(__file__).resolve().parents[2] / "personas"
+FEATURE_PREFIX = "SENSAI_FEATURE_"
+API_KEY_HELP = "create a key on https://ollama.com/settings/keys"
+# Settings that became features: an old .env must not be silently ignored, SENSAI_TOOLS=false would turn tools on.
+RENAMED = {"SENSAI_TOOLS": "SENSAI_FEATURE_TOOLS", "SENSAI_WEB_SEARCH": "SENSAI_FEATURE_WEB_SEARCH"}
+
+
+@dataclass(frozen=True)
+class Feature:
+    description: str
+    default: bool = True
+
+
+FEATURES = {
+    "rag": Feature("answer from the indexed documents"),
+    "tools": Feature("let the model call the tools enabled in the configuration"),
+    # Off by default: the queries leave the machine.
+    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False),
+}
 
 
 class ConfigError(Exception):
     pass
+
+
+def default_features() -> dict[str, bool]:
+    return {name: feature.default for name, feature in FEATURES.items()}
 
 
 @dataclass
@@ -21,6 +43,7 @@ class Config:
     think: bool | None = None
     persona: str = ""
     personas_dir: Path = DEFAULT_PERSONAS_DIR
+    features: dict[str, bool] = field(default_factory=default_features)
 
     compact_threshold: int = 75
     keep_recent_turns: int = 4
@@ -31,8 +54,6 @@ class Config:
     chunk_size: int = 1200
     chunk_overlap: int = 200
 
-    tools: bool = True
-    web_search: bool = False
     ollama_api_key: str = field(default="", repr=False)
     web_search_results: int = 5
     max_tool_rounds: int = 5
@@ -63,6 +84,23 @@ def _bool_env(name: str) -> bool | None:
     raise ConfigError(f"{name} must be true or false, got '{raw}'")
 
 
+def _features_env() -> dict[str, bool]:
+    for old, new in RENAMED.items():
+        if os.getenv(old) is not None:
+            raise ConfigError(f"{old} is now {new}: rename it in your .env")
+    names = [name.removeprefix(FEATURE_PREFIX).lower() for name in os.environ if name.startswith(FEATURE_PREFIX)]
+    unknown = sorted(FEATURE_PREFIX + name.upper() for name in names if name not in FEATURES)
+    if unknown:
+        known = ", ".join(FEATURE_PREFIX + name.upper() for name in FEATURES)
+        raise ConfigError(f"Unknown feature {', '.join(unknown)}. Known features: {known}")
+    features = default_features()
+    for name in FEATURES:
+        value = _bool_env(FEATURE_PREFIX + name.upper())
+        if value is not None:
+            features[name] = value
+    return features
+
+
 def load_config(path: Path | None = None) -> Config:
     file_path = path or DEFAULT_ENV_PATH
     if path is not None and not file_path.exists():
@@ -77,6 +115,7 @@ def load_config(path: Path | None = None) -> Config:
         think=_bool_env("SENSAI_THINK"),
         persona=os.getenv("SENSAI_PERSONA", Config.persona).strip(),
         personas_dir=Path(os.getenv("SENSAI_PERSONAS_DIR", "").strip() or Config.personas_dir),
+        features=_features_env(),
         compact_threshold=_int_env("SENSAI_COMPACT_THRESHOLD", Config.compact_threshold, minimum=10, maximum=95),
         keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
@@ -84,14 +123,12 @@ def load_config(path: Path | None = None) -> Config:
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
-        tools=_bool_env("SENSAI_TOOLS") is not False,
-        web_search=_bool_env("SENSAI_WEB_SEARCH") or False,
         ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")
-    if config.tools and config.web_search and not config.ollama_api_key:
-        raise ConfigError("SENSAI_WEB_SEARCH needs OLLAMA_API_KEY: create a key on https://ollama.com/settings/keys")
+    if config.features["tools"] and config.features["web_search"] and not config.ollama_api_key:
+        raise ConfigError(f"SENSAI_FEATURE_WEB_SEARCH needs OLLAMA_API_KEY: {API_KEY_HELP}")
     return config
