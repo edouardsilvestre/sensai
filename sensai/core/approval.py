@@ -29,7 +29,8 @@ def approval_reason(mode: str, tools: ToolRegistry, call: ToolCall) -> str | Non
 def refusal(approval: Approval) -> ToolResult:
     because = f": {approval.reason}" if approval.reason else ""
     return ToolResult(
-        f"The user refused this tool call{because}. Do not call it again with the same arguments: "
-        "answer without it, or ask the user how to proceed.",
+        f"The user refused this tool call{because}. Do not call it again with the same arguments. "
+        "Tell the user you could not use it, and do not make up what it would have found: "
+        "only state what you already know for sure, or ask the user how to proceed.",
         summary="refused",
     )
