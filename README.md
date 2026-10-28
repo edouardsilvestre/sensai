@@ -61,6 +61,21 @@ Tools need a model that supports them (`qwen3`, `llama3.1`, `mistral`...). With 
 
 **Web search** (`tools/web_search.py`) uses [Ollama's web search API](https://docs.ollama.com/capabilities/web-search), which needs a free API key from [ollama.com/settings/keys](https://ollama.com/settings/keys) in `OLLAMA_API_KEY`. The model gets the title, URL and content of the first `SENSAI_WEB_SEARCH_RESULTS` results, each page cut to 1500 characters so that they fit in the context window, and marked as untrusted data so that instructions hidden in a page are not followed. `SearchBackend` keeps the search engine separate from the tool, so it can be replaced without touching the rest.
 
+### Approvals
+
+Some tool calls cannot be undone: a web search sends the query outside the machine, and with it maybe the name of a source. Before running such a call, Sensai stops, shows the exact call the model asked for and waits for the user's decision. A tool declares that it needs approval, and why, with a decorator:
+
+```python
+@requires_approval("the query is sent to an external search engine")
+def web_search(self, query: str) -> ToolResult:
+```
+
+- Approved, the tool runs as usual.
+- Refused, it does not run: the model gets the refusal and the user's reason instead of the result, and is told not to make up what the tool would have found. It can rephrase its call, answer from what it already knows for sure, or ask the user.
+- `always` approves the tool until the end of the session.
+
+`SENSAI_APPROVAL` sets when Sensai asks: `critical` (default) for the tools that declare it, `all` before every tool call, `off` never. The core does not ask the user itself: the interface gives the agent an approver, a function that returns the decision, so a web interface can show buttons instead of a terminal prompt. Without an approver, critical calls are refused.
+
 ## Getting Started
 
 ### Installation
@@ -116,6 +131,7 @@ Sources:
 | `/rag [on\|off]` | turn document search on or off |
 | `/context` | show the tokens used by the last message and the summary of older turns |
 | `/tools [on\|off]` | list the tools the model can call, or turn them on or off |
+| `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -125,11 +141,12 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 [memory] 3 turns condensed into the summary.
 ```
 
-With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
+With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed and has to be approved before it is sent, so nothing leaves the machine without your consent:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
 [web_search] query="la dernière version stable de Python"
+Allow web_search? The query is sent to an external search engine. [y]es / [n]o / [a]lways this session: y
 [web_search] 5 results: www.python.org, devguide.python.org, docs.python.org
 La dernière version stable de Python publiée est Python 3.15.1 [...]
 
@@ -161,6 +178,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
+| `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
 
 ### Tests
 
