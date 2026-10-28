@@ -72,3 +72,32 @@ class MemoryStore:
             self._db.close()
             raise MemoryStoreError(f"Cannot use {path} as a memory: {e}") from e
 
+    def add_fact(self, entity: str, content: str, entity_type: str = "") -> int:
+        """Stores a fact about `entity`, created if it is new, and returns the fact's id."""
+        content = _required(content, "fact")
+        with self._db:
+            entity_id = self._entity_id(entity, entity_type)
+            now = _now()
+            cursor = self._db.execute(
+                "INSERT INTO facts (entity_id, content, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (entity_id, content, now, now),
+            )
+        return cursor.lastrowid
+
+    def delete_fact(self, fact_id: int) -> None:
+        with self._db:
+            cursor = self._db.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        if cursor.rowcount == 0:
+            raise MemoryStoreError(f"No fact with id {fact_id}")
+
+
+
+def _required(value: str, what: str) -> str:
+    value = value.strip()
+    if not value:
+        raise MemoryStoreError(f"The {what} is empty")
+    return value
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
