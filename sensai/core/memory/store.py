@@ -124,6 +124,46 @@ class MemoryStore:
         if cursor.rowcount == 0:
             raise MemoryStoreError(f"No relation '{subject} {predicate} {object}'")
 
+    def get(self, name: str) -> Entity | None:
+        row = self._db.execute("SELECT id, name, type FROM entities WHERE name = ?", (name.strip(),)).fetchone()
+        return self._load(*row) if row else None
+
+    def search(self, query: str, limit: int = 10) -> list[Entity]:
+        """The entities whose name or one of whose facts contains `query`, ignoring case."""
+        query = _required(query, "query")
+        rows = self._db.execute(
+            """
+            SELECT id, name, type FROM entities e
+            WHERE instr(lower(name), lower(:query)) > 0
+            OR EXISTS (SELECT 1 FROM facts f WHERE f.entity_id = e.id AND instr(lower(f.content), lower(:query)) > 0)
+            ORDER BY name LIMIT :limit
+            """,
+            {"query": query, "limit": limit},
+        ).fetchall()
+        return [self._load(*row) for row in rows]
+
+    def entities(self) -> list[Entity]:
+        rows = self._db.execute("SELECT id, name, type FROM entities ORDER BY name").fetchall()
+        return [self._load(*row) for row in rows]
+
+    def close(self) -> None:
+        self._db.close()
+
+    def _entity_id(self, name: str, entity_type: str = "") -> int:
+        name, entity_type = _required(name, "entity name"), entity_type.strip()
+        row = self._db.execute("SELECT id, type FROM entities WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            cursor = self._db.execute(
+                "INSERT INTO entities (name, type, created_at) VALUES (?, ?, ?)", (name, entity_type, _now())
+            )
+            return cursor.lastrowid
+        # The type is only filled in when it was unknown, so a later guess does not overwrite it.
+        if entity_type and not row[1]:
+            self._db.execute("UPDATE entities SET type = ? WHERE id = ?", (entity_type, row[0]))
+        return row[0]
+
+
+
 def _required(value: str, what: str) -> str:
     value = value.strip()
     if not value:
