@@ -84,13 +84,13 @@ def test_no_tool_is_enabled_by_default(config, client):
 
 
 def test_web_search_is_enabled_by_its_setting(config, client):
-    config.web_search = True
+    config.features["web_search"] = True
     assert build_registry(config, client).names() == ["web_search"]
 
 
-def test_tools_setting_disables_every_tool(config, client):
-    config.web_search = True
-    config.tools = False
+def test_tools_feature_disables_every_tool(config, client):
+    config.features["web_search"] = True
+    config.features["tools"] = False
     assert not build_registry(config, client)
 
 
@@ -111,7 +111,7 @@ def test_an_approved_tool_still_runs_and_keeps_its_schema():
 
 
 def test_web_search_requires_approval(config, client):
-    config.web_search = True
+    config.features["web_search"] = True
     registry = build_registry(config, client)
     assert registry.approval_reason("web_search") == "the query is sent to an external search engine"
     assert convert_function_to_tool(registry.tools()[0]).function.name == "web_search"

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.approval import Approval
-from sensai.core.config import APPROVAL_MODES, Config, ConfigError, load_config
+from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
@@ -21,6 +21,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
+from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
@@ -28,7 +29,6 @@ from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.registry import ToolRegistry
 
-PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
 ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
 ALWAYS_ANSWERS = {"a", "always"}
@@ -40,18 +40,22 @@ APPROVAL_DESCRIPTIONS = {
 }
 HELP = """\
 Commands:
-  /ingest PATH...   index files or folders so that answers can draw on them
-  /sources          show the excerpts retrieved for the last message
-  /rag [on|off]     turn document search on or off
-  /tools [on|off]   list the tools the model can call, or turn them on or off
-  /context          show the context usage and the summary of older turns
-  /approval [MODE]  show or change when to ask before running a tool: critical, all or off
-  /exit, /quit      leave (or press Ctrl+D)"""
+  /ingest PATH...         index files or folders so that answers can draw on them
+  /sources                show the excerpts retrieved for the last message
+  /tools                  list the tools the model can call
+  /context                show the context usage and the summary of older turns
+  /features               list the features and whether they are on
+  /feature NAME on|off    turn a feature on or off for this session
+  /personas               list the personas
+  /persona [ID]           show the active persona, or switch to another one (the history is kept)
+  /approval [MODE]        show or change when to ask before running a tool: critical, all or off
+  /exit, /quit            leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="sensai", description="Sensai CLI chatbot")
     parser.add_argument("-e", "--env-file", dest="env_path", type=Path, help="Path to a .env file (default: ./.env)")
+    parser.add_argument("-p", "--persona", help="persona to start with (overrides SENSAI_PERSONA)")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     commands.add_parser("chat", help="chat with the model (default)")
     ingest_parser = commands.add_parser("ingest", help="index documents for search")
@@ -130,7 +134,12 @@ def run_ingest(config: Config, paths: list[Path], rebuild: bool) -> int:
         index.close()
 
 
+def feature_states(config: Config) -> str:
+    return ", ".join(f"{name} {'on' if enabled else 'off'}" for name, enabled in config.features.items())
+
+
 def run_status(config: Config) -> int:
+    print(f"Features: {feature_states(config)}")
     if not config.index_path.exists():
         print(f"No index at {config.index_path}. Create one with: python -m sensai ingest PATH")
         return 0
@@ -160,6 +169,7 @@ class Session:
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
     always_allowed: set[str] = field(default_factory=set)
+    personas: dict[str, Persona] = field(default_factory=dict)
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -185,6 +195,11 @@ def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
                 print()
                 why = ""
             return Approval(False, why)
+
+
+def prompt(session: Session) -> str:
+    persona = session.agent.persona
+    return f"\n[{persona.id}] > " if persona else "\n> "
 
 
 def print_sources(sources: list[SearchResult], answer: str) -> None:
@@ -273,36 +288,19 @@ def ingest_command(session: Session, argument: str) -> None:
             error(str(e))
             return
         session.agent.retriever = session.index
-    ingest(session.index, paths)
+    if ingest(session.index, paths) and not session.config.features["rag"]:
+        print("The rag feature is off: /feature rag on to answer from these documents.")
 
 
-def rag_command(session: Session, argument: str) -> None:
-    if argument in ("on", "off"):
-        session.agent.rag_enabled = argument == "on"
-    elif argument:
-        error("Usage: /rag [on|off]")
-        return
-    state = "on" if session.agent.rag_enabled else "off"
-    if session.index is None:
-        print(f"Document search is {state}, but there is no index yet: use /ingest PATH.")
-    else:
-        print(f"Document search is {state}.")
-
-
-def tools_command(session: Session, argument: str) -> None:
+def tools_command(session: Session) -> None:
     agent = session.agent
-    if argument in ("on", "off"):
-        agent.tools_enabled = argument == "on"
-    elif argument:
-        error("Usage: /tools [on|off]")
+    if not session.config.features["tools"]:
+        print("The tools feature is off: /feature tools on to let the model call tools.")
         return
     if not agent.tools:
-        if not session.config.tools:
-            print("Tools are disabled by SENSAI_TOOLS=false.")
-        else:
-            print("No tool is enabled. Set SENSAI_WEB_SEARCH=true to let the model search the web.")
+        print("No tool is enabled: /feature web_search on to let the model search the web.")
         return
-    print(f"Tools are {'on' if agent.tools_enabled else 'off'}:")
+    print("Tools:")
     for tool in agent.tools.tools():
         description = " ".join((inspect.getdoc(tool) or "").split("\n\n")[0].split())
         print(f"  {tool.__name__}: {description}")
@@ -336,6 +334,77 @@ def approval_command(session: Session, argument: str) -> None:
         print(f"Allowed for this session: {', '.join(sorted(session.always_allowed))}.")
 
 
+def list_features(session: Session) -> None:
+    width = max(len(name) for name in FEATURES)
+    for name, feature in FEATURES.items():
+        state = "on" if session.config.features[name] else "off"
+        print(f"  {name:<{width}}  {state:<3}  {feature.description}")
+
+
+def feature_command(session: Session, argument: str) -> None:
+    name, _, value = argument.lower().partition(" ")
+    value = value.strip()
+    if name not in FEATURES or value not in ("on", "off"):
+        error(f"Usage: /feature NAME on|off, with NAME among: {', '.join(FEATURES)}")
+        return
+    config = session.config
+    if name == "web_search" and value == "on" and not config.ollama_api_key:
+        error(f"web_search needs OLLAMA_API_KEY in .env: {API_KEY_HELP}")
+        return
+    config.features[name] = value == "on"
+    print(f"{name} is {value}.")
+    if name in ("tools", "web_search") and config.features["tools"]:
+        # The registry only holds the tools enabled when it was built: build it again to add or remove one.
+        reload_tools(session)
+    if name == "rag" and value == "on" and session.index is None:
+        if config.index_path.exists():
+            session.index = load_existing_index(config, session.agent.client)
+            session.agent.retriever = session.index
+        else:
+            print("No documents indexed yet: /ingest PATH to search your files.")
+
+
+def reload_tools(session: Session) -> None:
+    try:
+        session.agent.tools = load_tools(session.config, session.agent.client)
+    except LLMError as e:
+        error(str(e))
+        return
+    if session.agent.tools:
+        print(f"Tools: {', '.join(session.agent.tools.names())}. /tools to see what they do.")
+
+
+def list_personas(session: Session) -> None:
+    if not session.personas:
+        print(f"No persona in {session.config.personas_dir}.")
+        return
+    active = session.agent.persona
+    width = max(len(persona_id) for persona_id in session.personas)
+    for persona in session.personas.values():
+        marker = "*" if active and active.id == persona.id else " "
+        print(f" {marker} {persona.id:<{width}}  {persona.name}: {persona.role}")
+
+
+def unknown_persona(personas: dict[str, Persona], persona_id: str) -> str:
+    return f"Unknown persona '{persona_id}'. Available: {', '.join(personas) or 'none'}"
+
+
+def persona_command(session: Session, argument: str) -> None:
+    agent = session.agent
+    if not argument:
+        if agent.persona:
+            print(f"Active persona: {agent.persona.id} ({agent.persona.name}). /personas to list them.")
+        else:
+            print("No active persona. /personas to list them.")
+        return
+    persona = session.personas.get(argument)
+    if persona is None:
+        error(unknown_persona(session.personas, argument))
+        return
+    agent.set_persona(persona)
+    print(f"Switched to {persona.name}. The conversation history is kept.")
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -345,16 +414,22 @@ def handle_command(session: Session, line: str) -> bool:
         print(HELP)
     elif name == "/sources":
         show_excerpts(session.last_sources)
-    elif name == "/rag":
-        rag_command(session, argument)
     elif name == "/tools":
-        tools_command(session, argument)
+        tools_command(session)
     elif name == "/ingest":
         ingest_command(session, argument)
     elif name == "/context":
         context_command(session)
     elif name == "/approval":
         approval_command(session, argument.lower())
+    elif name == "/features":
+        list_features(session)
+    elif name == "/feature":
+        feature_command(session, argument)
+    elif name == "/personas":
+        list_personas(session)
+    elif name == "/persona":
+        persona_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -378,8 +453,22 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     return tools
 
 
+def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
+    personas = load_personas(config.personas_dir)
+    if not config.persona:
+        return personas, None
+    if config.persona not in personas:
+        raise PersonaError(unknown_persona(personas, config.persona) + f" (in {config.personas_dir})")
+    return personas, personas[config.persona]
+
+
 def run_chat(config: Config) -> int:
-    agent = Agent(config)
+    try:
+        personas, persona = load_persona(config)
+    except PersonaError as e:
+        error(str(e))
+        return 1
+    agent = Agent(config, persona=persona)
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
@@ -387,22 +476,32 @@ def run_chat(config: Config) -> int:
         error(str(e))
         return 1
 
-    session = Session(config, agent, index=load_existing_index(config, agent.client))
-    agent.retriever = session.index
+    session = Session(config, agent, personas=personas)
+    if config.features["rag"]:
+        session.index = load_existing_index(config, agent.client)
+        agent.retriever = session.index
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
-    if session.index is not None:
-        stats = session.index.stats()
-        print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
-    else:
-        print("No documents indexed yet: /ingest PATH to search your files.")
+    disabled = [name for name, enabled in config.features.items() if not enabled]
+    if disabled:
+        print(f"Disabled features: {', '.join(disabled)}. /features to list them.")
+    if config.features["rag"]:
+        if session.index is not None:
+            stats = session.index.stats()
+            print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
+        else:
+            print("No documents indexed yet: /ingest PATH to search your files.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
+    if agent.persona:
+        print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
+    elif session.personas:
+        print("No persona: /personas to list them, /persona ID to pick one.")
 
     try:
         while True:
             try:
-                line = input(PROMPT)
+                line = input(prompt(session))
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
@@ -423,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         error(str(e))
         return 1
+    if args.persona:
+        config.persona = args.persona
 
     if args.command == "ingest":
         return run_ingest(config, args.paths, args.rebuild)
