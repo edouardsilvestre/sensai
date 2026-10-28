@@ -98,12 +98,21 @@ def test_docker_runs_the_code_isolated(fake_run):
     command = fake.commands[0]
     for option in ("--rm", "--read-only", "--network", "none", "--memory", "--pids-limit", "--cap-drop"):
         assert option in command
-    assert command[-3:] == ["python:3.12-slim", "python", "-"]
+    assert command[-4:-1] == ["python:3.12-slim", "sh", "-c"]
+    assert "python -" in command[-1]
 
 
 def test_docker_timeout_kills_the_container(fake_run):
     fake = fake_run(error=subprocess.TimeoutExpired("docker", 10))
     assert run_in_docker("while True: pass", "python:3.12-slim", 10).timed_out
+    name = fake.commands[0][fake.commands[0].index("--name") + 1]
+    assert fake.commands[1] == ["docker", "kill", name]
+
+
+def test_ctrl_c_kills_the_container(fake_run):
+    fake = fake_run(error=KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        run_in_docker("while True: pass", "python:3.12-slim", 10)
     name = fake.commands[0][fake.commands[0].index("--name") + 1]
     assert fake.commands[1] == ["docker", "kill", name]
 
@@ -175,3 +184,16 @@ def test_real_sandbox_has_no_network_and_a_read_only_disk():
     network = "import socket; socket.create_connection(('1.1.1.1', 80), timeout=2)"
     assert tool.run_python(network).summary == "exit 1: OSError"
     assert tool.run_python("open('/etc/x', 'w')").summary == "exit 1: OSError"
+
+
+@real_docker
+def test_real_sandbox_keeps_utf8_and_the_exit_code():
+    run = run_in_docker("import sys; print('é €'); sys.exit(3)", "python:3.12-slim", 20)
+    assert (run.stdout, run.exit_code) == ("é €\n", 3)
+
+
+@real_docker
+def test_real_sandbox_sends_back_only_the_end_of_a_huge_output():
+    run = run_in_docker("print('x' * 10**7); print('end')", "python:3.12-slim", 20)
+    assert run.exit_code == 0
+    assert len(run.stdout) <= 4 * MAX_OUTPUT_CHARS and run.stdout.endswith("end\n")

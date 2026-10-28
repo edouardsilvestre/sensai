@@ -11,6 +11,12 @@ MAX_OUTPUT_CHARS = 2000
 # `docker run` exits with 125 when the container could not start (daemon down, unknown image...).
 DOCKER_FAILED = 125
 
+# Only the end of each output leaves the container, so a program that prints without end cannot fill
+# Sensai's memory. 4 bytes per character covers any UTF-8 text. `sh` has no pipefail: the exit code goes in a file.
+_RUN_SCRIPT = f"""{{ python - 2>/tmp/err; echo $? >/tmp/code; }} | tail -c {4 * MAX_OUTPUT_CHARS}
+tail -c {4 * MAX_OUTPUT_CHARS} /tmp/err >&2
+exit $(cat /tmp/code)"""
+
 _FIX_IT = "The program failed: read the traceback, fix the code and call run_python again."
 
 
@@ -29,20 +35,24 @@ def docker_command(name: str, image: str) -> list[str]:
         "--network", "none", "--memory", "256m", "--cpus", "1", "--pids-limit", "64",
         "--read-only", "--tmpfs", "/tmp:size=64m", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--user", "65534:65534",
-        image, "python", "-",
+        image, "sh", "-c", _RUN_SCRIPT,
     ]
 
 
 def run_in_docker(code: str, image: str, timeout: int) -> Execution:
     name = f"sensai-{uuid.uuid4().hex[:12]}"
     try:
-        done = subprocess.run(docker_command(name, image), input=code, capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(docker_command(name, image), input=code, capture_output=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
     except FileNotFoundError:
         raise ToolError("run_python: Docker is not installed") from None
     except subprocess.TimeoutExpired:
         # Stopping the docker client does not stop the container.
         subprocess.run(["docker", "kill", name], capture_output=True)
         return Execution("", "", exit_code=-1, timed_out=True)
+    except KeyboardInterrupt:
+        subprocess.run(["docker", "kill", name], capture_output=True)
+        raise
     if done.returncode == DOCKER_FAILED:
         raise ToolError(f"run_python: the sandbox could not start: {done.stderr.strip()}")
     return Execution(done.stdout, done.stderr, done.returncode)
@@ -56,7 +66,7 @@ def has_image(image: str) -> bool:
 
 
 def pull_image(image: str) -> None:
-    pulled = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+    pulled = subprocess.run(["docker", "pull", image], capture_output=True, encoding="utf-8", errors="replace")
     if pulled.returncode != 0:
         raise ToolError(f"Cannot get the Docker image '{image}': {pulled.stderr.strip()}")
 
