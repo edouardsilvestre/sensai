@@ -33,6 +33,28 @@ Files that did not change are skipped on the next run, and deleted files are rem
 
 Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
 
+### Personas
+
+A persona sets the agent's name, role, tone and scope: it is the system message of the conversation. Each `personas/<id>.json` file defines one, so a newsroom can add its own profile without touching the code. Sensai starts without persona unless `SENSAI_PERSONA` or `-p ID` picks one, and ships three personas that follow an investigation:
+
+| Persona | Role |
+|---|---|
+| `investigator` | finds leads, links people, companies and money flows, builds the timeline |
+| `fact_checker` | challenges every claim: supported, unsupported or contradicted |
+| `editor` | turns the established findings into publishable prose, without adding facts |
+
+```json
+{
+  "name": "Sensai Legal Reviewer",
+  "role": "a media lawyer reviewing an article before publication.",
+  "tone": "cautious and precise.",
+  "scope": "flag defamation and privacy risks; do not rewrite the article.",
+  "instructions": "Optional extra instructions."
+}
+```
+
+`name`, `role`, `tone` and `scope` are required; a file with a missing field or invalid JSON stops the startup with an error naming the file. Switching persona (`/persona ID`) only replaces the system message: the turns and the summary of older turns are kept, so the fact-checker knows what the investigator established.
+
 ### Tools
 
 The model can call tools with [Ollama's tool calling](https://docs.ollama.com/capabilities/tool-calling). A tool is a plain Python function: the Ollama SDK builds the description sent to the model from its type hints and its docstring (`Args:`, `Returns:`). The model answers with tool calls instead of text, Sensai runs them and sends the results back, and the model continues with them. A turn allows up to `SENSAI_MAX_TOOL_ROUNDS` rounds of calls, then the model has to answer.
@@ -86,6 +108,7 @@ python -m sensai -e other.env    # use another env file
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
 python -m sensai status                  # what the index contains
+python -m sensai -p fact_checker         # start with another persona
 ```
 
 ### Usage
@@ -117,6 +140,8 @@ Sources:
 | `/tools` | list the tools the model can call |
 | `/features` | list the features and whether they are on |
 | `/feature NAME on\|off` | turn a feature on or off for the session |
+| `/personas` | list the personas, `*` marks the active one |
+| `/persona [ID]` | show the active persona, or switch to another one; the history is kept |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -147,7 +172,9 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 |---|---|---|
 | `SENSAI_MODEL` | `llama3` | chat model |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
-| `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation |
+| `SENSAI_PERSONA` | empty | persona used at startup (overridden by `-p ID`); empty: no persona, `SENSAI_SYSTEM_PROMPT` is used |
+| `SENSAI_PERSONAS_DIR` | `personas/` of the repository | folder of the persona files |
+| `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation when no persona is active |
 | `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |

@@ -20,6 +20,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
+from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
@@ -27,7 +28,6 @@ from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.registry import ToolRegistry
 
-PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
 HELP = """\
 Commands:
@@ -37,12 +37,15 @@ Commands:
   /context                show the context usage and the summary of older turns
   /features               list the features and whether they are on
   /feature NAME on|off    turn a feature on or off for this session
+  /personas               list the personas
+  /persona [ID]           show the active persona, or switch to another one (the history is kept)
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="sensai", description="Sensai CLI chatbot")
     parser.add_argument("-e", "--env-file", dest="env_path", type=Path, help="Path to a .env file (default: ./.env)")
+    parser.add_argument("-p", "--persona", help="persona to start with (overrides SENSAI_PERSONA)")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     commands.add_parser("chat", help="chat with the model (default)")
     ingest_parser = commands.add_parser("ingest", help="index documents for search")
@@ -155,6 +158,12 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    personas: dict[str, Persona] = field(default_factory=dict)
+
+
+def prompt(session: Session) -> str:
+    persona = session.agent.persona
+    return f"\n[{persona.id}] > " if persona else "\n> "
 
 
 def print_sources(sources: list[SearchResult], answer: str) -> None:
@@ -316,6 +325,37 @@ def reload_tools(session: Session) -> None:
         print(f"Tools: {', '.join(session.agent.tools.names())}. /tools to see what they do.")
 
 
+def list_personas(session: Session) -> None:
+    if not session.personas:
+        print(f"No persona in {session.config.personas_dir}.")
+        return
+    active = session.agent.persona
+    width = max(len(persona_id) for persona_id in session.personas)
+    for persona in session.personas.values():
+        marker = "*" if active and active.id == persona.id else " "
+        print(f" {marker} {persona.id:<{width}}  {persona.name}: {persona.role}")
+
+
+def unknown_persona(personas: dict[str, Persona], persona_id: str) -> str:
+    return f"Unknown persona '{persona_id}'. Available: {', '.join(personas) or 'none'}"
+
+
+def persona_command(session: Session, argument: str) -> None:
+    agent = session.agent
+    if not argument:
+        if agent.persona:
+            print(f"Active persona: {agent.persona.id} ({agent.persona.name}). /personas to list them.")
+        else:
+            print("No active persona. /personas to list them.")
+        return
+    persona = session.personas.get(argument)
+    if persona is None:
+        error(unknown_persona(session.personas, argument))
+        return
+    agent.set_persona(persona)
+    print(f"Switched to {persona.name}. The conversation history is kept.")
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -335,6 +375,10 @@ def handle_command(session: Session, line: str) -> bool:
         list_features(session)
     elif name == "/feature":
         feature_command(session, argument)
+    elif name == "/personas":
+        list_personas(session)
+    elif name == "/persona":
+        persona_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -358,8 +402,22 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     return tools
 
 
+def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
+    personas = load_personas(config.personas_dir)
+    if not config.persona:
+        return personas, None
+    if config.persona not in personas:
+        raise PersonaError(unknown_persona(personas, config.persona) + f" (in {config.personas_dir})")
+    return personas, personas[config.persona]
+
+
 def run_chat(config: Config) -> int:
-    agent = Agent(config)
+    try:
+        personas, persona = load_persona(config)
+    except PersonaError as e:
+        error(str(e))
+        return 1
+    agent = Agent(config, persona=persona)
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
@@ -367,7 +425,7 @@ def run_chat(config: Config) -> int:
         error(str(e))
         return 1
 
-    session = Session(config, agent)
+    session = Session(config, agent, personas=personas)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
@@ -383,11 +441,15 @@ def run_chat(config: Config) -> int:
             print("No documents indexed yet: /ingest PATH to search your files.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
+    if agent.persona:
+        print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
+    elif session.personas:
+        print("No persona: /personas to list them, /persona ID to pick one.")
 
     try:
         while True:
             try:
-                line = input(PROMPT)
+                line = input(prompt(session))
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
@@ -408,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         error(str(e))
         return 1
+    if args.persona:
+        config.persona = args.persona
 
     if args.command == "ingest":
         return run_ingest(config, args.paths, args.rebuild)

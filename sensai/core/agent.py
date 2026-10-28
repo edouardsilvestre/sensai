@@ -15,6 +15,7 @@ from sensai.core.events import (
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
+from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
 from sensai.core.tools.registry import ToolRegistry
@@ -35,12 +36,20 @@ class Agent:
         client: OllamaClient | None = None,
         retriever: Retriever | None = None,
         tools: ToolRegistry | None = None,
+        persona: Persona | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
         self.retriever = retriever
         self.tools = tools or ToolRegistry()
         self.memory = ConversationMemory(config, self.client)
+        self.persona: Persona | None = None
+        if persona is not None:
+            self.set_persona(persona)
+
+    def set_persona(self, persona: Persona) -> None:
+        self.persona = persona
+        self.memory.system_prompt = persona.system_prompt()
 
     @property
     def messages(self) -> list[dict]:

@@ -25,6 +25,7 @@ class ConversationMemory:
     def __init__(self, config: Config, client: OllamaClient | None = None):
         self.config = config
         self.client = client
+        self.system_prompt = config.system_prompt
         self.summary = ""
         self.last_usage: Usage | None = None
         self.summary_usage: Usage | None = None
@@ -39,7 +40,7 @@ class ConversationMemory:
         return self.config.num_ctx * self.config.compact_threshold / 100
 
     def _system_message(self) -> dict | None:
-        parts = [self.config.system_prompt] if self.config.system_prompt else []
+        parts = [self.system_prompt] if self.system_prompt else []
         if self.summary:
             parts.append(f"{SUMMARY_HEADER}\n{self.summary}")
         return {"role": "system", "content": "\n\n".join(parts)} if parts else None

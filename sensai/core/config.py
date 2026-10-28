@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 DEFAULT_ENV_PATH = Path(".env")
+DEFAULT_PERSONAS_DIR = Path(__file__).resolve().parents[2] / "personas"
 FEATURE_PREFIX = "SENSAI_FEATURE_"
 API_KEY_HELP = "create a key on https://ollama.com/settings/keys"
 # Settings that became features: an old .env must not be silently ignored, SENSAI_TOOLS=false would turn tools on.
@@ -40,6 +41,8 @@ class Config:
     system_prompt: str = ""
     num_ctx: int = 8192
     think: bool | None = None
+    persona: str = ""
+    personas_dir: Path = DEFAULT_PERSONAS_DIR
     features: dict[str, bool] = field(default_factory=default_features)
 
     compact_threshold: int = 75
@@ -110,6 +113,8 @@ def load_config(path: Path | None = None) -> Config:
         system_prompt=os.getenv("SENSAI_SYSTEM_PROMPT", Config.system_prompt),
         num_ctx=_int_env("SENSAI_NUM_CTX", Config.num_ctx, minimum=512),
         think=_bool_env("SENSAI_THINK"),
+        persona=os.getenv("SENSAI_PERSONA", Config.persona).strip(),
+        personas_dir=Path(os.getenv("SENSAI_PERSONAS_DIR", "").strip() or Config.personas_dir),
         features=_features_env(),
         compact_threshold=_int_env("SENSAI_COMPACT_THRESHOLD", Config.compact_threshold, minimum=10, maximum=95),
         keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
