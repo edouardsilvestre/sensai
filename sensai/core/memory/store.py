@@ -84,13 +84,22 @@ class MemoryStore:
             )
         return cursor.lastrowid
 
+    def update_fact(self, fact_id: int, content: str) -> None:
+        content = _required(content, "fact")
+        with self._db:
+            cursor = self._db.execute(
+                "UPDATE facts SET content = ?, updated_at = ? WHERE id = ?", (content, _now(), fact_id)
+            )
+        if cursor.rowcount == 0:
+            raise MemoryStoreError(f"No fact with id {fact_id}")
+
     def delete_fact(self, fact_id: int) -> None:
         with self._db:
             cursor = self._db.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
         if cursor.rowcount == 0:
             raise MemoryStoreError(f"No fact with id {fact_id}")
 
-
+  
 
 def _required(value: str, what: str) -> str:
     value = value.strip()
