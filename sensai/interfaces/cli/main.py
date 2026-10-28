@@ -270,7 +270,10 @@ def tools_command(session: Session) -> None:
         print("The tools feature is off: /feature tools on to let the model call tools.")
         return
     if not agent.tools:
-        print("No tool is enabled: /feature web_search on to let the model search the web.")
+        print("No tool is enabled, turn one on with /feature NAME on:")
+        for name, feature in FEATURES.items():
+            if feature.tool:
+                print(f"  {name}: {feature.description}")
         return
     print("Tools:")
     for tool in agent.tools.tools():
@@ -312,7 +315,7 @@ def feature_command(session: Session, argument: str) -> None:
         return
     config.features[name] = value == "on"
     print(f"{name} is {value}.")
-    if name in ("tools", "web_search") and config.features["tools"]:
+    if (name == "tools" or FEATURES[name].tool) and config.features["tools"]:
         # The registry only holds the tools enabled when it was built: build it again to add or remove one.
         reload_tools(session)
     if name == "rag" and value == "on" and session.index is None:

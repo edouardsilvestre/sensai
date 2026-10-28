@@ -12,6 +12,6 @@ def build_registry(config: Config, client: OllamaClient) -> ToolRegistry:
         return ToolRegistry()
     if config.features["web_search"]:
         tools.append(WebSearch(OllamaSearchBackend(client), config.web_search_results).web_search)
-    if config.code_exec:
+    if config.features["code_exec"]:
         tools.append(CodeRunner(config.sandbox_image, config.code_timeout).run_python)
     return ToolRegistry(tools)
