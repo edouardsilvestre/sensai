@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import Config, ConfigError, load_config
+from sensai.core.approval import Approval
+from sensai.core.config import APPROVAL_MODES, Config, ConfigError, load_config
 from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
@@ -29,6 +30,14 @@ from sensai.core.tools.registry import ToolRegistry
 
 PROMPT = "\n> "
 EXIT_COMMANDS = {"/exit", "/quit"}
+ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
+ALWAYS_ANSWERS = {"a", "always"}
+REFUSE_ANSWERS = {"n", "no", "non"}
+APPROVAL_DESCRIPTIONS = {
+    "critical": "asks before the tools that send data out of the machine or run code",
+    "all": "asks before every tool call",
+    "off": "never asks",
+}
 HELP = """\
 Commands:
   /ingest PATH...   index files or folders so that answers can draw on them
@@ -36,6 +45,7 @@ Commands:
   /rag [on|off]     turn document search on or off
   /tools [on|off]   list the tools the model can call, or turn them on or off
   /context          show the context usage and the summary of older turns
+  /approval [MODE]  show or change when to ask before running a tool: critical, all or off
   /exit, /quit      leave (or press Ctrl+D)"""
 
 
@@ -149,6 +159,32 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    always_allowed: set[str] = field(default_factory=set)
+
+
+def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
+    if call.name in session.always_allowed:
+        print(f"[{call.name}] allowed for this session")
+        return Approval(True)
+    question = f"Allow {call.name}? {reason[:1].upper()}{reason[1:]}. [y]es / [n]o / [a]lways this session: "
+    while True:
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            print()
+            return Approval(False, "no answer")
+        if answer in ALLOW_ANSWERS:
+            return Approval(True)
+        if answer in ALWAYS_ANSWERS:
+            session.always_allowed.add(call.name)
+            return Approval(True)
+        if answer in REFUSE_ANSWERS:
+            try:
+                why = input("Why? (optional, sent to the model): ").strip()
+            except EOFError:
+                print()
+                why = ""
+            return Approval(False, why)
 
 
 def print_sources(sources: list[SearchResult], answer: str) -> None:
@@ -287,6 +323,19 @@ def context_command(session: Session) -> None:
         print(textwrap.indent(memory.summary, "    "))
 
 
+def approval_command(session: Session, argument: str) -> None:
+    if argument:
+        if argument not in APPROVAL_MODES:
+            error(f"Usage: /approval [{'|'.join(APPROVAL_MODES)}]")
+            return
+        session.config.approval = argument
+        session.always_allowed.clear()
+    mode = session.config.approval
+    print(f"Approval: {mode}, Sensai {APPROVAL_DESCRIPTIONS[mode]}.")
+    if session.always_allowed:
+        print(f"Allowed for this session: {', '.join(sorted(session.always_allowed))}.")
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -304,6 +353,8 @@ def handle_command(session: Session, line: str) -> bool:
         ingest_command(session, argument)
     elif name == "/context":
         context_command(session)
+    elif name == "/approval":
+        approval_command(session, argument.lower())
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -338,6 +389,7 @@ def run_chat(config: Config) -> int:
 
     session = Session(config, agent, index=load_existing_index(config, agent.client))
     agent.retriever = session.index
+    agent.approver = lambda call, reason: ask_approval(session, call, reason)
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
     if session.index is not None:
         stats = session.index.stats()
