@@ -124,10 +124,6 @@ class MemoryStore:
         if cursor.rowcount == 0:
             raise MemoryStoreError(f"No relation '{subject} {predicate} {object}'")
 
-    def get(self, name: str) -> Entity | None:
-        row = self._db.execute("SELECT id, name, type FROM entities WHERE name = ?", (name.strip(),)).fetchone()
-        return self._load(*row) if row else None
-
     def search(self, query: str, limit: int = 10) -> list[Entity]:
         """The entities whose name or one of whose facts contains `query`, ignoring case."""
         query = _required(query, "query")
@@ -140,10 +136,6 @@ class MemoryStore:
             """,
             {"query": query, "limit": limit},
         ).fetchall()
-        return [self._load(*row) for row in rows]
-
-    def entities(self) -> list[Entity]:
-        rows = self._db.execute("SELECT id, name, type FROM entities ORDER BY name").fetchall()
         return [self._load(*row) for row in rows]
 
     def close(self) -> None:

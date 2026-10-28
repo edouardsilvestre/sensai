@@ -8,7 +8,6 @@ Acceptance criteria:
 - With `SENSAI_FEATURE_MEMORY=true` (the default), saying "Alvor Consulting est une société immatriculée à Chypre en 2019" makes the model call `memory_add_fact`, and the CLI prints the call (`[memory_add_fact] entity="Alvor Consulting" ...`).
 - The entity is created the first time it is mentioned, with its type (person, company, place...) when the model knows it.
 - The facts are saved in `.sensai/memory.db` (or `SENSAI_MEMORY_PATH`), separately from the document index.
-- `/memory` lists the known entities, and `/memory Alvor Consulting` shows its facts and relations.
 
 ## Find them again in a later session
 
