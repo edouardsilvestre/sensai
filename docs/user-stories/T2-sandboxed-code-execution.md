@@ -5,7 +5,7 @@
 As an investigative journalist, I want Sensai to compute totals, percentages and conversions by running code, so that the figures in my article are exact and not guessed by the model.
 
 Acceptance criteria:
-- With `SENSAI_CODE_EXEC=true`, asking "Combien font 17 % de 48 250 € ? Calcule-le." makes the model call `run_python`, and the CLI prints the code before it runs.
+- With `SENSAI_FEATURE_CODE_EXEC=true` (or `/feature code_exec on`), asking "Combien font 17 % de 48 250 € ? Calcule-le." makes the model call `run_python`, and the CLI prints the code before it runs.
 - The CLI then prints a short result: `ok`, the error (`exit 1: ZeroDivisionError`) or `stopped after 10s`.
 - The answer uses the printed output of the program.
 
@@ -24,6 +24,6 @@ Acceptance criteria:
 As a journalist protecting a source, I want the generated code to run isolated from my machine, so that a wrong or malicious program cannot read my files or send data out.
 
 Acceptance criteria:
-- Code execution is off unless `SENSAI_CODE_EXEC=true`; `/tools off` disables it for the rest of the session.
+- Code execution is off unless `SENSAI_FEATURE_CODE_EXEC=true` or `/feature code_exec on`; `/feature code_exec off` or `/feature tools off` disables it for the rest of the session.
 - The code runs in a new Docker container that is removed afterwards, without network, with limited memory, CPU and processes, a read-only disk and no host folder mounted.
 - If Docker is not installed or not running, Sensai warns at startup and keeps working without code execution; if the image is missing, it downloads it first.
