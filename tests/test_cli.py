@@ -27,6 +27,7 @@ def test_features_lists_every_feature(session, capsys):
         ["rag", "on", "answer from the indexed documents"],
         ["tools", "on", "let the model call the tools enabled in the configuration"],
         ["web_search", "off", "let the model search the web; the queries are sent to Ollama's web search"],
+        ["code_exec", "off", "let the model run Python code in a Docker sandbox"],
     ]
 
 
@@ -69,7 +70,10 @@ def test_web_search_can_be_turned_on_and_off_during_a_chat(config, client, capsy
     handle_command(session, "/feature web_search off")
     assert not session.agent.tools
     handle_command(session, "/tools")
-    assert "No tool is enabled: /feature web_search on" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "No tool is enabled, turn one on with /feature NAME on:" in out
+    assert "  web_search: let the model search the web" in out
+    assert "  code_exec: let the model run Python code" in out
 
 
 def test_web_search_needs_the_api_key_to_be_turned_on(session, capsys):
@@ -87,4 +91,4 @@ def test_tools_lists_the_enabled_tools(session, capsys):
 def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
-    assert "Features: rag off, tools on, web_search off" in capsys.readouterr().out
+    assert "Features: rag off, tools on, web_search off, code_exec off" in capsys.readouterr().out

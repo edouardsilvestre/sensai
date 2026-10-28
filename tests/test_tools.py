@@ -112,5 +112,5 @@ def test_tools_feature_disables_every_tool(config, client):
 
 
 def test_code_execution_is_enabled_by_its_setting(config, client):
-    config.code_exec = True
+    config.features["code_exec"] = True
     assert build_registry(config, client).names() == ["run_python"]
