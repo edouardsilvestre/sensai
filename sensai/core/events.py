@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from sensai.core.guardrails.rules import Hit
+from sensai.core.approval import Approval
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.rag.models import SearchResult
 from sensai.core.tools.registry import ToolResult
@@ -19,6 +20,12 @@ class TokenEvent:
 @dataclass
 class ToolCallEvent:
     call: ToolCall
+
+
+@dataclass
+class ApprovalEvent:
+    call: ToolCall
+    approval: Approval
 
 
 @dataclass
@@ -59,6 +66,7 @@ Event = (
     SourcesEvent
     | TokenEvent
     | ToolCallEvent
+    | ApprovalEvent
     | ToolResultEvent
     | GuardrailEvent
     | DoneEvent

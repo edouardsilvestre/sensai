@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import API_KEY_HELP, FEATURES, Config, ConfigError, load_config
+from sensai.core.approval import Approval
+from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
@@ -31,6 +32,14 @@ from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
+ALWAYS_ANSWERS = {"a", "always"}
+REFUSE_ANSWERS = {"n", "no", "non"}
+APPROVAL_DESCRIPTIONS = {
+    "critical": "asks before the tools that send data out of the machine or run code",
+    "all": "asks before every tool call",
+    "off": "never asks",
+}
 HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
@@ -42,6 +51,7 @@ Commands:
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
   /guardrails             list the rules checking your messages, the answers and the tool calls
+  /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
@@ -161,7 +171,33 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    always_allowed: set[str] = field(default_factory=set)
     personas: dict[str, Persona] = field(default_factory=dict)
+
+
+def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
+    if call.name in session.always_allowed:
+        print(f"[{call.name}] allowed for this session")
+        return Approval(True)
+    question = f"Allow {call.name}? {reason[:1].upper()}{reason[1:]}. [y]es / [n]o / [a]lways this session: "
+    while True:
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            print()
+            return Approval(False, "no answer")
+        if answer in ALLOW_ANSWERS:
+            return Approval(True)
+        if answer in ALWAYS_ANSWERS:
+            session.always_allowed.add(call.name)
+            return Approval(True)
+        if answer in REFUSE_ANSWERS:
+            try:
+                why = input("Why? (optional, sent to the model): ").strip()
+            except EOFError:
+                print()
+                why = ""
+            return Approval(False, why)
 
 
 def prompt(session: Session) -> str:
@@ -339,6 +375,17 @@ def guardrails_command(session: Session) -> None:
         print(f"  {rule.name}: {rule.action} in {where}, {rule.summary}")
     if not config.guardrails_path.exists():
         print(f"Write your own rules in {config.guardrails_path}: see guardrails.example.json.")
+def approval_command(session: Session, argument: str) -> None:
+    if argument:
+        if argument not in APPROVAL_MODES:
+            error(f"Usage: /approval [{'|'.join(APPROVAL_MODES)}]")
+            return
+        session.config.approval = argument
+        session.always_allowed.clear()
+    mode = session.config.approval
+    print(f"Approval: {mode}, Sensai {APPROVAL_DESCRIPTIONS[mode]}.")
+    if session.always_allowed:
+        print(f"Allowed for this session: {', '.join(sorted(session.always_allowed))}.")
 
 
 def list_features(session: Session) -> None:
@@ -429,6 +476,8 @@ def handle_command(session: Session, line: str) -> bool:
         context_command(session)
     elif name == "/guardrails":
         guardrails_command(session)
+    elif name == "/approval":
+        approval_command(session, argument.lower())
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -498,6 +547,7 @@ def run_chat(config: Config) -> int:
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
+    agent.approver = lambda call, reason: ask_approval(session, call, reason)
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
     disabled = [name for name, enabled in config.features.items() if not enabled]
     if disabled:
