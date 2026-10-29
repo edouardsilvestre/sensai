@@ -12,6 +12,13 @@ def _describe(entity: Entity) -> str:
     return "\n".join(lines)
 
 
+def _fact_id(value: int) -> int:
+    # Models often send numbers as strings.
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ToolError(f"fact_id must be a number, got '{value}'") from None
+
 
 class MemoryTools:
     """The tools that let the model read and write the long-term memory; the bound methods are what it calls."""
@@ -19,7 +26,11 @@ class MemoryTools:
     def __init__(self, store: MemoryStore):
         self.store = store
 
-
+    def tools(self) -> list[Tool]:
+        return [
+            self.memory_search, self.memory_add_fact, self.memory_update_fact,
+            self.memory_delete_fact, self.memory_link, self.memory_unlink,
+        ]
 
     def memory_search(self, query: str) -> ToolResult:
         """
@@ -42,3 +53,56 @@ class MemoryTools:
         names = ", ".join(entity.name for entity in entities)
         return ToolResult(text, summary=f"{len(entities)} found: {names}")
 
+    def memory_add_fact(self, entity: str, fact: str, entity_type: str = "") -> ToolResult:
+        """
+        Save a new fact about a person, a company or a place in the long-term memory.
+        To correct a fact that is already stored, use memory_update_fact instead.
+
+        Args:
+          entity: The name of the person, company or place
+          fact: The fact, as one short sentence
+          entity_type: person, company, place... when it is known
+
+        Returns:
+          The id of the saved fact
+        """
+        try:
+            fact_id = self.store.add_fact(str(entity), str(fact), str(entity_type))
+        except MemoryStoreError as e:
+            raise ToolError(f"memory_add_fact: {e}") from None
+        return ToolResult(f"Saved as fact {fact_id} about {entity}.", summary=f"fact {fact_id} saved")
+
+    def memory_update_fact(self, fact_id: int, fact: str) -> ToolResult:
+        """
+        Replace a stored fact that turned out to be wrong or incomplete. Get its id with memory_search.
+
+        Args:
+          fact_id: The id of the fact, given by memory_search
+          fact: The corrected fact, as one short sentence
+
+        Returns:
+          A confirmation
+        """
+        fact_id = _fact_id(fact_id)
+        try:
+            self.store.update_fact(fact_id, str(fact))
+        except MemoryStoreError as e:
+            raise ToolError(f"memory_update_fact: {e}") from None
+        return ToolResult(f"Fact {fact_id} updated.", summary=f"fact {fact_id} updated")
+
+    def memory_delete_fact(self, fact_id: int) -> ToolResult:
+        """
+        Delete a stored fact that is wrong, or that the user asked to forget. Get its id with memory_search.
+
+        Args:
+          fact_id: The id of the fact, given by memory_search
+
+        Returns:
+          A confirmation
+        """
+        fact_id = _fact_id(fact_id)
+        try:
+            self.store.delete_fact(fact_id)
+        except MemoryStoreError as e:
+            raise ToolError(f"memory_delete_fact: {e}") from None
+        return ToolResult(f"Fact {fact_id} deleted.", summary=f"fact {fact_id} deleted")
