@@ -34,6 +34,28 @@ Files that did not change are skipped on the next run, and deleted files are rem
 
 Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
 
+### Personas
+
+A persona sets the agent's name, role, tone and scope: it is the system message of the conversation. Each `personas/<id>.json` file defines one, so a newsroom can add its own profile without touching the code. Sensai starts without persona unless `SENSAI_PERSONA` or `-p ID` picks one, and ships three personas that follow an investigation:
+
+| Persona | Role |
+|---|---|
+| `investigator` | finds leads, links people, companies and money flows, builds the timeline |
+| `fact_checker` | challenges every claim: supported, unsupported or contradicted |
+| `editor` | turns the established findings into publishable prose, without adding facts |
+
+```json
+{
+  "name": "Sensai Legal Reviewer",
+  "role": "a media lawyer reviewing an article before publication.",
+  "tone": "cautious and precise.",
+  "scope": "flag defamation and privacy risks; do not rewrite the article.",
+  "instructions": "Optional extra instructions."
+}
+```
+
+`name`, `role`, `tone` and `scope` are required; a file with a missing field or invalid JSON stops the startup with an error naming the file. Switching persona (`/persona ID`) only replaces the system message: the turns and the summary of older turns are kept, so the fact-checker knows what the investigator established.
+
 ### Tools
 
 The model can call tools with [Ollama's tool calling](https://docs.ollama.com/capabilities/tool-calling). A tool is a plain Python function: the Ollama SDK builds the description sent to the model from its type hints and its docstring (`Args:`, `Returns:`). The model answers with tool calls instead of text, Sensai runs them and sends the results back, and the model continues with them. A turn allows up to `SENSAI_MAX_TOOL_ROUNDS` rounds of calls, then the model has to answer.
@@ -61,6 +83,8 @@ Like the excerpts, tool calls and results are only sent for the current message:
 Tools need a model that supports them (`qwen3`, `llama3.1`, `mistral`...). With a model that does not, like `llama3`, Sensai warns at startup and chats without tools.
 
 **Web search** (`tools/web_search.py`) uses [Ollama's web search API](https://docs.ollama.com/capabilities/web-search), which needs a free API key from [ollama.com/settings/keys](https://ollama.com/settings/keys) in `OLLAMA_API_KEY`. The model gets the title, URL and content of the first `SENSAI_WEB_SEARCH_RESULTS` results, each page cut to 1500 characters so that they fit in the context window, and marked as untrusted data so that instructions hidden in a page are not followed. `SearchBackend` keeps the search engine separate from the tool, so it can be replaced without touching the rest.
+
+**Code execution** (`tools/code_runner.py`) lets the model run the Python code it writes, like ChatGPT's Code Interpreter. Each call starts a new Docker container from `SENSAI_SANDBOX_IMAGE`, sends the code to `python -` on its standard input and removes the container afterwards. The container has no network, 256 MB of memory, one CPU, 64 processes at most, a read-only disk (only `/tmp` is writable) and runs as `nobody` without privileges; nothing from the host is mounted. A program running longer than `SENSAI_CODE_TIMEOUT` seconds is killed. The model gets the exit code, the output and the traceback, each cut to their last 2000 characters. A crash is not a tool error: the model reads the traceback, fixes its code and calls `run_python` again, within the `SENSAI_MAX_TOOL_ROUNDS` limit. At startup Sensai checks that Docker runs and downloads the image if needed, otherwise it warns and chats without code execution.
 
 ### Guardrails
 
@@ -108,6 +132,7 @@ python -m sensai -e other.env    # use another env file
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
 python -m sensai status                  # what the index contains
+python -m sensai -p fact_checker         # start with another persona
 ```
 
 ### Usage
@@ -135,9 +160,12 @@ Sources:
 |---|---|
 | `/ingest PATH...` | index files or folders without leaving the chat |
 | `/sources` | show the full excerpts retrieved for the last message |
-| `/rag [on\|off]` | turn document search on or off |
 | `/context` | show the tokens used by the last message and the summary of older turns |
-| `/tools [on\|off]` | list the tools the model can call, or turn them on or off |
+| `/tools` | list the tools the model can call |
+| `/features` | list the features and whether they are on |
+| `/feature NAME on\|off` | turn a feature on or off for the session |
+| `/personas` | list the personas, `*` marks the active one |
+| `/persona [ID]` | show the active persona, or switch to another one; the history is kept |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/help` | list the commands |
 
@@ -148,7 +176,7 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 [memory] 3 turns condensed into the summary.
 ```
 
-With `SENSAI_WEB_SEARCH=true`, the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
@@ -173,6 +201,25 @@ D'après l'email du 4 avril 2023, c'est [SOURCE] qui a refusé de valider le vir
 [warning] Message blocked by the guardrail private-life: asks for the home address of a private person. Nothing was sent to the model.
 ```
 
+With `SENSAI_FEATURE_CODE_EXEC=true` (or `/feature code_exec on` during a chat) and [Docker](https://docs.docker.com/engine/install/) running, the model runs Python to compute instead of guessing. When its code fails, it reads the traceback and tries again:
+
+```
+> Combien font 17 % de 48 250 euros ? Calcule-le avec du code Python.
+[run_python]
+  code:
+    result = 48250 * 0.17
+    print(result)
+[run_python] ok
+Le calcul de 17 % de 48 250 euros est de **8 202,5 euros**.
+```
+
+The default image only has the standard library. For pandas, build your own image and set `SENSAI_SANDBOX_IMAGE`:
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install pandas numpy
+```
+
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
 
 ### Configuration
@@ -183,23 +230,55 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 |---|---|---|
 | `SENSAI_MODEL` | `llama3` | chat model |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
-| `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation |
+| `SENSAI_PERSONA` | empty | persona used at startup (overridden by `-p ID`); empty: no persona, `SENSAI_SYSTEM_PROMPT` is used |
+| `SENSAI_PERSONAS_DIR` | `personas/` of the repository | folder of the persona files |
+| `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation when no persona is active |
 | `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
+| `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
+| `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
+| `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
+| `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
+| `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_GUARDRAILS_PATH` | `.sensai/guardrails.json` | guardrail rules (see `guardrails.example.json`); without it, personal data is blocked in web searches |
-| `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
 | `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
-| `SENSAI_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
-| `SENSAI_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
+| `SENSAI_CODE_TIMEOUT` | `10` | seconds a program may run before it is stopped (1-60) |
+| `SENSAI_SANDBOX_IMAGE` | `python:3.12-slim` | Docker image the code runs in; use one with pandas to analyse CSV files |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
+
+### Features
+
+Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`true` or `false`), or during a chat with `/feature NAME on|off`. A misspelled feature variable stops Sensai with an error.
+
+| Feature | What it turns on or off |
+|---|---|
+| `rag` | answers drawn from the indexed documents |
+| `tools` | every tool the model can call, whatever their own feature or setting |
+| `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
+| `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
+
+The features are on by default, except `web_search` and `code_exec`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+
+To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
+
+```python
+FEATURES = {
+    "rag": Feature("answer from the indexed documents"),
+    "tools": Feature("let the model call the tools enabled in the configuration"),
+    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False),
+    "compaction": Feature("summarize older turns when the context fills up"),
+}
+```
+
+Then check `config.features["compaction"]` where the feature runs. `SENSAI_FEATURE_COMPACTION`, `/features` and `/feature compaction off` work without other changes.
 
 ### Tests
 
