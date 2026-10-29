@@ -83,6 +83,8 @@ Tools need a model that supports them (`qwen3`, `llama3.1`, `mistral`...). With 
 
 **Web search** (`tools/web_search.py`) uses [Ollama's web search API](https://docs.ollama.com/capabilities/web-search), which needs a free API key from [ollama.com/settings/keys](https://ollama.com/settings/keys) in `OLLAMA_API_KEY`. The model gets the title, URL and content of the first `SENSAI_WEB_SEARCH_RESULTS` results, each page cut to 1500 characters so that they fit in the context window, and marked as untrusted data so that instructions hidden in a page are not followed. `SearchBackend` keeps the search engine separate from the tool, so it can be replaced without touching the rest.
 
+**Code execution** (`tools/code_runner.py`) lets the model run the Python code it writes, like ChatGPT's Code Interpreter. Each call starts a new Docker container from `SENSAI_SANDBOX_IMAGE`, sends the code to `python -` on its standard input and removes the container afterwards. The container has no network, 256 MB of memory, one CPU, 64 processes at most, a read-only disk (only `/tmp` is writable) and runs as `nobody` without privileges; nothing from the host is mounted. A program running longer than `SENSAI_CODE_TIMEOUT` seconds is killed. The model gets the exit code, the output and the traceback, each cut to their last 2000 characters. A crash is not a tool error: the model reads the traceback, fixes its code and calls `run_python` again, within the `SENSAI_MAX_TOOL_ROUNDS` limit. At startup Sensai checks that Docker runs and downloads the image if needed, otherwise it warns and chats without code execution.
+
 ## Getting Started
 
 ### Installation
@@ -162,6 +164,25 @@ La dernière version stable de Python publiée est Python 3.15.1 [...]
 URL de référence : https://www.python.org/downloads/latest/
 ```
 
+With `SENSAI_FEATURE_CODE_EXEC=true` (or `/feature code_exec on` during a chat) and [Docker](https://docs.docker.com/engine/install/) running, the model runs Python to compute instead of guessing. When its code fails, it reads the traceback and tries again:
+
+```
+> Combien font 17 % de 48 250 euros ? Calcule-le avec du code Python.
+[run_python]
+  code:
+    result = 48250 * 0.17
+    print(result)
+[run_python] ok
+Le calcul de 17 % de 48 250 euros est de **8 202,5 euros**.
+```
+
+The default image only has the standard library. For pandas, build your own image and set `SENSAI_SANDBOX_IMAGE`:
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install pandas numpy
+```
+
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
 
 ### Configuration
@@ -180,6 +201,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
+| `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
@@ -189,6 +211,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
+| `SENSAI_CODE_TIMEOUT` | `10` | seconds a program may run before it is stopped (1-60) |
+| `SENSAI_SANDBOX_IMAGE` | `python:3.12-slim` | Docker image the code runs in; use one with pandas to analyse CSV files |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 
 ### Features
@@ -200,8 +224,9 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `rag` | answers drawn from the indexed documents |
 | `tools` | every tool the model can call, whatever their own feature or setting |
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
+| `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 
-The features are on by default, except `web_search`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search` and `code_exec`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 

@@ -16,13 +16,17 @@ RENAMED = {"SENSAI_TOOLS": "SENSAI_FEATURE_TOOLS", "SENSAI_WEB_SEARCH": "SENSAI_
 class Feature:
     description: str
     default: bool = True
+    # True when the feature enables a tool the model can call himself.
+    tool: bool = False
 
 
 FEATURES = {
     "rag": Feature("answer from the indexed documents"),
     "tools": Feature("let the model call the tools enabled in the configuration"),
     # Off by default: the queries leave the machine.
-    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False),
+    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
+    # Off by default: the code runs on this machine, and needs Docker.
+    "code_exec": Feature("let the model run Python code in a Docker sandbox", default=False, tool=True),
 }
 
 
@@ -56,6 +60,8 @@ class Config:
 
     ollama_api_key: str = field(default="", repr=False)
     web_search_results: int = 5
+    code_timeout: int = 10
+    sandbox_image: str = "python:3.12-slim"
     max_tool_rounds: int = 5
 
 
@@ -125,6 +131,8 @@ def load_config(path: Path | None = None) -> Config:
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
+        code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),
+        sandbox_image=os.getenv("SENSAI_SANDBOX_IMAGE", Config.sandbox_image),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
     )
     if config.chunk_overlap >= config.chunk_size:

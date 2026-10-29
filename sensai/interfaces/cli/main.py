@@ -190,7 +190,15 @@ def show_excerpts(sources: list[SearchResult]) -> None:
 
 
 def describe_call(call: ToolCall) -> str:
-    return ", ".join(f"{name}={json.dumps(value, ensure_ascii=False)}" for name, value in call.arguments.items())
+    # Multi-line arguments, like code, are shown as indented blocks instead of one escaped line.
+    inline = []
+    blocks = []
+    for name, value in call.arguments.items():
+        if isinstance(value, str) and "\n" in value.strip():
+            blocks.append(f"\n  {name}:\n" + textwrap.indent(value.strip("\n"), "    "))
+        else:
+            inline.append(f"{name}={json.dumps(value, ensure_ascii=False)}")
+    return f"[{call.name}] {', '.join(inline)}".rstrip() + "".join(blocks)
 
 
 def chat_turn(session: Session, line: str) -> None:
@@ -211,7 +219,7 @@ def chat_turn(session: Session, line: str) -> None:
                 if mid_line:
                     print()
                     mid_line = False
-                print(f"[{event.call.name}] {describe_call(event.call)}")
+                print(describe_call(event.call))
             elif isinstance(event, ToolResultEvent):
                 if event.result.error:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
@@ -262,7 +270,10 @@ def tools_command(session: Session) -> None:
         print("The tools feature is off: /feature tools on to let the model call tools.")
         return
     if not agent.tools:
-        print("No tool is enabled: /feature web_search on to let the model search the web.")
+        print("No tool is enabled, turn one on with /feature NAME on:")
+        for name, feature in FEATURES.items():
+            if feature.tool:
+                print(f"  {name}: {feature.description}")
         return
     print("Tools:")
     for tool in agent.tools.tools():
@@ -304,7 +315,7 @@ def feature_command(session: Session, argument: str) -> None:
         return
     config.features[name] = value == "on"
     print(f"{name} is {value}.")
-    if name in ("tools", "web_search") and config.features["tools"]:
+    if (name == "tools" or FEATURES[name].tool) and config.features["tools"]:
         # The registry only holds the tools enabled when it was built: build it again to add or remove one.
         reload_tools(session)
     if name == "rag" and value == "on" and session.index is None:
@@ -399,6 +410,8 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
+    for message in tools.prepare():
+        warning(message)
     return tools
 
 
