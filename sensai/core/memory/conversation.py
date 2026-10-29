@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 from sensai.core.config import Config
 from sensai.core.llm.ollama import OllamaClient, Usage
+from sensai.core.memory.profile import PROFILE_HEADER
 from sensai.core.memory.prompt import build_summary_prompt, summary_word_limit
 
 SUMMARY_HEADER = "Summary of the earlier conversation (older turns were condensed into it):"
@@ -27,6 +28,8 @@ class ConversationMemory:
         self.client = client
         self.system_prompt = config.system_prompt
         self.summary = ""
+        # The user's profile, sent after the system prompt while the profile feature is on.
+        self.profile = ""
         self.last_usage: Usage | None = None
         self.summary_usage: Usage | None = None
         self.turns: list[Turn] = []
@@ -40,7 +43,9 @@ class ConversationMemory:
         return self.config.num_ctx * self.config.compact_threshold / 100
 
     def _system_message(self) -> dict | None:
-        parts = [self.system_prompt] if self.system_prompt else []
+        parts = [self.config.system_prompt] if self.config.system_prompt else []
+        if self.profile and self.config.features["profile"]:
+            parts.append(f"{PROFILE_HEADER}\n{self.profile}")
         if self.summary:
             parts.append(f"{SUMMARY_HEADER}\n{self.summary}")
         return {"role": "system", "content": "\n\n".join(parts)} if parts else None

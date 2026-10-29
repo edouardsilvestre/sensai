@@ -9,6 +9,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 ### Key features
 
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
+- 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
@@ -33,6 +34,13 @@ Indexing (`python -m sensai ingest`):
 Files that did not change are skipped on the next run, and deleted files are removed from the index.
 
 Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
+
+### Sessions & profile
+
+- `memory/sessions.py`: `SessionStore` writes each conversation to its own JSON file in `SENSAI_SESSIONS_DIR` after every answered message: the summary of older turns and the turns kept verbatim, with the sources each answer cited, exactly as `ConversationMemory` holds them. Resuming puts them back in the memory, so the model gets the same context as before the restart. A file is written next to the session then renamed, so a crash never leaves half a conversation, and an unreadable file is skipped instead of stopping Sensai.
+- `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
+
+Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
 
 ### Personas
 
@@ -142,6 +150,8 @@ ollama pull qwen3-embedding:0.6b   # embedding model for document search
 python -m sensai                 # uses .env
 SENSAI_MODEL=qwen3.8 python -m sensai   # override the model for one run
 python -m sensai -e other.env    # use another env file
+python -m sensai --resume        # continue the last conversation
+python -m sensai --resume 20261027-153012   # continue a given one (/sessions lists them)
 
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
@@ -180,6 +190,10 @@ Sources:
 | `/feature NAME on\|off` | turn a feature on or off for the session |
 | `/personas` | list the personas, `*` marks the active one |
 | `/persona [ID]` | show the active persona, or switch to another one; the history is kept |
+| `/sessions` | list the saved conversations, the current one marked with `*` |
+| `/resume [ID]` | continue a saved conversation, the last one without ID |
+| `/new` | start a new conversation; the current one stays saved |
+| `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/help` | list the commands |
@@ -191,6 +205,20 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 [memory] 3 turns condensed into the summary.
 ```
 
+Every answered message is saved, so a conversation can be continued after a restart, and the profile is sent at the start of every conversation:
+
+```
+> /profile add Réponds en français et n'écris jamais le nom de la source : dis "la source".
+Added as instruction 1.
+> /exit
+
+$ python -m sensai --resume
+Profile: 1 instruction sent to the model. /profile to see them.
+Resumed conversation 20261027-153012: 4 turns. /context shows them.
+> Et la facture, finalement ?
+```
+
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
 With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed and has to be approved before it is sent, so nothing leaves the machine without your consent:
 
 ```
@@ -255,6 +283,12 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
+| `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
+| `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
+| `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
+| `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
+| `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
+| `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
 | `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
