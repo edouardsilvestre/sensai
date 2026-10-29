@@ -28,6 +28,7 @@ FEATURES = {
     # Off by default: the code runs on this machine, and needs Docker.
     "code_exec": Feature("let the model run Python code in a Docker sandbox", default=False, tool=True),
 }
+APPROVAL_MODES = ("critical", "all", "off")
 
 
 class ConfigError(Exception):
@@ -63,6 +64,7 @@ class Config:
     code_timeout: int = 10
     sandbox_image: str = "python:3.12-slim"
     max_tool_rounds: int = 5
+    approval: str = "critical"
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -88,6 +90,15 @@ def _bool_env(name: str) -> bool | None:
     if raw in ("0", "false", "no", "off"):
         return False
     raise ConfigError(f"{name} must be true or false, got '{raw}'")
+
+
+def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw not in choices:
+        raise ConfigError(f"{name} must be one of {', '.join(choices)}, got '{raw}'")
+    return raw
 
 
 def _features_env() -> dict[str, bool]:
@@ -134,6 +145,7 @@ def load_config(path: Path | None = None) -> Config:
         code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),
         sandbox_image=os.getenv("SENSAI_SANDBOX_IMAGE", Config.sandbox_image),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
+        approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")
