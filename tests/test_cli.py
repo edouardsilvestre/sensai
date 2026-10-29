@@ -30,6 +30,7 @@ def test_features_lists_every_feature(session, capsys):
         ["code_exec", "off", "let the model run Python code in a Docker sandbox"],
         ["sessions", "on", "save every conversation so that it can be resumed"],
         ["profile", "on", "send your profile to the model at the start of every conversation"],
+        ["guardrails", "on", "check the messages, the answers and the tool calls against the guardrail rules"],
     ]
 
 
@@ -94,3 +95,4 @@ def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
     assert "Features: rag off, tools on, web_search off, code_exec off, sessions on, profile on" in capsys.readouterr().out
+    assert "Features: rag off, tools on, web_search off, code_exec off, guardrails on" in capsys.readouterr().out

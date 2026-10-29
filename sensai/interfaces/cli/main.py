@@ -15,11 +15,13 @@ from sensai.core.events import (
     CompactionFailedEvent,
     CompactionStartedEvent,
     DoneEvent,
+    GuardrailEvent,
     SourcesEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
@@ -56,6 +58,7 @@ Commands:
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
+  /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /exit, /quit            leave (or press Ctrl+D)"""
 
@@ -253,6 +256,22 @@ def describe_call(call: ToolCall) -> str:
     return f"[{call.name}] {', '.join(inline)}".rstrip() + "".join(blocks)
 
 
+WHERE = {"input": "your message", "output": "the answer", "tools": "a tool call"}
+
+
+def print_guardrail(hit: Hit) -> None:
+    where, found = WHERE[hit.stage], f" ({hit.found})" if hit.found else ""
+    if hit.action == "redact":
+        print(f"[guardrail] {hit.rule}: {plural(hit.count, 'passage')} redacted in {where}{found}")
+    elif hit.action == "warn":
+        warning(f"guardrail {hit.rule}: found in {where}{found}" + (f". {hit.message}" if hit.message else ""))
+    elif hit.stage == "input":
+        warning(f"Message blocked by the guardrail {hit.rule}: {hit.message or hit.found}. Nothing was sent to the model.")
+    elif hit.stage == "output":
+        warning(f"Answer stopped by the guardrail {hit.rule}{found}" + (f": {hit.message}" if hit.message else ""))
+    # A blocked tool call is reported by its result, which the model also gets.
+
+
 def chat_turn(session: Session, line: str) -> None:
     sources: list[SearchResult] = []
     if line.strip():
@@ -277,6 +296,11 @@ def chat_turn(session: Session, line: str) -> None:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
                 else:
                     print(f"[{event.call.name}] {event.result.summary or 'done'}")
+            elif isinstance(event, GuardrailEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                print_guardrail(event.hit)
             elif isinstance(event, DoneEvent):
                 print()
                 if sources:
@@ -455,6 +479,25 @@ def context_command(session: Session) -> None:
         print(textwrap.indent(memory.summary, "    "))
 
 
+def guardrails_source(config: Config) -> str:
+    return str(config.guardrails_path) if config.guardrails_path.exists() else "default rules"
+
+
+def guardrails_command(session: Session) -> None:
+    config = session.config
+    if not config.features["guardrails"]:
+        print("The guardrails feature is off: /feature guardrails on to check messages, answers and tool calls.")
+        return
+    rules = session.agent.guardrails.rules
+    print(f"Guardrails ({guardrails_source(config)}):")
+    if not rules:
+        print("  no rule")
+    for rule in rules:
+        tools = f" ({', '.join(sorted(rule.tools))})" if rule.tools else ""
+        where = ", ".join(stage + (tools if stage == "tools" else "") for stage in STAGES if stage in rule.stages)
+        print(f"  {rule.name}: {rule.action} in {where}, {rule.summary}")
+    if not config.guardrails_path.exists():
+        print(f"Write your own rules in {config.guardrails_path}: see guardrails.example.json.")
 def approval_command(session: Session, argument: str) -> None:
     if argument:
         if argument not in APPROVAL_MODES:
@@ -562,6 +605,8 @@ def handle_command(session: Session, line: str) -> bool:
         new_command(session)
     elif name == "/profile":
         profile_command(session, argument)
+    elif name == "/guardrails":
+        guardrails_command(session)
     elif name == "/approval":
         approval_command(session, argument.lower())
     elif name == "/features":
@@ -615,6 +660,12 @@ def load_memory(session: Session, resume_id: str | None) -> None:
         resume(session, resume_id)
     else:
         warning("--resume is ignored: the sessions feature is off.")
+def load_guardrails(config: Config, client: OllamaClient) -> Guardrails:
+    """Raises GuardrailError for an invalid rules file: Sensai does not start with rules it did not understand."""
+    rules = load_rules(config.guardrails_path)
+    if config.features["guardrails"]:
+        print(f"Guardrails: {plural(len(rules), 'rule')} from {guardrails_source(config)}. /guardrails to list them.")
+    return Guardrails(rules, model_judge(client, config))
 
 
 def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
@@ -636,7 +687,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
-    except LLMError as e:
+        agent.guardrails = load_guardrails(config, agent.client)
+    except (LLMError, GuardrailError) as e:
         error(str(e))
         return 1
 
