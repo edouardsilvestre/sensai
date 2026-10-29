@@ -19,6 +19,8 @@ class MemoryTools:
     def __init__(self, store: MemoryStore):
         self.store = store
 
+
+
     def memory_search(self, query: str) -> ToolResult:
         """
         Search the long-term memory, which is kept between sessions, for what is known about a person,
