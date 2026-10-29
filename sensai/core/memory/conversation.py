@@ -43,7 +43,7 @@ class ConversationMemory:
         return self.config.num_ctx * self.config.compact_threshold / 100
 
     def _system_message(self) -> dict | None:
-        parts = [self.config.system_prompt] if self.config.system_prompt else []
+        parts = [self.system_prompt] if self.system_prompt else []
         if self.profile and self.config.features["profile"]:
             parts.append(f"{PROFILE_HEADER}\n{self.profile}")
         if self.summary:
