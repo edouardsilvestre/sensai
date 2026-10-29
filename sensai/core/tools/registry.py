@@ -36,6 +36,23 @@ class ToolRegistry:
     def tools(self) -> list[Tool]:
         return list(self._tools.values())
 
+    def prepare(self) -> list[str]:
+        """
+        Calls `prepare()` on the object of each tool that has one, like the CodeRunner that pulls its Docker image.
+        A tool whose preparation fails is removed. Returns why each removed tool is disabled.
+        """
+        errors = []
+        for name, tool in list(self._tools.items()):
+            prepare = getattr(getattr(tool, "__self__", None), "prepare", None)
+            if prepare is None:
+                continue
+            try:
+                prepare()
+            except ToolError as e:
+                del self._tools[name]
+                errors.append(f"{name} disabled: {e}")
+        return errors
+
     def execute(self, call: ToolCall) -> ToolResult:
         # Failures go back to the model as the tool's answer, so that it can fix its call or answer without it.
         tool = self._tools.get(call.name)

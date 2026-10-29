@@ -5,7 +5,7 @@
 As an investigative journalist, I want Sensai to look up a company named in the leak on the web, so that I can tell whether it has a real public footprint (website, registry entry, press coverage) or looks like a shell company.
 
 Acceptance criteria:
-- With `SENSAI_WEB_SEARCH=true`, asking "Alvor Consulting a-t-elle une existence publique ?" makes the model call `web_search`, and the CLI prints `[web_search] query="..."` before the query is sent.
+- With `SENSAI_FEATURE_WEB_SEARCH=true`, asking "Alvor Consulting a-t-elle une existence publique ?" makes the model call `web_search`, and the CLI prints `[web_search] query="..."` before the query is sent.
 - The CLI then prints the number of results and their domains (`[web_search] 5 results: ...`).
 - The answer cites the URLs of the results it relies on, and says plainly when the search found nothing relevant.
 - When the search fails (no network, invalid `OLLAMA_API_KEY`, quota reached), a warning explains why and the model still answers, saying the search failed.
@@ -15,8 +15,8 @@ Acceptance criteria:
 As an investigative journalist protecting a source, I want web search to be off unless I turn it on, and to see every query sent, so that nothing about the investigation reaches a search engine without my knowledge.
 
 Acceptance criteria:
-- Without `SENSAI_WEB_SEARCH=true`, no tool is sent to the model and no network request is made apart from the local Ollama server; `/tools` says that no tool is enabled.
-- With web search enabled, `/tools off` stops the model from searching for the rest of the session, and `/tools on` allows it again.
+- Without `SENSAI_FEATURE_WEB_SEARCH=true`, no tool is sent to the model and no network request is made apart from the local Ollama server; `/tools` says that no tool is enabled.
+- With web search enabled, `/feature web_search off` stops the model from searching for the rest of the session, and `/feature web_search on` allows it again (it refuses without `OLLAMA_API_KEY`).
 - Each query is printed before it is sent, never after.
 - The search results are only sent for the current message: they are not stored in the conversation history.
 

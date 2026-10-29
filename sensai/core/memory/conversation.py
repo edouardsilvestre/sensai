@@ -26,6 +26,7 @@ class ConversationMemory:
     def __init__(self, config: Config, client: OllamaClient | None = None):
         self.config = config
         self.client = client
+        self.system_prompt = config.system_prompt
         self.summary = ""
         # The user's profile, sent after the system prompt while the profile feature is on.
         self.profile = ""
