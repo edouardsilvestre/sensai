@@ -3,7 +3,7 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 from sensai.core.llm.ollama import LLMError, OllamaClient, WebResult
-from sensai.core.tools.registry import ToolError, ToolResult
+from sensai.core.tools.registry import ToolError, ToolResult, requires_approval
 
 # Characters kept from each page, so that several results fit in the context window.
 MAX_CONTENT_CHARS = 1500
@@ -42,6 +42,7 @@ class WebSearch:
         self.backend = backend
         self.max_results = max_results
 
+    @requires_approval("the query is sent to an external search engine")
     def web_search(self, query: str) -> ToolResult:
         """
         Search the public web for recent or public facts that are not in the user's documents:

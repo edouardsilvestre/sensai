@@ -1,7 +1,9 @@
 import pytest
 
 from sensai.core.agent import Agent
+from sensai.core.approval import ALL_TOOLS_REASON, NO_APPROVER_REASON, Approval
 from sensai.core.events import (
+    ApprovalEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
@@ -13,6 +15,8 @@ from sensai.core.events import (
 )
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.rag.models import SearchResult
+from sensai.core.tools.registry import ToolRegistry, ToolResult, requires_approval
+from sensai.core.tools.code_runner import CodeRunner, Execution
 from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 
@@ -246,3 +250,122 @@ def test_disabled_tools_feature_offers_no_tool(config, client):
     config.features["tools"] = False
     list(agent.run("Hi"))
     assert client.tools_seen == [None]
+
+
+class FakeApprover:
+    def __init__(self, approval: Approval):
+        self.approval = approval
+        self.asked: list[tuple[ToolCall, str]] = []
+
+    def __call__(self, call: ToolCall, reason: str) -> Approval:
+        self.asked.append((call, reason))
+        return self.approval
+
+
+SECRET = "the company name leaves the machine"
+CALL = ToolCall("lookup", {"query": "Alvor"})
+
+
+def approval_agent(config, client, approval: Approval | None, critical: bool = True):
+    tool = Lookup()
+    if critical:
+        requires_approval(SECRET)(tool.function)
+    approver = FakeApprover(approval) if approval else None
+    client.tool_rounds = [[CALL]]
+    return Agent(config, client, tools=ToolRegistry([tool.function]), approver=approver), tool, approver
+
+
+def test_approved_critical_call_is_run(config, client):
+    agent, tool, approver = approval_agent(config, client, Approval(True))
+
+    events = list(agent.run("Where is Alvor based?"))
+
+    assert approver.asked == [(CALL, SECRET)]
+    assert events[:3] == [
+        ToolCallEvent(CALL),
+        ApprovalEvent(CALL, Approval(True)),
+        ToolResultEvent(CALL, ToolResult("Alvor is registered in Lisbon.")),
+    ]
+    assert tool.queries == ["Alvor"]
+
+
+def test_refused_critical_call_is_not_run_and_the_model_gets_the_reason(config, client):
+    agent, tool, _ = approval_agent(config, client, Approval(False, "keep the source secret"))
+
+    events = list(agent.run("Where is Alvor based?"))
+
+    assert tool.queries == []
+    result = next(event for event in events if isinstance(event, ToolResultEvent)).result
+    assert result.summary == "refused" and not result.error
+    sent = client.chats[1][0][-1]
+    assert sent["role"] == "tool" and "refused" in sent["content"] and "keep the source secret" in sent["content"]
+    assert events[-1] == DoneEvent("Hello there ")
+
+
+def test_refusal_is_not_kept_in_memory(config, client):
+    agent, _, _ = approval_agent(config, client, Approval(False))
+    list(agent.run("Where is Alvor based?"))
+    assert agent.messages == [
+        {"role": "user", "content": "Where is Alvor based?"},
+        {"role": "assistant", "content": "Hello there "},
+    ]
+
+
+def test_tools_that_are_not_critical_run_without_asking(config, client):
+    agent, tool, approver = approval_agent(config, client, Approval(False), critical=False)
+    events = list(agent.run("Where is Alvor based?"))
+    assert approver.asked == []
+    assert not any(isinstance(event, ApprovalEvent) for event in events)
+    assert tool.queries == ["Alvor"]
+
+
+def test_all_mode_asks_before_every_tool(config, client):
+    config.approval = "all"
+    agent, tool, approver = approval_agent(config, client, Approval(True), critical=False)
+    list(agent.run("Where is Alvor based?"))
+    assert approver.asked == [(CALL, ALL_TOOLS_REASON)]
+    assert tool.queries == ["Alvor"]
+
+
+def test_off_mode_never_asks(config, client):
+    config.approval = "off"
+    agent, tool, approver = approval_agent(config, client, Approval(False))
+    list(agent.run("Where is Alvor based?"))
+    assert approver.asked == []
+    assert tool.queries == ["Alvor"]
+
+
+def test_critical_calls_are_refused_without_an_approver(config, client):
+    agent, tool, _ = approval_agent(config, client, None)
+    events = list(agent.run("Where is Alvor based?"))
+    assert ApprovalEvent(CALL, Approval(False, NO_APPROVER_REASON)) in events
+    assert tool.queries == []
+
+
+def test_unknown_tools_are_not_submitted_for_approval(config, client):
+    config.approval = "all"
+    agent, _, approver = approval_agent(config, client, Approval(True))
+    client.tool_rounds = [[ToolCall("unknown", {})]]
+    events = list(agent.run("Hi"))
+    assert approver.asked == []
+    assert next(event for event in events if isinstance(event, ToolResultEvent)).result.error
+def test_the_model_sees_its_traceback_and_runs_fixed_code(config, client):
+    def execute(code: str, image: str, timeout: int) -> Execution:
+        if "/ 0" in code:
+            return Execution("", "Traceback (most recent call last):\nZeroDivisionError: division by zero\n", 1)
+        return Execution("2.5\n", "", 0)
+
+    runner = CodeRunner("python:3.12-slim", 10, execute)
+    agent = Agent(config, client, tools=ToolRegistry([runner.run_python]))
+    client.tool_rounds = [
+        [ToolCall("run_python", {"code": "print(5 / 0)"})],
+        [ToolCall("run_python", {"code": "print(5 / 2)"})],
+    ]
+
+    events = list(agent.run("What is 5 divided by 2?"))
+
+    results = [event.result for event in events if isinstance(event, ToolResultEvent)]
+    assert [result.summary for result in results] == ["exit 1: ZeroDivisionError", "ok"]
+    assert "ZeroDivisionError" in client.chats[1][0][-1]["content"]
+    assert "2.5" in client.chats[2][0][-1]["content"]
+    assert events[-1] == DoneEvent("Hello there ")

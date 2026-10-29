@@ -8,18 +8,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
-from sensai.core.config import API_KEY_HELP, FEATURES, Config, ConfigError, load_config
+from sensai.core.approval import Approval
+from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
     DoneEvent,
+    GuardrailEvent,
     SourcesEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
+from sensai.core.memory.profile import Profile, ProfileError
+from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -29,22 +34,42 @@ from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
+ALWAYS_ANSWERS = {"a", "always"}
+REFUSE_ANSWERS = {"n", "no", "non"}
+APPROVAL_DESCRIPTIONS = {
+    "critical": "asks before the tools that send data out of the machine or run code",
+    "all": "asks before every tool call",
+    "off": "never asks",
+}
 HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
   /sources                show the excerpts retrieved for the last message
   /tools                  list the tools the model can call
   /context                show the context usage and the summary of older turns
+  /sessions               list the saved conversations
+  /resume [ID]            continue a saved conversation (the last one without ID)
+  /new                    start a new conversation, the current one stays saved
+  /profile                show the instructions the model gets about you
+  /profile add TEXT       add an instruction to your profile
+  /profile remove N       remove instruction N from your profile
   /features               list the features and whether they are on
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
+  /guardrails             list the rules checking your messages, the answers and the tool calls
+  /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="sensai", description="Sensai CLI chatbot")
     parser.add_argument("-e", "--env-file", dest="env_path", type=Path, help="Path to a .env file (default: ./.env)")
+    parser.add_argument(
+        "-r", "--resume", nargs="?", const="last", metavar="ID",
+        help="continue a saved conversation (the last one without ID)",
+    )
     parser.add_argument("-p", "--persona", help="persona to start with (overrides SENSAI_PERSONA)")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     commands.add_parser("chat", help="chat with the model (default)")
@@ -158,7 +183,37 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    store: SessionStore | None = None
+    # Given at the first save, so that a conversation without any message is never saved.
+    session_id: str | None = None
+    profile: Profile | None = None
+    always_allowed: set[str] = field(default_factory=set)
     personas: dict[str, Persona] = field(default_factory=dict)
+
+
+def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
+    if call.name in session.always_allowed:
+        print(f"[{call.name}] allowed for this session")
+        return Approval(True)
+    question = f"Allow {call.name}? {reason[:1].upper()}{reason[1:]}. [y]es / [n]o / [a]lways this session: "
+    while True:
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            print()
+            return Approval(False, "no answer")
+        if answer in ALLOW_ANSWERS:
+            return Approval(True)
+        if answer in ALWAYS_ANSWERS:
+            session.always_allowed.add(call.name)
+            return Approval(True)
+        if answer in REFUSE_ANSWERS:
+            try:
+                why = input("Why? (optional, sent to the model): ").strip()
+            except EOFError:
+                print()
+                why = ""
+            return Approval(False, why)
 
 
 def prompt(session: Session) -> str:
@@ -190,7 +245,31 @@ def show_excerpts(sources: list[SearchResult]) -> None:
 
 
 def describe_call(call: ToolCall) -> str:
-    return ", ".join(f"{name}={json.dumps(value, ensure_ascii=False)}" for name, value in call.arguments.items())
+    # Multi-line arguments, like code, are shown as indented blocks instead of one escaped line.
+    inline = []
+    blocks = []
+    for name, value in call.arguments.items():
+        if isinstance(value, str) and "\n" in value.strip():
+            blocks.append(f"\n  {name}:\n" + textwrap.indent(value.strip("\n"), "    "))
+        else:
+            inline.append(f"{name}={json.dumps(value, ensure_ascii=False)}")
+    return f"[{call.name}] {', '.join(inline)}".rstrip() + "".join(blocks)
+
+
+WHERE = {"input": "your message", "output": "the answer", "tools": "a tool call"}
+
+
+def print_guardrail(hit: Hit) -> None:
+    where, found = WHERE[hit.stage], f" ({hit.found})" if hit.found else ""
+    if hit.action == "redact":
+        print(f"[guardrail] {hit.rule}: {plural(hit.count, 'passage')} redacted in {where}{found}")
+    elif hit.action == "warn":
+        warning(f"guardrail {hit.rule}: found in {where}{found}" + (f". {hit.message}" if hit.message else ""))
+    elif hit.stage == "input":
+        warning(f"Message blocked by the guardrail {hit.rule}: {hit.message or hit.found}. Nothing was sent to the model.")
+    elif hit.stage == "output":
+        warning(f"Answer stopped by the guardrail {hit.rule}{found}" + (f": {hit.message}" if hit.message else ""))
+    # A blocked tool call is reported by its result, which the model also gets.
 
 
 def chat_turn(session: Session, line: str) -> None:
@@ -211,12 +290,17 @@ def chat_turn(session: Session, line: str) -> None:
                 if mid_line:
                     print()
                     mid_line = False
-                print(f"[{event.call.name}] {describe_call(event.call)}")
+                print(describe_call(event.call))
             elif isinstance(event, ToolResultEvent):
                 if event.result.error:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
                 else:
                     print(f"[{event.call.name}] {event.result.summary or 'done'}")
+            elif isinstance(event, GuardrailEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                print_guardrail(event.hit)
             elif isinstance(event, DoneEvent):
                 print()
                 if sources:
@@ -234,6 +318,113 @@ def chat_turn(session: Session, line: str) -> None:
         error(str(e))
     except KeyboardInterrupt:
         print("\n[interrupted]")
+    save_session(session)
+
+
+def save_session(session: Session) -> None:
+    memory = session.agent.memory
+    if session.store is None or not session.config.features["sessions"] or not (memory.turns or memory.summary):
+        return
+    if session.session_id is None:
+        session.session_id = session.store.new_id()
+    try:
+        session.store.save(session.session_id, memory, session.config.model)
+    except SessionError as e:
+        warning(f"The conversation is not saved: {e}")
+
+
+def sessions_enabled(session: Session) -> bool:
+    if not session.config.features["sessions"]:
+        print("The sessions feature is off: /feature sessions on to save and resume conversations.")
+        return False
+    return session.store is not None
+
+
+def sessions_command(session: Session) -> None:
+    if not sessions_enabled(session):
+        return
+    saved = session.store.list()
+    if not saved:
+        print(f"No saved conversation yet in {session.store.directory}.")
+        return
+    for info in saved:
+        current = "*" if info.id == session.session_id else " "
+        print(f"{current} {info.id}  {info.updated:%Y-%m-%d %H:%M}  {plural(info.turns, 'turn'):>9}  {info.title}")
+    print("/resume ID to continue one of them.")
+
+
+def resume(session: Session, session_id: str) -> bool:
+    if session_id == "last":
+        session_id = session.store.latest()
+        if session_id is None:
+            print("No saved conversation yet: this one is saved after your first message.")
+            return False
+    try:
+        turns = session.store.load(session_id, session.agent.memory)
+    except SessionError as e:
+        error(str(e))
+        return False
+    session.session_id = session_id
+    session.last_sources = []
+    summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
+    print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
+    return True
+
+
+def resume_command(session: Session, argument: str) -> None:
+    if sessions_enabled(session):
+        # The current conversation was saved after its last message: switching loses nothing.
+        resume(session, argument or "last")
+
+
+def new_command(session: Session) -> None:
+    memory = session.agent.memory
+    previous = session.session_id
+    memory.summary, memory.turns, memory.last_usage = "", [], None
+    session.session_id = None
+    session.last_sources = []
+    saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
+    print(f"New conversation.{saved}")
+
+
+def profile_command(session: Session, argument: str) -> None:
+    profile = session.profile
+    if profile is None:
+        error("The profile could not be read at startup: fix the file and restart Sensai.")
+        return
+    action, _, value = argument.partition(" ")
+    try:
+        if action == "add":
+            profile.add(value)
+            print(f"Added as instruction {len(profile.entries)}.")
+        elif action == "remove":
+            if not value.strip().isdigit():
+                error("Usage: /profile remove N")
+                return
+            print(f"Removed: {profile.remove(int(value))}")
+        elif action:
+            error("Usage: /profile [add TEXT | remove N]")
+            return
+    except ProfileError as e:
+        error(str(e))
+        return
+    session.agent.memory.profile = profile.text()
+    if not action:
+        show_profile(session)
+    elif not session.config.features["profile"]:
+        print("The profile feature is off: /feature profile on to send it to the model.")
+
+
+def show_profile(session: Session) -> None:
+    profile = session.profile
+    if not profile.entries:
+        print(f"Your profile is empty ({profile.path}). Add what the model should always know, for example:")
+        print("  /profile add I work on the Alvor Consulting case for Le Monde; answer in French.")
+        return
+    state = "" if session.config.features["profile"] else " (not sent: the profile feature is off)"
+    print(f"Profile ({profile.path}){state}:")
+    for number, entry in enumerate(profile.entries, start=1):
+        print(f"  {number}. {entry}")
 
 
 def ingest_command(session: Session, argument: str) -> None:
@@ -262,7 +453,10 @@ def tools_command(session: Session) -> None:
         print("The tools feature is off: /feature tools on to let the model call tools.")
         return
     if not agent.tools:
-        print("No tool is enabled: /feature web_search on to let the model search the web.")
+        print("No tool is enabled, turn one on with /feature NAME on:")
+        for name, feature in FEATURES.items():
+            if feature.tool:
+                print(f"  {name}: {feature.description}")
         return
     print("Tools:")
     for tool in agent.tools.tools():
@@ -285,6 +479,38 @@ def context_command(session: Session) -> None:
         print(textwrap.indent(memory.summary, "    "))
 
 
+def guardrails_source(config: Config) -> str:
+    return str(config.guardrails_path) if config.guardrails_path.exists() else "default rules"
+
+
+def guardrails_command(session: Session) -> None:
+    config = session.config
+    if not config.features["guardrails"]:
+        print("The guardrails feature is off: /feature guardrails on to check messages, answers and tool calls.")
+        return
+    rules = session.agent.guardrails.rules
+    print(f"Guardrails ({guardrails_source(config)}):")
+    if not rules:
+        print("  no rule")
+    for rule in rules:
+        tools = f" ({', '.join(sorted(rule.tools))})" if rule.tools else ""
+        where = ", ".join(stage + (tools if stage == "tools" else "") for stage in STAGES if stage in rule.stages)
+        print(f"  {rule.name}: {rule.action} in {where}, {rule.summary}")
+    if not config.guardrails_path.exists():
+        print(f"Write your own rules in {config.guardrails_path}: see guardrails.example.json.")
+def approval_command(session: Session, argument: str) -> None:
+    if argument:
+        if argument not in APPROVAL_MODES:
+            error(f"Usage: /approval [{'|'.join(APPROVAL_MODES)}]")
+            return
+        session.config.approval = argument
+        session.always_allowed.clear()
+    mode = session.config.approval
+    print(f"Approval: {mode}, Sensai {APPROVAL_DESCRIPTIONS[mode]}.")
+    if session.always_allowed:
+        print(f"Allowed for this session: {', '.join(sorted(session.always_allowed))}.")
+
+
 def list_features(session: Session) -> None:
     width = max(len(name) for name in FEATURES)
     for name, feature in FEATURES.items():
@@ -304,7 +530,7 @@ def feature_command(session: Session, argument: str) -> None:
         return
     config.features[name] = value == "on"
     print(f"{name} is {value}.")
-    if name in ("tools", "web_search") and config.features["tools"]:
+    if (name == "tools" or FEATURES[name].tool) and config.features["tools"]:
         # The registry only holds the tools enabled when it was built: build it again to add or remove one.
         reload_tools(session)
     if name == "rag" and value == "on" and session.index is None:
@@ -371,6 +597,18 @@ def handle_command(session: Session, line: str) -> bool:
         ingest_command(session, argument)
     elif name == "/context":
         context_command(session)
+    elif name == "/sessions":
+        sessions_command(session)
+    elif name == "/resume":
+        resume_command(session, argument)
+    elif name == "/new":
+        new_command(session)
+    elif name == "/profile":
+        profile_command(session, argument)
+    elif name == "/guardrails":
+        guardrails_command(session)
+    elif name == "/approval":
+        approval_command(session, argument.lower())
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -399,7 +637,35 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
+    for message in tools.prepare():
+        warning(message)
     return tools
+
+
+def load_memory(session: Session, resume_id: str | None) -> None:
+    """Loads the profile, then the conversation to resume. Neither can stop the chat from starting."""
+    config = session.config
+    try:
+        session.profile = Profile(config.profile_path)
+    except ProfileError as e:
+        warning(f"{e}. The profile is not sent to the model.")
+    else:
+        session.agent.memory.profile = session.profile.text()
+        if session.profile.entries and config.features["profile"]:
+            print(f"Profile: {plural(len(session.profile.entries), 'instruction')} sent to the model. /profile to see them.")
+    session.store = SessionStore(config.sessions_dir)
+    if resume_id is None:
+        return
+    if config.features["sessions"]:
+        resume(session, resume_id)
+    else:
+        warning("--resume is ignored: the sessions feature is off.")
+def load_guardrails(config: Config, client: OllamaClient) -> Guardrails:
+    """Raises GuardrailError for an invalid rules file: Sensai does not start with rules it did not understand."""
+    rules = load_rules(config.guardrails_path)
+    if config.features["guardrails"]:
+        print(f"Guardrails: {plural(len(rules), 'rule')} from {guardrails_source(config)}. /guardrails to list them.")
+    return Guardrails(rules, model_judge(client, config))
 
 
 def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
@@ -411,7 +677,7 @@ def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
     return personas, personas[config.persona]
 
 
-def run_chat(config: Config) -> int:
+def run_chat(config: Config, resume_id: str | None = None) -> int:
     try:
         personas, persona = load_persona(config)
     except PersonaError as e:
@@ -421,7 +687,8 @@ def run_chat(config: Config) -> int:
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
-    except LLMError as e:
+        agent.guardrails = load_guardrails(config, agent.client)
+    except (LLMError, GuardrailError) as e:
         error(str(e))
         return 1
 
@@ -429,6 +696,7 @@ def run_chat(config: Config) -> int:
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
+    agent.approver = lambda call, reason: ask_approval(session, call, reason)
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
     disabled = [name for name, enabled in config.features.items() if not enabled]
     if disabled:
@@ -445,6 +713,7 @@ def run_chat(config: Config) -> int:
         print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
+    load_memory(session, resume_id)
 
     try:
         while True:
@@ -477,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
-    return run_chat(config)
+    return run_chat(config, args.resume)
 
 
 if __name__ == "__main__":

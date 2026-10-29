@@ -84,4 +84,6 @@ def config(tmp_path) -> Config:
         rag_top_k=3,
         chunk_size=200,
         chunk_overlap=40,
+        sessions_dir=tmp_path / "sessions",
+        profile_path=tmp_path / "profile.md",
     )

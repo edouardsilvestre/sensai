@@ -9,6 +9,8 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 ### Key features
 
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
+- 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
+- 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: a structured knowledge graph of people, companies, accounts and their relationships: who is linked to whom, and how.
@@ -32,6 +34,13 @@ Indexing (`python -m sensai ingest`):
 Files that did not change are skipped on the next run, and deleted files are removed from the index.
 
 Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
+
+### Sessions & profile
+
+- `memory/sessions.py`: `SessionStore` writes each conversation to its own JSON file in `SENSAI_SESSIONS_DIR` after every answered message: the summary of older turns and the turns kept verbatim, with the sources each answer cited, exactly as `ConversationMemory` holds them. Resuming puts them back in the memory, so the model gets the same context as before the restart. A file is written next to the session then renamed, so a crash never leaves half a conversation, and an unreadable file is skipped instead of stopping Sensai.
+- `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
+
+Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
 
 ### Personas
 
@@ -83,6 +92,43 @@ Tools need a model that supports them (`qwen3`, `llama3.1`, `mistral`...). With 
 
 **Web search** (`tools/web_search.py`) uses [Ollama's web search API](https://docs.ollama.com/capabilities/web-search), which needs a free API key from [ollama.com/settings/keys](https://ollama.com/settings/keys) in `OLLAMA_API_KEY`. The model gets the title, URL and content of the first `SENSAI_WEB_SEARCH_RESULTS` results, each page cut to 1500 characters so that they fit in the context window, and marked as untrusted data so that instructions hidden in a page are not followed. `SearchBackend` keeps the search engine separate from the tool, so it can be replaced without touching the rest.
 
+### Approvals
+
+Some tool calls cannot be undone: a web search sends the query outside the machine, and with it maybe the name of a source. Before running such a call, Sensai stops, shows the exact call the model asked for and waits for the user's decision. A tool declares that it needs approval, and why, with a decorator:
+
+```python
+@requires_approval("the query is sent to an external search engine")
+def web_search(self, query: str) -> ToolResult:
+```
+
+- Approved, the tool runs as usual.
+- Refused, it does not run: the model gets the refusal and the user's reason instead of the result, and is told not to make up what the tool would have found. It can rephrase its call, answer from what it already knows for sure, or ask the user.
+- `always` approves the tool until the end of the session.
+
+`SENSAI_APPROVAL` sets when Sensai asks: `critical` (default) for the tools that declare it, `all` before every tool call, `off` never. The core does not ask the user itself: the interface gives the agent an approver, a function that returns the decision, so a web interface can show buttons instead of a terminal prompt. Without an approver, critical calls are refused.
+**Code execution** (`tools/code_runner.py`) lets the model run the Python code it writes, like ChatGPT's Code Interpreter. Each call starts a new Docker container from `SENSAI_SANDBOX_IMAGE`, sends the code to `python -` on its standard input and removes the container afterwards. The container has no network, 256 MB of memory, one CPU, 64 processes at most, a read-only disk (only `/tmp` is writable) and runs as `nobody` without privileges; nothing from the host is mounted. A program running longer than `SENSAI_CODE_TIMEOUT` seconds is killed. The model gets the exit code, the output and the traceback, each cut to their last 2000 characters. A crash is not a tool error: the model reads the traceback, fixes its code and calls `run_python` again, within the `SENSAI_MAX_TOOL_ROUNDS` limit. At startup Sensai checks that Docker runs and downloads the image if needed, otherwise it warns and chats without code execution.
+
+### Guardrails
+
+`guardrails/rules.py` checks three places, each against the rules that list it in `on`:
+
+- `input`: the message, before anything is searched or sent to the model. A blocked message is not answered and not kept in the history.
+- `tools`: the text arguments of each tool call, before it runs. A blocked call is not run: the model gets the reason as the tool's result, so it can call it again without the blocked data. `tools` limits a rule to some tools, like `web_search`, the only one that reaches the network.
+- `output`: the answer, while it is streamed. The last 80 characters are held back until the next chunk, so that a name split across two chunks is still found and a match is never shown in two pieces; the redacted answer is the one shown, kept and saved.
+
+A rule looks for one thing and does one of three actions, `block`, `redact` (replaced by `[NAME]` or its `replacement`) or `warn`:
+
+| Matcher | Finds | Example |
+|---|---|---|
+| `terms` | words or names, whatever their case, accents and spaces, as whole words | the source's name and codename |
+| `pattern` | a regular expression (case-insensitive) | `adresse personnelle` |
+| `detectors` | personal data, with their checksum: `email`, `phone`, `iban` (mod 97), `card` (Luhn), `nir` (French social security key), `ip` | `["iban", "card"]` |
+| `judge` | messages that break a policy, judged by the local chat model (input only, block only) | "finding the home address of a private person" |
+
+The judge is the chat model itself, so nothing leaves the machine, at the cost of one more call per message. It is asked to answer `ALLOW` or `BLOCK: reason`, and anything else blocks the message: the guardrails fail closed, like an invalid rules file, which stops Sensai at startup instead of running without its rules.
+
+Without a rules file, one rule applies: personal data is blocked in web searches. A file at `SENSAI_GUARDRAILS_PATH` replaces it; [guardrails.example.json](guardrails.example.json) protects a source, keeps personal data out of web searches, flags bank details in answers and refuses requests about private life. Like the index, keep the file in `.sensai/`: it holds the names you protect.
+
 ## Getting Started
 
 ### Installation
@@ -104,6 +150,8 @@ ollama pull qwen3-embedding:0.6b   # embedding model for document search
 python -m sensai                 # uses .env
 SENSAI_MODEL=qwen3.8 python -m sensai   # override the model for one run
 python -m sensai -e other.env    # use another env file
+python -m sensai --resume        # continue the last conversation
+python -m sensai --resume 20261027-153012   # continue a given one (/sessions lists them)
 
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
@@ -142,6 +190,12 @@ Sources:
 | `/feature NAME on\|off` | turn a feature on or off for the session |
 | `/personas` | list the personas, `*` marks the active one |
 | `/persona [ID]` | show the active persona, or switch to another one; the history is kept |
+| `/sessions` | list the saved conversations, the current one marked with `*` |
+| `/resume [ID]` | continue a saved conversation, the last one without ID |
+| `/new` | start a new conversation; the current one stays saved |
+| `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
+| `/guardrails` | list the rules checking the messages, the answers and the tool calls |
+| `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -151,15 +205,63 @@ Long conversations do not overflow the model's context window. Sensai estimates 
 [memory] 3 turns condensed into the summary.
 ```
 
+Every answered message is saved, so a conversation can be continued after a restart, and the profile is sent at the start of every conversation:
+
+```
+> /profile add Réponds en français et n'écris jamais le nom de la source : dis "la source".
+Added as instruction 1.
+> /exit
+
+$ python -m sensai --resume
+Profile: 1 instruction sent to the model. /profile to see them.
+Resumed conversation 20261027-153012: 4 turns. /context shows them.
+> Et la facture, finalement ?
+```
+
 With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed and has to be approved before it is sent, so nothing leaves the machine without your consent:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
 [web_search] query="la dernière version stable de Python"
+Allow web_search? The query is sent to an external search engine. [y]es / [n]o / [a]lways this session: y
 [web_search] 5 results: www.python.org, devguide.python.org, docs.python.org
 La dernière version stable de Python publiée est Python 3.15.1 [...]
 
 URL de référence : https://www.python.org/downloads/latest/
+```
+
+With the rules of `guardrails.example.json` copied to `.sensai/guardrails.json`, the source is never named, personal data stays on the machine and requests about private life are refused:
+
+```
+Guardrails: 4 rules from .sensai/guardrails.json. /guardrails to list them.
+> Qui a refusé de valider le virement ?
+D'après l'email du 4 avril 2023, c'est [SOURCE] qui a refusé de valider le virement sans facture [2].
+[guardrail] source: 1 passage redacted in the answer (SOURCE)
+> À qui appartient le compte FR76 3000 6000 0112 3456 7890 189 ? Cherche sur le web.
+[web_search] query="FR76 3000 6000 0112 3456 7890 189 titulaire"
+[warning] web_search failed: blocked by the guardrail 'personal-data' (IBAN): The arguments contain personal data, which must not leave the machine. Search without it.
+> Où habite Marc Vidal ?
+[warning] Message blocked by the guardrail private-life: asks for the home address of a private person. Nothing was sent to the model.
+```
+
+With `SENSAI_FEATURE_CODE_EXEC=true` (or `/feature code_exec on` during a chat) and [Docker](https://docs.docker.com/engine/install/) running, the model runs Python to compute instead of guessing. When its code fails, it reads the traceback and tries again:
+
+```
+> Combien font 17 % de 48 250 euros ? Calcule-le avec du code Python.
+[run_python]
+  code:
+    result = 48250 * 0.17
+    print(result)
+[run_python] ok
+Le calcul de 17 % de 48 250 euros est de **8 202,5 euros**.
+```
+
+The default image only has the standard library. For pandas, build your own image and set `SENSAI_SANDBOX_IMAGE`:
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install pandas numpy
 ```
 
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
@@ -180,8 +282,17 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
+| `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
+| `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
+| `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
+| `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
+| `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
+| `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
+| `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
+| `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
+| `SENSAI_GUARDRAILS_PATH` | `.sensai/guardrails.json` | guardrail rules (see `guardrails.example.json`); without it, personal data is blocked in web searches |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -189,7 +300,10 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
+| `SENSAI_CODE_TIMEOUT` | `10` | seconds a program may run before it is stopped (1-60) |
+| `SENSAI_SANDBOX_IMAGE` | `python:3.12-slim` | Docker image the code runs in; use one with pandas to analyse CSV files |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
+| `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
 
 ### Features
 
@@ -200,8 +314,9 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `rag` | answers drawn from the indexed documents |
 | `tools` | every tool the model can call, whatever their own feature or setting |
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
+| `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 
-The features are on by default, except `web_search`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search` and `code_exec`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 

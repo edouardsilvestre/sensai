@@ -16,14 +16,22 @@ RENAMED = {"SENSAI_TOOLS": "SENSAI_FEATURE_TOOLS", "SENSAI_WEB_SEARCH": "SENSAI_
 class Feature:
     description: str
     default: bool = True
+    # True when the feature enables a tool the model can call himself.
+    tool: bool = False
 
 
 FEATURES = {
     "rag": Feature("answer from the indexed documents"),
     "tools": Feature("let the model call the tools enabled in the configuration"),
     # Off by default: the queries leave the machine.
-    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False),
+    "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
+    # Off by default: the code runs on this machine, and needs Docker.
+    "code_exec": Feature("let the model run Python code in a Docker sandbox", default=False, tool=True),
+    "sessions": Feature("save every conversation so that it can be resumed"),
+    "profile": Feature("send your profile to the model at the start of every conversation"),
+    "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
 }
+APPROVAL_MODES = ("critical", "all", "off")
 
 
 class ConfigError(Exception):
@@ -48,6 +56,10 @@ class Config:
     compact_threshold: int = 75
     keep_recent_turns: int = 4
 
+    sessions_dir: Path = Path(".sensai/sessions")
+    profile_path: Path = Path(".sensai/profile.md")
+    guardrails_path: Path = Path(".sensai/guardrails.json")
+
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
     rag_top_k: int = 5
@@ -56,7 +68,10 @@ class Config:
 
     ollama_api_key: str = field(default="", repr=False)
     web_search_results: int = 5
+    code_timeout: int = 10
+    sandbox_image: str = "python:3.12-slim"
     max_tool_rounds: int = 5
+    approval: str = "critical"
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -82,6 +97,15 @@ def _bool_env(name: str) -> bool | None:
     if raw in ("0", "false", "no", "off"):
         return False
     raise ConfigError(f"{name} must be true or false, got '{raw}'")
+
+
+def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw not in choices:
+        raise ConfigError(f"{name} must be one of {', '.join(choices)}, got '{raw}'")
+    return raw
 
 
 def _features_env() -> dict[str, bool]:
@@ -118,6 +142,9 @@ def load_config(path: Path | None = None) -> Config:
         features=_features_env(),
         compact_threshold=_int_env("SENSAI_COMPACT_THRESHOLD", Config.compact_threshold, minimum=10, maximum=95),
         keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
+        sessions_dir=Path(os.getenv("SENSAI_SESSIONS_DIR", str(Config.sessions_dir))),
+        profile_path=Path(os.getenv("SENSAI_PROFILE_PATH", str(Config.profile_path))),
+        guardrails_path=Path(os.getenv("SENSAI_GUARDRAILS_PATH", str(Config.guardrails_path))),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
@@ -125,7 +152,10 @@ def load_config(path: Path | None = None) -> Config:
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
+        code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),
+        sandbox_image=os.getenv("SENSAI_SANDBOX_IMAGE", Config.sandbox_image),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
+        approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")

@@ -1,0 +1,32 @@
+{
+  "rules": [
+    {
+      "name": "source",
+      "terms": ["Claire Benoit", "PHOENIX"],
+      "on": ["output", "tools"],
+      "action": "redact",
+      "replacement": "[SOURCE]"
+    },
+    {
+      "name": "personal-data",
+      "detectors": ["email", "phone", "iban", "card", "nir", "ip"],
+      "on": ["tools"],
+      "tools": ["web_search"],
+      "action": "block",
+      "message": "The arguments contain personal data, which must not leave the machine. Search without it."
+    },
+    {
+      "name": "bank-details",
+      "detectors": ["iban", "card"],
+      "on": ["output"],
+      "action": "warn",
+      "message": "Check before quoting bank details in an article."
+    },
+    {
+      "name": "private-life",
+      "judge": "finding the home address, family, health or daily movements of a private person, or how to track, threaten or harass someone",
+      "on": ["input"],
+      "action": "block"
+    }
+  ]
+}
