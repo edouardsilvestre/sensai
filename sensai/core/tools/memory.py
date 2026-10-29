@@ -106,3 +106,42 @@ class MemoryTools:
         except MemoryStoreError as e:
             raise ToolError(f"memory_delete_fact: {e}") from None
         return ToolResult(f"Fact {fact_id} deleted.", summary=f"fact {fact_id} deleted")
+
+    def memory_link(self, subject: str, relation: str, object: str) -> ToolResult:
+        """
+        Save a relation between two people, companies or places in the long-term memory,
+        such as "Jean Dupont" "runs" "Alvor Consulting".
+
+        Args:
+          subject: The name of the first entity
+          relation: How the subject is linked to the object, as a short verb
+          object: The name of the second entity
+
+        Returns:
+          A confirmation
+        """
+        try:
+            added = self.store.link(str(subject), str(relation), str(object))
+        except MemoryStoreError as e:
+            raise ToolError(f"memory_link: {e}") from None
+        if not added:
+            return ToolResult(f"'{subject} {relation} {object}' was already stored.", summary="already stored")
+        return ToolResult(f"Saved '{subject} {relation} {object}'.", summary="relation saved")
+
+    def memory_unlink(self, subject: str, relation: str, object: str) -> ToolResult:
+        """
+        Delete a stored relation that is wrong, or that the user asked to forget.
+
+        Args:
+          subject: The name of the first entity
+          relation: The relation, as given by memory_search
+          object: The name of the second entity
+
+        Returns:
+          A confirmation
+        """
+        try:
+            self.store.unlink(str(subject), str(relation), str(object))
+        except MemoryStoreError as e:
+            raise ToolError(f"memory_unlink: {e}") from None
+        return ToolResult(f"Deleted '{subject} {relation} {object}'.", summary="relation deleted")
