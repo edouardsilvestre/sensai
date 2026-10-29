@@ -143,14 +143,11 @@ class Agent:
                     reason = hit.message or f"the arguments contain {hit.found}"
                     result = ToolResult(f"Error: blocked by the guardrail '{hit.rule}' ({hit.found}): {reason}", error=True)
                 else:
-                    result = self.tools.execute(call)
-                approval = self._approve(call)
-                if approval is not None:
-                    yield ApprovalEvent(call, approval)
-                if approval is None or approval.approved:
-                    result = self.tools.execute(call)
-                else:
-                    result = refusal(approval)
+                    # Asked after the guardrails: the user approves the redacted call, the one that runs.
+                    approval = self._approve(call)
+                    if approval is not None:
+                        yield ApprovalEvent(call, approval)
+                    result = self.tools.execute(call) if approval is None or approval.approved else refusal(approval)
                 yield ToolResultEvent(call, result)
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 

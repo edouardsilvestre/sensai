@@ -94,5 +94,5 @@ def test_tools_lists_the_enabled_tools(session, capsys):
 def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
-    assert "Features: rag off, tools on, web_search off, code_exec off, sessions on, profile on" in capsys.readouterr().out
-    assert "Features: rag off, tools on, web_search off, code_exec off, guardrails on" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Features: rag off, tools on, web_search off, code_exec off, sessions on, profile on, guardrails on" in out

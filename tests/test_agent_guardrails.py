@@ -1,5 +1,6 @@
 from sensai.core.agent import STOPPED, Agent
-from sensai.core.events import DoneEvent, GuardrailEvent, TokenEvent, ToolResultEvent
+from sensai.core.approval import Approval
+from sensai.core.events import ApprovalEvent, DoneEvent, GuardrailEvent, TokenEvent, ToolResultEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.tools.registry import ToolRegistry
@@ -78,6 +79,28 @@ def test_tool_call_is_redacted_before_it_runs(config, client):
     client.tool_rounds = [[ToolCall("web_search", {"query": "Claire Benoit Alvor Consulting"})]]
     list(agent.run("Cherche"))
     assert queries == ["[SOURCE] Alvor Consulting"]
+
+
+def test_blocked_tool_call_is_not_run_nor_submitted_for_approval(config, client):
+    agent, queries = search_agent(config, client, IBAN)
+    asked = []
+    agent.approver = lambda call, reason: asked.append(call) or Approval(True)
+    config.approval = "all"
+    client.tool_rounds = [[ToolCall("web_search", {"query": "FR76 3000 6000 0112 3456 7890 189"})]]
+    events = list(agent.run("À qui est ce compte ?"))
+    assert queries == [] and asked == []
+    assert not any(isinstance(event, ApprovalEvent) for event in events)
+
+
+def test_approved_tool_call_runs_once_with_the_redacted_arguments(config, client):
+    agent, queries = search_agent(config, client, SOURCE)
+    asked = []
+    agent.approver = lambda call, reason: asked.append(call) or Approval(True)
+    config.approval = "all"
+    client.tool_rounds = [[ToolCall("web_search", {"query": "Claire Benoit Alvor Consulting"})]]
+    list(agent.run("Cherche"))
+    assert queries == ["[SOURCE] Alvor Consulting"]
+    assert asked == [ToolCall("web_search", {"query": "[SOURCE] Alvor Consulting"})]
 
 
 def test_guardrails_feature_off_checks_nothing(config, client):
