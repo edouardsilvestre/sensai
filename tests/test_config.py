@@ -31,8 +31,10 @@ def test_defaults(env_file):
 
 
 def test_features_have_their_default(env_file):
-    assert load_config(env_file).features == {"rag": True, "tools": True, "web_search": False, "code_exec": False, "sessions": True, "profile": True}
-    assert load_config(env_file).features == {"rag": True, "tools": True, "web_search": False, "code_exec": False, "guardrails": True}
+    assert load_config(env_file).features == {
+        "rag": True, "tools": True, "web_search": False, "code_exec": False,
+        "sessions": True, "profile": True, "guardrails": True,
+    }
 
 
 def test_rag_settings_from_environment(env_file, monkeypatch):
