@@ -27,6 +27,7 @@ FEATURES = {
     "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
     # Off by default: the code runs on this machine, and needs Docker.
     "code_exec": Feature("let the model run Python code in a Docker sandbox", default=False, tool=True),
+    "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -52,6 +53,8 @@ class Config:
 
     compact_threshold: int = 75
     keep_recent_turns: int = 4
+
+    guardrails_path: Path = Path(".sensai/guardrails.json")
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
@@ -135,6 +138,7 @@ def load_config(path: Path | None = None) -> Config:
         features=_features_env(),
         compact_threshold=_int_env("SENSAI_COMPACT_THRESHOLD", Config.compact_threshold, minimum=10, maximum=95),
         keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
+        guardrails_path=Path(os.getenv("SENSAI_GUARDRAILS_PATH", str(Config.guardrails_path))),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
