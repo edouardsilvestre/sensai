@@ -6,12 +6,25 @@ from sensai.core.config import DEFAULT_PERSONAS_DIR
 from sensai.core.events import AgentStartedEvent, DoneEvent, ReviewDoneEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import ToolCall
-from sensai.core.orchestrator import Review, ReviewError, approved
+from sensai.core.orchestrator import NO_EVIDENCE, Review, ReviewError, approved
 from sensai.core.persona import load_personas
+from sensai.core.rag.models import SearchResult
 from sensai.core.tools.registry import ToolRegistry
 from sensai.interfaces.cli.main import Session, handle_command
 
 PERSONAS = load_personas(DEFAULT_PERSONAS_DIR)
+RESULT = SearchResult(
+    chunk_id=1, text="Alice approved the transfer.", location="p. 2", source="leak/mail.eml",
+    description="From: alice@corp.example", score=0.9,
+)
+
+
+class FakeRetriever:
+    def __init__(self, results: list[SearchResult]):
+        self.results = results
+
+    def search(self, query: str, k: int) -> list[SearchResult]:
+        return self.results
 
 
 class ScriptedClient(FakeClient):
@@ -50,6 +63,9 @@ def review_done(events) -> ReviewDoneEvent:
     [
         ("Claim 1: supported.\nVERDICT: APPROVED", True),
         ("Claim 1: supported.\n**Verdict: approved.**\n", True),
+        ("Claim 1: supported.\n**Verdict:** APPROVED", True),
+        ("Claim 1: supported.\nVERDICT:  `APPROVED`", True),
+        ("Claim 1: unsupported.\n**Verdict:** REJECTED", False),
         ("Claim 1: unsupported.\nVERDICT: REJECTED", False),
         ("VERDICT: APPROVED\nClaim 1: unsupported.", False),
         ("Looks good to me.", False),
@@ -108,6 +124,27 @@ def test_fact_checker_only_sees_the_question_and_the_answer(config):
     assert {"role": "user", "content": "Earlier question"} in investigator
     assert [message["role"] for message in checker] == ["system", "user"]
     assert checker[0]["content"] == PERSONAS["fact_checker"].system_prompt()
+
+
+def test_fact_checker_sees_what_the_investigator_found(config):
+    client = ScriptedClient(["Alice approved it [1].", "VERDICT: APPROVED", "The text"])
+    client.tool_rounds = [[ToolCall("lookup", {"query": "Delta paid 2M"})]]
+    retriever = FakeRetriever([RESULT, RESULT])
+    agent = Agent(config, client, retriever=retriever, tools=ToolRegistry([lookup]))
+    list(Review(agent, PERSONAS).run("Who approved it?"))
+
+    check = client.chats[2][0][-1]["content"]
+    assert '[1] leak/mail.eml, p. 2\nFrom: alice@corp.example\n\nAlice approved the transfer.' in check
+    assert check.count("Alice approved the transfer.") == 1
+    assert "[lookup] Delta paid 2M" in check
+
+
+def test_fact_checker_is_told_when_nothing_was_found(config):
+    client = ScriptedClient(["Delta was paid 5M [1].", "VERDICT: REJECTED", "Unknown", "VERDICT: REJECTED"])
+    list(Review(Agent(config, client), PERSONAS).run("Who paid Delta?"))
+
+    for chat in (client.chats[1], client.chats[3]):
+        assert NO_EVIDENCE in chat[0][-1]["content"]
 
 
 def test_only_the_question_and_the_final_text_are_kept(config):

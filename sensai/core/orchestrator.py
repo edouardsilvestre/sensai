@@ -1,18 +1,26 @@
+import re
 from collections.abc import Generator, Iterator
 
 from sensai.core.agent import Agent
-from sensai.core.events import AgentStartedEvent, DoneEvent, Event, ReviewDoneEvent
+from sensai.core.events import AgentStartedEvent, DoneEvent, Event, ReviewDoneEvent, SourcesEvent, ToolResultEvent
 from sensai.core.persona import Persona
+from sensai.core.rag.models import SearchResult
 
 REVIEW_PERSONAS = ("investigator", "fact_checker", "editor")
 APPROVED = "VERDICT: APPROVED"
 REJECTED = "VERDICT: REJECTED"
 
-CHECK_PROMPT = f"""Check the answer below, given to the question of a journalist.
+NO_EVIDENCE = "None: the investigator found no document excerpt and no tool result."
+
+CHECK_PROMPT = f"""Check the answer below, given to the question of a journalist, against the evidence the investigator found.
+A claim is supported only if the evidence states it: a source the answer cites but that is not in the evidence does not count.
 Give a verdict for each claim: supported, unsupported or contradicted, with the reason.
 End with a last line that is exactly {APPROVED} if every claim is supported, otherwise {REJECTED}.
 
 Question: {{question}}
+
+Evidence found by the investigator:
+{{evidence}}
 
 Answer to check:
 {{answer}}"""
@@ -36,7 +44,9 @@ class ReviewError(Exception):
 
 def approved(verdict: str) -> bool:
     """Only an explicit approval on the last line counts: anything else is a rejection."""
-    lines = [line.strip(" *_`.").upper() for line in verdict.splitlines() if line.strip()]
+    # The markdown can be anywhere on the line, as in "**Verdict:** APPROVED".
+    lines = [" ".join(re.sub(r"[*_`]", "", line).split()).strip(".").upper() for line in verdict.splitlines()]
+    lines = [line for line in lines if line]
     return bool(lines) and lines[-1] == APPROVED
 
 
@@ -59,6 +69,8 @@ class Review:
         # The investigator continues the conversation, so that a follow-up question is understood.
         self.investigator.memory.summary = agent.memory.summary
         self.investigator.memory.turns = list(agent.memory.turns)
+        self.sources: dict[int, SearchResult] = {}
+        self.tool_results: list[str] = []
 
     def _agent(self, persona: Persona, with_tools: bool = False) -> Agent:
         main = self.agent
@@ -77,7 +89,8 @@ class Review:
             return
         max_rounds = self.agent.config.max_review_rounds
         for round_number in range(1, max_rounds + 1):
-            verdict = yield from self._ask(self.fact_checker, CHECK_PROMPT.format(question=question, answer=answer))
+            check = CHECK_PROMPT.format(question=question, evidence=self._evidence(), answer=answer)
+            verdict = yield from self._ask(self.fact_checker, check)
             if verdict is None:
                 return
             if approved(verdict):
@@ -99,8 +112,21 @@ class Review:
         for event in agent.run(message):
             if isinstance(event, DoneEvent):
                 content = event.content
+            elif isinstance(event, SourcesEvent):
+                for source in event.sources:
+                    self.sources.setdefault(source.chunk_id, source)
+            elif isinstance(event, ToolResultEvent) and not event.result.error:
+                self.tool_results.append(f"[{event.call.name}] {event.result.content}")
             yield event
         return content
+
+    def _evidence(self) -> str:
+        """The excerpts are numbered in the order they were first found, as in the first answer of the investigator."""
+        excerpts = [
+            f"[{number}] {source.citation}\n" + "\n\n".join(filter(None, [source.description, source.text]))
+            for number, source in enumerate(self.sources.values(), start=1)
+        ]
+        return "\n\n".join(excerpts + self.tool_results) or NO_EVIDENCE
 
     def _finish(self, question: str, is_approved: bool, content: str, rounds: int) -> Iterator[Event]:
         self.agent.memory.commit(question, content)
