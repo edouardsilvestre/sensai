@@ -12,7 +12,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
-    "SENSAI_APPROVAL",
+    "SENSAI_APPROVAL", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
     "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE",
 ]
 
@@ -32,7 +32,7 @@ def test_defaults(env_file):
 
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
-        "rag": True, "tools": True, "web_search": False, "code_exec": False, "memory": True,
+        "rag": True, "tools": True, "web_search": False, "code_exec": False, "memory": True, "mcp": True,
         "sessions": True, "profile": True, "guardrails": True,
     }
 
@@ -58,6 +58,20 @@ def test_memory_path_from_environment(env_file, monkeypatch):
 def test_guardrails_path_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_GUARDRAILS_PATH", "/cases/alvor/guardrails.json")
     assert load_config(env_file).guardrails_path == Path("/cases/alvor/guardrails.json")
+
+
+def test_mcp_settings_from_environment(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_MCP_PATH", "/cases/alvor/mcp.json")
+    monkeypatch.setenv("SENSAI_MCP_TIMEOUT", "60")
+    config = load_config(env_file)
+    assert (config.mcp_path, config.mcp_timeout) == (Path("/cases/alvor/mcp.json"), 60)
+
+
+@pytest.mark.parametrize("value", ["0", "301"])
+def test_mcp_timeout_out_of_bounds(env_file, monkeypatch, value):
+    monkeypatch.setenv("SENSAI_MCP_TIMEOUT", value)
+    with pytest.raises(ConfigError, match="SENSAI_MCP_TIMEOUT"):
+        load_config(env_file)
 
 
 def test_persona_settings_from_environment(env_file, monkeypatch):

@@ -1,8 +1,9 @@
+from ollama._types import Tool
 from ollama._utils import convert_function_to_tool
 
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.tools.catalog import build_registry
-from sensai.core.tools.registry import ToolError, ToolRegistry, ToolResult, requires_approval
+from sensai.core.tools.registry import SchemaTool, ToolError, ToolRegistry, ToolResult, requires_approval
 
 
 def echo(text: str, times: int = 1) -> str:
@@ -157,3 +158,46 @@ def test_code_execution_is_enabled_by_its_setting(config, client):
     config.features["code_exec"] = True
     config.features["memory"] = False
     assert build_registry(config, client).names() == ["run_python"]
+
+
+PARAMETERS = {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}
+
+
+def add(arguments: dict) -> str:
+    if "a" not in arguments or "b" not in arguments:
+        raise ToolError("add: a and b are required")
+    return str(arguments["a"] + arguments["b"])
+
+
+def schema_add(**kwargs) -> SchemaTool:
+    return SchemaTool("add", "Add two numbers.\n\nUse it for any addition.", PARAMETERS, add, **kwargs)
+
+
+def test_a_schema_tool_is_listed_by_its_name_next_to_the_functions():
+    registry = ToolRegistry([echo, schema_add()])
+    assert registry.names() == ["echo", "add"]
+
+
+def test_ollama_gets_the_schema_of_a_schema_tool():
+    tools = ToolRegistry([echo, schema_add()]).tools()
+    assert tools[0] == echo
+    function = Tool.model_validate(tools[1]).function
+    assert (function.name, function.description) == ("add", "Add two numbers.\n\nUse it for any addition.")
+    assert function.parameters.required == ["a", "b"]
+
+
+def test_a_schema_tool_gets_the_arguments_as_they_are():
+    registry = ToolRegistry([schema_add()])
+    assert registry.execute(ToolCall("add", {"a": 2, "b": 3})) == ToolResult("5")
+    # No check against a Python signature: the tool checks its arguments itself.
+    assert registry.execute(ToolCall("add", {"a": 2})) == ToolResult("Error: add: a and b are required", error=True)
+
+
+def test_a_schema_tool_can_require_the_users_approval():
+    registry = ToolRegistry([schema_add(approval_reason="the numbers are sent to a server")])
+    assert registry.approval_reason("add") == "the numbers are sent to a server"
+    assert ToolRegistry([schema_add()]).approval_reason("add") is None
+
+
+def test_descriptions_keep_the_first_paragraph():
+    assert ToolRegistry([echo, schema_add()]).descriptions() == {"echo": "Repeat the text.", "add": "Add two numbers."}
