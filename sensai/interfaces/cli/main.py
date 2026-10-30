@@ -1,5 +1,4 @@
 import argparse
-import inspect
 import json
 import shlex
 import sys
@@ -460,9 +459,8 @@ def tools_command(session: Session) -> None:
                 print(f"  {name}: {feature.description}")
         return
     print("Tools:")
-    for tool in agent.tools.tools():
-        description = " ".join((inspect.getdoc(tool) or "").split("\n\n")[0].split())
-        print(f"  {tool.__name__}: {description}")
+    for name, description in agent.tools.descriptions().items():
+        print(f"  {name}: {description}")
 
 
 def context_command(session: Session) -> None:
