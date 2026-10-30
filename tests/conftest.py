@@ -16,6 +16,9 @@ class FakeClient:
         self.embedded: list[str] = []
         self.chats: list[tuple[list[dict], dict | None]] = []
         self.summaries: list[list[dict]] = []
+        # The reply to the document editor, which asks for JSON edits, and the prompts it got.
+        self.edits = '{"edits": []}'
+        self.edit_requests: list[list[dict]] = []
         # Tool calls returned by the next calls made with tools, one list per call.
         self.tool_rounds: list[list] = []
         self.tools_seen: list[list[dict] | None] = []
@@ -56,8 +59,12 @@ class FakeClient:
             usage.prompt_tokens, usage.completion_tokens = self.usage
 
     def chat(
-        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None
+        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None,
+        format: dict | None = None,
     ) -> str:
+        if format is not None:
+            self.edit_requests.append(messages)
+            return self.edits
         self.summaries.append(messages)
         if usage is not None:
             usage.prompt_tokens, usage.completion_tokens = 300, 20

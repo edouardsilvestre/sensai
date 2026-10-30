@@ -16,7 +16,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: the model saves what is established about people, companies and places, and who is linked to whom, in a local database it reads and corrects across sessions.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
-- 📂 **Living investigation file**: a case document that grows as the investigation progresses, gathering findings, leads and their supporting evidence.
+- 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
@@ -63,6 +63,25 @@ Every call is printed in the CLI (`[memory_add_fact] fact 3 saved`), so the jour
 
 It is the `memory` feature, on by default, and needs a model that supports tools. Small models like `qwen3:1.7b` only call the tools reliably with their thinking phase on: leave `SENSAI_THINK` empty or `true`.
 
+### Working document
+
+The chat is a transcript; the working document is the deliverable. `ConversationMemory` holds a `Document` (`document/document.py`), a Markdown file made of `## ` sections, by default `Summary`, `People and companies`, `Timeline` and `Open questions`. It is never condensed by the compaction, and it is saved with the conversation and resumed with it.
+
+After each answer, `document/editor.py` asks the chat model, in a call of its own, how the exchange changes the document. The model never rewrites the document: it answers with edits, and Ollama's structured outputs (`format`, a JSON schema) make sure the reply is always `{"edits": [...]}`:
+
+| Edit | What it does |
+|---|---|
+| `{"op": "append", "section", "text"}` | adds lines at the end of a section |
+| `{"op": "replace", "section", "find", "text"}` | corrects a passage, which must be found exactly once in that section |
+| `{"op": "rewrite", "section", "text"}` | replaces one section |
+| `{"op": "add_section", "section", "text"}` | creates a section |
+
+`Document.apply` checks each edit on its own and rejects it with the reason instead of guessing: an unknown section, a passage to correct that is not found or found twice, a line the section already has (whatever the way its source is cited), more than 8 edits in one turn. A `## ` line in a text is turned into `### `, so an edit can never split the document. The valid edits are applied, the others are printed as warnings, and an invalid reply leaves the document as it was.
+
+The edits go through the guardrails like an answer: the source's name is redacted in the document too, and an edit with blocked data is not written. The document is sent to the model after the profile, so that it can answer "what is still missing?", and `/document undo` puts back the document as it was before the last answer.
+
+It is the `document` feature, on by default. It costs one more call to the model after each answer, and the edits are only as good as the model: small models often fail to quote the passage to correct, and their correction is then rejected instead of applied.
+
 ### Personas
 
 A persona sets the agent's name, role, tone and scope: it is the system message of the conversation. Each `personas/<id>.json` file defines one, so a newsroom can add its own profile without touching the code. Sensai starts without persona unless `SENSAI_PERSONA` or `-p ID` picks one, and ships three personas that follow an investigation:
@@ -95,7 +114,7 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 
 `orchestrator.py`: `Review` builds one `Agent` per persona and passes the text from one to the next. Each agent has its own memory: the fact-checker and the editor only get the text they work on, so the reasoning of the investigator does not sway them, and only the investigator can search the documents and call tools. The investigator starts from the conversation, so a follow-up question is understood. The guardrails, the approvals and the profile apply to every agent.
 
-Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. The investigator reads the working document, but the review agents never edit it: the document is updated once, from the editor's text, and only when the fact-checker approved it. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
 
 ### Tools
 
@@ -265,6 +284,9 @@ Sources:
 | `/resume [ID]` | continue a saved conversation, the last one without ID |
 | `/new` | start a new conversation; the current one stays saved |
 | `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
+| `/document` | show the working document |
+| `/document undo` | undo the changes made to the document by the last answer |
+| `/document export PATH` | write the document to a Markdown file |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/help` | list the commands |
@@ -289,8 +311,21 @@ Resumed conversation 20261027-153012: 4 turns. /context shows them.
 > Et la facture, finalement ?
 ```
 
+After each answer, the working document is updated with what was established, section by section:
+
+```
+> Dans le mail du 4 avril 2023, Marc Vidal, directeur financier d'Alvor, approuve un virement de 48 250 € vers Kestrel Ltd.
+[...]
+[document] added to People and companies, added to Timeline. /document to read it.
+> Correction : Marc Vidal est le directeur général.
+[...]
+[document] corrected in People and companies. /document to read it.
+> /document export enquete-alvor.md
+Document written to enquete-alvor.md.
+```
+
 With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
-With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed and has to be approved before it is sent, so nothing leaves the machine without your consent:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query has to be approved before it is sent, so nothing leaves the machine without your consent:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
@@ -358,6 +393,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
+| `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -392,6 +428,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 
 The features are on by default, except `web_search` and `code_exec`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 

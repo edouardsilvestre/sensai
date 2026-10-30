@@ -32,6 +32,7 @@ def test_features_lists_every_feature(session, capsys):
         ["mcp", "on", "let the model call the tools of the MCP servers listed in the MCP file"],
         ["sessions", "on", "save every conversation so that it can be resumed"],
         ["profile", "on", "send your profile to the model at the start of every conversation"],
+        ["document", "on", "keep a working document of the established facts, updated after every answer"],
         ["guardrails", "on", "check the messages, the answers and the tool calls against the guardrail rules"],
         ["orchestration", "on", "let /review have the answer checked by the fact-checker and written by the editor"],
     ]
@@ -116,4 +117,5 @@ def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
     out = capsys.readouterr().out
-    assert "Features: rag off, tools on, web_search off, code_exec off, memory on, mcp on, sessions on, profile on, guardrails on" in out
+    features = "rag off, tools on, web_search off, code_exec off, memory on, mcp on, sessions on, profile on, document on"
+    assert f"Features: {features}, guardrails on" in out

@@ -3,7 +3,8 @@ import pytest
 from conftest import FakeClient
 from sensai.core.agent import Agent
 from sensai.core.config import DEFAULT_PERSONAS_DIR
-from sensai.core.events import AgentStartedEvent, DoneEvent, ReviewDoneEvent
+from sensai.core.document.document import Edit
+from sensai.core.events import AgentStartedEvent, DocumentEvent, DoneEvent, ReviewDoneEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.orchestrator import NO_EVIDENCE, Review, ReviewError, approved
@@ -161,6 +162,38 @@ def test_only_the_question_and_the_final_text_are_kept(config):
     agent = Agent(config, client)
     list(Review(agent, PERSONAS).run("Who?"))
     assert agent.messages == [{"role": "user", "content": "Who?"}, {"role": "assistant", "content": "The text "}]
+
+
+APPEND = '{"edits": [{"op": "append", "section": "Summary", "text": "- Orion paid Delta"}]}'
+
+
+def test_only_the_approved_text_goes_to_the_document(config):
+    client = ScriptedClient(["Orion paid Delta [1].", "VERDICT: APPROVED", "Orion paid Delta."])
+    client.edits = APPEND
+    agent = Agent(config, client)
+    events = list(Review(agent, PERSONAS).run("Who paid Delta?"))
+
+    assert len(client.edit_requests) == 1 and "Orion paid Delta. " in str(client.edit_requests[0])
+    assert [type(event) for event in events[-2:]] == [ReviewDoneEvent, DocumentEvent]
+    assert agent.memory.document.section("Summary").body == "- Orion paid Delta"
+
+
+def test_a_rejected_text_does_not_go_to_the_document(config):
+    config.max_review_rounds = 1
+    client = ScriptedClient(["Orion paid Delta 5M.", "VERDICT: REJECTED"])
+    client.edits = APPEND
+    agent = Agent(config, client)
+    list(Review(agent, PERSONAS).run("How much?"))
+    assert client.edit_requests == [] and agent.memory.document.is_empty
+
+
+def test_the_investigator_reads_the_working_document(config):
+    client = ScriptedClient(["The answer", "VERDICT: APPROVED", "The text"])
+    agent = Agent(config, client)
+    agent.memory.document.apply([Edit("append", "Timeline", "- 4 April: the transfer")])
+    list(Review(agent, PERSONAS).run("When?"))
+    assert "- 4 April: the transfer" in client.chats[0][0][0]["content"]
+    assert "- 4 April: the transfer" not in str(client.chats[1][0])
 
 
 def test_only_the_investigator_can_call_tools(config):

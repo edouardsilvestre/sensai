@@ -118,9 +118,13 @@ class OllamaClient:
         options: dict | None = None,
         think: bool | None = None,
         usage: Usage | None = None,
+        format: dict | None = None,
     ) -> str:
+        """`format` is a JSON schema the answer must follow (Ollama's structured outputs)."""
         try:
-            response = self._client.chat(model=model, messages=messages, stream=False, options=options, think=think)
+            response = self._client.chat(
+                model=model, messages=messages, stream=False, options=options, think=think, format=format
+            )
         except (ConnectionError, httpx.HTTPError) as e:
             raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from e
         except ollama.ResponseError as e:

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from sensai.core.document.document import EditReport
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
 from sensai.core.llm.ollama import ToolCall
@@ -48,6 +49,18 @@ class DoneEvent:
 
 
 @dataclass
+class DocumentEvent:
+    """The edits applied to the working document after the answer, and the ones rejected with their reason."""
+
+    report: EditReport
+
+
+@dataclass
+class DocumentFailedEvent:
+    message: str
+
+
+@dataclass
 class AgentStartedEvent:
     """In a review, the agent whose events follow."""
 
@@ -87,6 +100,8 @@ Event = (
     | ToolResultEvent
     | GuardrailEvent
     | DoneEvent
+    | DocumentEvent
+    | DocumentFailedEvent
     | AgentStartedEvent
     | ReviewDoneEvent
     | CompactionStartedEvent

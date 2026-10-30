@@ -56,7 +56,8 @@ class Review:
     """The investigator answers, the fact-checker checks until it approves, then the editor writes the text.
 
     Each agent has its own memory: the fact-checker and the editor only get the text they work on.
-    Only the question and the final text go to the history of the main agent.
+    Only the question and the final text go to the history of the main agent, and only an approved text to its
+    working document.
     """
 
     def __init__(self, agent: Agent, personas: dict[str, Persona]):
@@ -71,6 +72,8 @@ class Review:
         # The investigator continues the conversation, so that a follow-up question is understood.
         self.investigator.memory.summary = agent.memory.summary
         self.investigator.memory.turns = list(agent.memory.turns)
+        # The investigator reads the working document, but none of the review agents writes it.
+        self.investigator.memory.document = agent.memory.document
         self.sources: dict[int, SearchResult] = {}
         self.tool_results: list[str] = []
 
@@ -83,6 +86,7 @@ class Review:
             guardrails=main.guardrails, persona=persona, approver=main.approver,
         )
         agent.memory.profile = main.memory.profile
+        agent.keeps_document = False
         return agent
 
     def run(self, question: str) -> Iterator[Event]:
@@ -133,3 +137,6 @@ class Review:
     def _finish(self, question: str, is_approved: bool, content: str, rounds: int) -> Iterator[Event]:
         self.agent.memory.commit(question, content)
         yield ReviewDoneEvent(is_approved, content, rounds)
+        # A text the fact-checker did not approve is not an established fact.
+        if is_approved and self.agent.config.features["document"] and content.strip():
+            yield from self.agent.update_document(question, content, self.agent.active_guardrails)
