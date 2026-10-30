@@ -85,6 +85,18 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 
 `name`, `role`, `tone` and `scope` are required; a file with a missing field or invalid JSON stops the startup with an error naming the file. Switching persona (`/persona ID`) only replaces the system message: the turns and the summary of older turns are kept, so the fact-checker knows what the investigator established.
 
+### Multi-agent review
+
+`/review QUESTION` has the three personas work on the same question, one after the other, instead of switching them by hand:
+
+1. The **investigator** answers, with the documents and the tools.
+2. The **fact-checker** gets the question and the answer, gives a verdict per claim and ends with `VERDICT: APPROVED` or `VERDICT: REJECTED`. Rejected, the investigator gets its remarks, corrects its answer and the fact-checker checks it again, up to `SENSAI_MAX_REVIEW_ROUNDS` checks (2 by default).
+3. Once approved, the **editor** writes the text from the checked answer. Never approved, the review stops without the editor and says so.
+
+`orchestrator.py`: `Review` builds one `Agent` per persona and passes the text from one to the next. Each agent has its own memory: the fact-checker and the editor only get the text they work on, so the reasoning of the investigator does not sway them, and only the investigator can search the documents and call tools. The investigator starts from the conversation, so a follow-up question is understood. The guardrails, the approvals and the profile apply to every agent.
+
+Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+
 ### Tools
 
 The model can call tools with [Ollama's tool calling](https://docs.ollama.com/capabilities/tool-calling). A tool is a plain Python function: the Ollama SDK builds the description sent to the model from its type hints and its docstring (`Args:`, `Returns:`). The model answers with tool calls instead of text, Sensai runs them and sends the results back, and the model continues with them. A turn allows up to `SENSAI_MAX_TOOL_ROUNDS` rounds of calls, then the model has to answer.

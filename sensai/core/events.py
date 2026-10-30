@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
 from sensai.core.llm.ollama import ToolCall
+from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.tools.registry import ToolResult
 
@@ -47,6 +48,22 @@ class DoneEvent:
 
 
 @dataclass
+class AgentStartedEvent:
+    """In a review, the agent whose events follow."""
+
+    persona: Persona
+
+
+@dataclass
+class ReviewDoneEvent:
+    """The text kept in the history: the editor's when the fact-checker approved, else the last answer."""
+
+    approved: bool
+    content: str
+    rounds: int
+
+
+@dataclass
 class CompactionStartedEvent:
     tokens: int
 
@@ -70,6 +87,8 @@ Event = (
     | ToolResultEvent
     | GuardrailEvent
     | DoneEvent
+    | AgentStartedEvent
+    | ReviewDoneEvent
     | CompactionStartedEvent
     | CompactionEvent
     | CompactionFailedEvent

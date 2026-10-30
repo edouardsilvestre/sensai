@@ -33,6 +33,7 @@ FEATURES = {
     "sessions": Feature("save every conversation so that it can be resumed"),
     "profile": Feature("send your profile to the model at the start of every conversation"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
+    "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -77,6 +78,7 @@ class Config:
     sandbox_image: str = "python:3.12-slim"
     mcp_timeout: int = 30
     max_tool_rounds: int = 5
+    max_review_rounds: int = 2
     approval: str = "critical"
 
 
@@ -164,6 +166,7 @@ def load_config(path: Path | None = None) -> Config:
         sandbox_image=os.getenv("SENSAI_SANDBOX_IMAGE", Config.sandbox_image),
         mcp_timeout=_int_env("SENSAI_MCP_TIMEOUT", Config.mcp_timeout, minimum=1, maximum=300),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
+        max_review_rounds=_int_env("SENSAI_MAX_REVIEW_ROUNDS", Config.max_review_rounds, minimum=1, maximum=5),
         approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
     )
     if config.chunk_overlap >= config.chunk_size:
