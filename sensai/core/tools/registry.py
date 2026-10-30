@@ -57,8 +57,10 @@ def requires_approval(reason: str) -> Callable[[Tool], Tool]:
 
 
 class ToolRegistry:
-    def __init__(self, tools: Iterable[Tool] = ()):
+    def __init__(self, tools: Iterable[Tool] = (), warnings: Iterable[str] = ()):
         self._tools = {_name(tool): tool for tool in tools}
+        # Why tools were left out while the registry was built, like those of an MCP server that is down.
+        self.warnings = list(warnings)
 
     def __len__(self) -> int:
         return len(self._tools)
