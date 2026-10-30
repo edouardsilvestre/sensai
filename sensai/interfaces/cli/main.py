@@ -32,6 +32,7 @@ from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.tools.catalog import build_registry
+from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
@@ -48,6 +49,7 @@ Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
   /sources                show the excerpts retrieved for the last message
   /tools                  list the tools the model can call
+  /files                  show the folders the model may read and write
   /context                show the context usage and the summary of older turns
   /sessions               list the saved conversations
   /resume [ID]            continue a saved conversation (the last one without ID)
@@ -465,6 +467,23 @@ def tools_command(session: Session) -> None:
         print(f"  {tool.__name__}: {description}")
 
 
+def folders(permissions: Permissions, paths: list[Path]) -> str:
+    shown = [permissions.display(path) + ("" if path.is_dir() else " (missing)") for path in paths]
+    return ", ".join(shown) or "none"
+
+
+def files_command(session: Session) -> None:
+    config = session.config
+    if not config.features["files"]:
+        print("The files feature is off: /feature files on to let the model read and write files.")
+    permissions = Permissions(config.files_read, config.files_write, config.files_deny)
+    print(f"Read (SENSAI_FILES_READ): {folders(permissions, permissions.read)}")
+    print(f"Read and write (SENSAI_FILES_WRITE): {folders(permissions, permissions.write)}")
+    print(f"Always denied: {', '.join(ALWAYS_DENIED + tuple(permissions.deny))}")
+    if config.approval != "off":
+        print("Sensai asks before every file written: /approval to change it.")
+
+
 def context_command(session: Session) -> None:
     memory = session.agent.memory
     usage = memory.last_usage
@@ -594,6 +613,8 @@ def handle_command(session: Session, line: str) -> bool:
         show_excerpts(session.last_sources)
     elif name == "/tools":
         tools_command(session)
+    elif name == "/files":
+        files_command(session)
     elif name == "/ingest":
         ingest_command(session, argument)
     elif name == "/context":
