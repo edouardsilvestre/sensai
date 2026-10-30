@@ -29,6 +29,7 @@ def test_features_lists_every_feature(session, capsys):
         ["web_search", "off", "let the model search the web; the queries are sent to Ollama's web search"],
         ["code_exec", "off", "let the model run Python code in a Docker sandbox"],
         ["memory", "on", "let the model save and look up facts about people, companies and places"],
+        ["mcp", "on", "let the model call the tools of the MCP servers listed in the MCP file"],
         ["sessions", "on", "save every conversation so that it can be resumed"],
         ["profile", "on", "send your profile to the model at the start of every conversation"],
         ["guardrails", "on", "check the messages, the answers and the tool calls against the guardrail rules"],
@@ -115,4 +116,4 @@ def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
     out = capsys.readouterr().out
-    assert "Features: rag off, tools on, web_search off, code_exec off, memory on, sessions on, profile on, guardrails on" in out
+    assert "Features: rag off, tools on, web_search off, code_exec off, memory on, mcp on, sessions on, profile on, guardrails on" in out

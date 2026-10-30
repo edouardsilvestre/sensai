@@ -1,5 +1,4 @@
 import argparse
-import inspect
 import json
 import shlex
 import sys
@@ -37,6 +36,7 @@ from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.tools.catalog import build_registry
+from sensai.core.tools.mcp import MCPConfigError
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
@@ -482,9 +482,8 @@ def tools_command(session: Session) -> None:
                 print(f"  {name}: {feature.description}")
         return
     print("Tools:")
-    for tool in agent.tools.tools():
-        description = " ".join((inspect.getdoc(tool) or "").split("\n\n")[0].split())
-        print(f"  {tool.__name__}: {description}")
+    for name, description in agent.tools.descriptions().items():
+        print(f"  {name}: {description}")
 
 
 def context_command(session: Session) -> None:
@@ -567,7 +566,7 @@ def feature_command(session: Session, argument: str) -> None:
 def reload_tools(session: Session) -> None:
     try:
         session.agent.tools = load_tools(session.config, session.agent.client)
-    except (LLMError, MemoryStoreError) as e:
+    except (LLMError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
         return
     if session.agent.tools:
@@ -678,7 +677,7 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
-    for message in tools.prepare():
+    for message in tools.warnings + tools.prepare():
         warning(message)
     return tools
 
@@ -729,7 +728,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
         agent.guardrails = load_guardrails(config, agent.client)
-    except (LLMError, GuardrailError, MemoryStoreError) as e:
+    except (LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
         return 1
 

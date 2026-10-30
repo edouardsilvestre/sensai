@@ -12,6 +12,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
+- 🔌 **MCP servers**: the model can call the tools of any MCP server reached by its URL, like a company registry lookup, each call approved first.
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: the model saves what is established about people, companies and places, and who is linked to whom, in a local database it reads and corrects across sessions.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
@@ -139,6 +140,44 @@ def web_search(self, query: str) -> ToolResult:
 
 `SENSAI_APPROVAL` sets when Sensai asks: `critical` (default) for the tools that declare it, `all` before every tool call, `off` never. The core does not ask the user itself: the interface gives the agent an approver, a function that returns the decision, so a web interface can show buttons instead of a terminal prompt. Without an approver, critical calls are refused.
 **Code execution** (`tools/code_runner.py`) lets the model run the Python code it writes, like ChatGPT's Code Interpreter. Each call starts a new Docker container from `SENSAI_SANDBOX_IMAGE`, sends the code to `python -` on its standard input and removes the container afterwards. The container has no network, 256 MB of memory, one CPU, 64 processes at most, a read-only disk (only `/tmp` is writable) and runs as `nobody` without privileges; nothing from the host is mounted. A program running longer than `SENSAI_CODE_TIMEOUT` seconds is killed. The model gets the exit code, the output and the traceback, each cut to their last 2000 characters. A crash is not a tool error: the model reads the traceback, fixes its code and calls `run_python` again, within the `SENSAI_MAX_TOOL_ROUNDS` limit. At startup Sensai checks that Docker runs and downloads the image if needed, otherwise it warns and chats without code execution.
+
+### MCP servers
+
+[MCP](https://modelcontextprotocol.io) (Model Context Protocol) lets a program, the server, offer tools to an AI application. Sensai is an MCP client: it reads the tools of the servers listed in `SENSAI_MCP_PATH`, and the model calls them like its own tools. Only servers reached by their URL are supported (Streamable HTTP transport).
+
+```json
+{
+  "mcpServers": {
+    "calculator": { "url": "http://127.0.0.1:8001/mcp" },
+    "private": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer KEY" } }
+  }
+}
+```
+
+`headers` is optional and sent with every request, for a server that asks for a token. Keep the file in `.sensai/`, which is not committed: it can hold keys.
+
+- `tools/mcp.py` uses the official [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (`mcp`). At startup, `load_tools` asks each server for its tools (`tools/list`) and turns each one into a `SchemaTool` (`tools/registry.py`): the server gives a name, a description and a JSON schema of the arguments, sent to Ollama as they are. When the model calls the tool, `call_tool` sends `tools/call` to the server, which checks the arguments, runs the tool and answers.
+- Each call opens its own connection and closes it: nothing stays open, and a restarted server is simply reached again. A server gets `SENSAI_MCP_TIMEOUT` seconds to answer.
+- The arguments leave the machine, so every MCP tool needs approval in the default `critical` mode, and the guardrails check its calls like any other tool.
+- A server that does not answer at startup only loses its tools, with a warning. A tool whose name is already used, by Sensai or by another server, is left out, never replaced. A failed call is sent back to the model as an error. An invalid file stops Sensai at startup, like an invalid guardrails file.
+
+`mcp_servers/` holds two servers built with the SDK's `MCPServer`, each started on its own:
+
+| Server | Tools | URL |
+|---|---|---|
+| `python mcp_servers/calculator.py` | `add`, `multiply`: exact arithmetic instead of mental computing | `http://127.0.0.1:8001/mcp` |
+| `python mcp_servers/sirene.py` | `find_siren`: the SIREN, head office SIRET, address and state of a French company, from the public [company directory](https://recherche-entreprises.api.gouv.fr/docs/) | `http://127.0.0.1:8002/mcp` |
+
+[mcp.example.json](mcp.example.json) lists both, and the public [DeepWiki](https://mcp.deepwiki.com) server, an existing MCP server that answers questions about GitHub repositories. To use them:
+
+```bash
+python mcp_servers/calculator.py &
+python mcp_servers/sirene.py &
+cp mcp.example.json .sensai/mcp.json
+python -m sensai          # /tools lists add, multiply, find_siren and the DeepWiki tools
+```
+
+Any other server is one more entry with its URL. It is the `mcp` feature, on by default: without the file, no server is reached.
 
 ### Guardrails
 
@@ -316,6 +355,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
 | `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
+| `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
@@ -327,6 +367,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_GUARDRAILS_PATH` | `.sensai/guardrails.json` | guardrail rules (see `guardrails.example.json`); without it, personal data is blocked in web searches |
+| `SENSAI_MCP_PATH` | `.sensai/mcp.json` | URLs of the MCP servers (see `mcp.example.json`); without it, no server is reached |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -336,6 +377,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_WEB_SEARCH_RESULTS` | `5` | results the model gets for each web search (1-10) |
 | `SENSAI_CODE_TIMEOUT` | `10` | seconds a program may run before it is stopped (1-60) |
 | `SENSAI_SANDBOX_IMAGE` | `python:3.12-slim` | Docker image the code runs in; use one with pandas to analyse CSV files |
+| `SENSAI_MCP_TIMEOUT` | `30` | seconds an MCP server may take to answer a tool call (1-300) |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 | `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
 
