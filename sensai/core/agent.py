@@ -12,7 +12,9 @@ from sensai.core.events import (
     DoneEvent,
     Event,
     GuardrailEvent,
+    ReasoningStoppedEvent,
     SourcesEvent,
+    ThoughtEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -22,6 +24,7 @@ from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
+from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema
 from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 # Ends an answer that a block rule stopped, in the history, so that the model knows it was cut.
@@ -54,6 +57,7 @@ class Agent:
         self.approver = approver
         self.memory = ConversationMemory(config, self.client)
         self.guardrails = guardrails or Guardrails()
+        self.reasoning: list[Reasoning] = []
         self.persona: Persona | None = None
         if persona is not None:
             self.set_persona(persona)
@@ -93,6 +97,40 @@ class Agent:
         yield ToolResultEvent(call, result)
         return result
 
+    def _reason(
+        self, question: str, pending: list[dict], options: dict, guardrails: Guardrails
+    ) -> Generator[Event, None, Reasoning]:
+        reasoning = Reasoning(question)
+        self.reasoning.append(reasoning)
+        tools = self.tools if self.config.features["tools"] else ToolRegistry()
+        actions = tools.names()
+        schema = step_schema(actions)
+        messages = pending[:-1] + [{"role": "system", "content": instructions(tools)}] + pending[-1:]
+        for number in range(1, self.config.max_tool_rounds + 1):
+            reply = self.client.chat(self.config.model, messages, options, think=self.config.think, format=schema)
+            try:
+                step = parse_step(reply, actions)
+            except ReasoningError as e:
+                yield ReasoningStoppedEvent(str(e))
+                return reasoning
+            output = guardrails.output_filter()
+            step.thought = output.feed(step.thought) + output.close()
+            for hit in output.hits.values():
+                yield GuardrailEvent(hit)
+            if output.blocked:
+                yield GuardrailEvent(output.blocked)
+                yield ReasoningStoppedEvent("a thought was stopped by a guardrail")
+                return reasoning
+            reasoning.steps.append(step)
+            yield ThoughtEvent(number, step.thought)
+            if step.final:
+                return reasoning
+            step.result = yield from self._run_tool(step.call(), guardrails)
+            messages.append({"role": "assistant", "content": reply})
+            messages.append({"role": "user", "content": f"Result of {step.action}: {step.result.content}"})
+        yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
+        return reasoning
+
     def run(self, user_input: str) -> Iterator[Event]:
         user_input = user_input.strip()
         if not user_input:
@@ -120,6 +158,10 @@ class Agent:
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
         functions = self.tools.tools() if self.config.features["tools"] else []
+        if self.config.features["reasoning"]:
+            reasoning = yield from self._reason(user_input, pending, options, guardrails)
+            pending.insert(-1, {"role": "system", "content": reasoning.context()})
+            functions = []
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.
         max_rounds = self.config.max_tool_rounds
         for round_number in range(max_rounds + 1):

@@ -43,6 +43,17 @@ class GuardrailEvent:
 
 
 @dataclass
+class ThoughtEvent:
+    number: int
+    thought: str
+
+
+@dataclass
+class ReasoningStoppedEvent:
+    reason: str
+
+
+@dataclass
 class DoneEvent:
     content: str
 
@@ -86,6 +97,8 @@ Event = (
     | ApprovalEvent
     | ToolResultEvent
     | GuardrailEvent
+    | ThoughtEvent
+    | ReasoningStoppedEvent
     | DoneEvent
     | AgentStartedEvent
     | ReviewDoneEvent

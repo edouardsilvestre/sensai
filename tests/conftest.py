@@ -19,6 +19,8 @@ class FakeClient:
         # Tool calls returned by the next calls made with tools, one list per call.
         self.tool_rounds: list[list] = []
         self.tools_seen: list[list[dict] | None] = []
+        self.steps: list[str] = []
+        self.steps_seen: list[tuple[list[dict], dict]] = []
         self.capable = True
 
     def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
@@ -56,8 +58,17 @@ class FakeClient:
             usage.prompt_tokens, usage.completion_tokens = self.usage
 
     def chat(
-        self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict | None = None,
+        think: bool | None = None,
+        usage=None,
+        format: dict | None = None,
     ) -> str:
+        if format is not None:
+            self.steps_seen.append((list(messages), format))
+            return self.steps.pop(0) if self.steps else '{"thought": "I can answer.", "action": "answer"}'
         self.summaries.append(messages)
         if usage is not None:
             usage.prompt_tokens, usage.completion_tokens = 300, 20

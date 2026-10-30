@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass, field
 
 from sensai.core.llm.ollama import ToolCall
-from sensai.core.tools.registry import ToolRegistry
+from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 ANSWER = "answer"
 
@@ -23,6 +23,13 @@ Rules:
 Tools:
 {tools}"""
 
+_ANSWER = """\
+Before answering the user's message, you reasoned step by step. Your steps and the results of the tools:
+{steps}
+
+Now answer the user's message from them, in plain text and in the language of the message.
+Only state what the results or the documents say, and say so when they do not answer the message."""
+
 
 class ReasoningError(Exception):
     pass
@@ -33,6 +40,7 @@ class Step:
     thought: str
     action: str
     arguments: dict = field(default_factory=dict)
+    result: ToolResult | None = None
 
     @property
     def final(self) -> bool:
@@ -40,6 +48,22 @@ class Step:
 
     def call(self) -> ToolCall:
         return ToolCall(self.action, self.arguments)
+
+
+@dataclass
+class Reasoning:
+    question: str
+    steps: list[Step] = field(default_factory=list)
+
+    def context(self) -> str:
+        lines = []
+        for number, step in enumerate(self.steps, start=1):
+            lines.append(f"Step {number}. Thought: {step.thought}")
+            if not step.final:
+                lines.append(f"Action: {step.action} {json.dumps(step.arguments, ensure_ascii=False)}")
+            if step.result is not None:
+                lines.append(f"Result: {step.result.content}")
+        return _ANSWER.format(steps="\n".join(lines) or "none")
 
 
 def step_schema(actions: list[str]) -> dict:
