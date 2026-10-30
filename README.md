@@ -13,7 +13,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
-- 🕸️ **Entity graph memory**: a structured knowledge graph of people, companies, accounts and their relationships: who is linked to whom, and how.
+- 🕸️ **Entity graph memory**: the model saves what is established about people, companies and places, and who is linked to whom, in a local database it reads and corrects across sessions.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
 - 📂 **Living investigation file**: a case document that grows as the investigation progresses, gathering findings, leads and their supporting evidence.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
@@ -41,6 +41,26 @@ Answering: the message is embedded, the closest chunks are added to the prompt a
 - `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
 
 Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
+
+### Long-term memory
+
+Sessions keep conversations; the long-term memory keeps what they established, as structured records the model reads and writes itself with tools:
+
+- `memory/store.py`: `MemoryStore` holds three SQLite tables in `SENSAI_MEMORY_PATH`: `entities` (a person, a company, a place, with its type), `facts` (one sentence about an entity) and `relations` (`Jean Dupont` `runs` `Alvor Consulting`). Names and relations ignore case, so the same entity or relation is never stored twice, and deleting an entity deletes its facts and relations.
+- `tools/memory.py`: `MemoryTools` gives the model six tools for the CRUD operations:
+
+| Tool | What it does |
+|---|---|
+| `memory_search(query)` | the entities whose name or one of whose facts contains the query, with the id of each fact and the relations |
+| `memory_add_fact(entity, fact, entity_type)` | saves a fact, creating the entity if it is new |
+| `memory_update_fact(fact_id, fact)` | replaces a fact that turned out to be wrong |
+| `memory_delete_fact(fact_id)` | deletes a fact |
+| `memory_link(subject, relation, object)` | saves a relation, creating the missing entities |
+| `memory_unlink(subject, relation, object)` | deletes a relation |
+
+Every call is printed in the CLI (`[memory_add_fact] fact 3 saved`), so the journalist sees each write. The search results are marked as data, not instructions: a fact copied from a web page cannot give orders to the model in a later session. The memory never leaves the machine, so its tools need no approval; delete `.sensai/memory.db` to erase it.
+
+It is the `memory` feature, on by default, and needs a model that supports tools. Small models like `qwen3:1.7b` only call the tools reliably with their thinking phase on: leave `SENSAI_THINK` empty or `true`.
 
 ### Personas
 
@@ -283,12 +303,14 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
+| `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
 | `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
+| `SENSAI_MEMORY_PATH` | `.sensai/memory.db` | SQLite file holding the long-term memory |
 | `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
@@ -315,6 +337,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `tools` | every tool the model can call, whatever their own feature or setting |
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
+| `memory` | the long-term memory tools; the memory file is kept when it is off |
 
 The features are on by default, except `web_search` and `code_exec`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
