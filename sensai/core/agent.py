@@ -91,13 +91,15 @@ class Agent:
         allowed: list[Edit] = []
         blocked: list[Rejected] = []
         for edit in edits:
-            checked = guardrails.check("output", edit.text)
-            for hit in checked.hits:
+            # The section name is written too: add_section makes it a heading of the document.
+            name, text = guardrails.check("output", edit.section), guardrails.check("output", edit.text)
+            for hit in name.hits + text.hits:
                 yield GuardrailEvent(hit)
-            if checked.blocked:
-                blocked.append(Rejected(edit, f"blocked by the guardrail {checked.blocked.rule} ({checked.blocked.found})"))
+            hit = name.blocked or text.blocked
+            if hit:
+                blocked.append(Rejected(edit, f"blocked by the guardrail {hit.rule} ({hit.found})"))
             else:
-                edit.text = checked.text
+                edit.section, edit.text = name.text, text.text
                 allowed.append(edit)
         report = self.memory.document.apply(allowed)
         report.rejected = blocked + report.rejected

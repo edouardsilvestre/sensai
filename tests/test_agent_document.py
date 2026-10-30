@@ -114,6 +114,23 @@ def test_an_edit_blocked_by_a_guardrail_is_not_written(config, client):
     assert agent.memory.document.is_empty
 
 
+def test_a_section_name_blocked_by_a_guardrail_is_not_written(config, client):
+    rule = {"name": "iban", "detectors": ["iban"], "on": ["output"], "action": "block"}
+    client.edits = edits({"op": "add_section", "section": "Account FR7630006000011234567890189", "text": "- received"})
+    agent = Agent(config, client, guardrails=Guardrails(parse_rules([rule])))
+    report = of_type(list(agent.run("Which account?")), DocumentEvent)[0].report
+    assert report.rejected[0].reason == "blocked by the guardrail iban (IBAN)"
+    assert "FR76" not in agent.memory.document.markdown()
+
+
+def test_the_guardrails_redact_the_section_names_too(config, client):
+    client.edits = edits({"op": "add_section", "section": "Claire Benoit", "text": "- refused the transfer"})
+    agent = Agent(config, client, guardrails=Guardrails(parse_rules([SOURCE])))
+    list(agent.run("Who refused?"))
+    assert agent.memory.document.names()[-1] == "[SOURCE]"
+    assert "Claire Benoit" not in agent.memory.document.markdown()
+
+
 def test_a_blocked_message_does_not_update_the_document(config, client):
     rule = {"name": "private", "pattern": "adresse personnelle", "on": ["input"], "action": "block"}
     agent = Agent(config, client, guardrails=Guardrails(parse_rules([rule])))
