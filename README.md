@@ -274,7 +274,7 @@ Document written to enquete-alvor.md.
 ```
 
 With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
-With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed and has to be approved before it is sent, so nothing leaves the machine without your consent:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query has to be approved before it is sent, so nothing leaves the machine without your consent:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
