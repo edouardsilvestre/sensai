@@ -1,5 +1,7 @@
 from mcp.server.mcpserver import MCPServer
 
+# Its URL is http://127.0.0.1:8001/mcp.
+PORT = 8001
 server = MCPServer("calculator")
 
 
@@ -34,4 +36,4 @@ def multiply(a: float, b: float) -> float:
 
 
 if __name__ == "__main__":
-    server.run()
+    server.run("streamable-http", port=PORT)

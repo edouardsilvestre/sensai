@@ -12,6 +12,8 @@ MAX_RESULTS = 3
 TIMEOUT = 10
 STATES = {"A": "active", "C": "closed"}
 
+# Its URL is http://127.0.0.1:8002/mcp.
+PORT = 8002
 server = MCPServer("sirene")
 
 
@@ -55,4 +57,4 @@ def find_siren(name: str) -> str:
 
 
 if __name__ == "__main__":
-    server.run()
+    server.run("streamable-http", port=PORT)
