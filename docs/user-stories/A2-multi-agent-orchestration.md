@@ -6,7 +6,7 @@ As an investigative journalist, I want my question answered by the investigator 
 
 Acceptance criteria:
 - `/review QUESTION` runs the investigator, then the fact-checker on its answer; a header names each agent before it speaks.
-- The fact-checker gives a verdict per claim and ends with `VERDICT: APPROVED` or `VERDICT: REJECTED`.
+- The fact-checker answers in JSON that follows a schema: one verdict per claim. The answer is approved only when every claim is supported or common knowledge.
 - Rejected, the investigator gets the fact-checker's remarks and corrects its answer, which is checked again.
 - After `SENSAI_MAX_REVIEW_ROUNDS` checks (2 by default) without approval, the review stops and says that the answer is not approved; the editor does not run.
 - A verdict that cannot be read counts as a rejection.
