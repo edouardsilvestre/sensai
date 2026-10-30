@@ -70,6 +70,19 @@ def test_chat_fills_usage():
     assert usage == Usage(prompt_tokens=300, completion_tokens=20)
 
 
+def test_chat_sends_the_schema_the_reply_must_follow():
+    schema = {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}
+    client = make_client()
+    client.chat("model", [], format=schema)
+    assert client._client.kwargs["format"] == schema
+
+
+def test_chat_replies_freely_without_a_schema():
+    client = make_client()
+    client.chat("model", [])
+    assert client._client.kwargs["format"] is None
+
+
 def test_tool_calls_are_collected():
     client = make_client()
     def web_search(query: str) -> str:
