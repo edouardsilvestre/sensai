@@ -22,6 +22,7 @@ class FakeClient:
         # Tool calls returned by the next calls made with tools, one list per call.
         self.tool_rounds: list[list] = []
         self.tools_seen: list[list[dict] | None] = []
+        self.formats_seen: list[dict | None] = []
         self.capable = True
 
     def embed(self, model: str, texts: list[str], options: dict | None = None) -> list[list[float]]:
@@ -46,8 +47,10 @@ class FakeClient:
         usage=None,
         tools: list | None = None,
         tool_calls: list | None = None,
+        format: dict | None = None,
     ):
         self.chats.append((list(messages), options))
+        self.formats_seen.append(format)
         self.think = think
         self.tools_seen.append(tools)
         if tools and self.tool_rounds:

@@ -112,7 +112,7 @@ class Agent:
         if report:
             yield DocumentEvent(report)
 
-    def run(self, user_input: str) -> Iterator[Event]:
+    def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
         user_input = user_input.strip()
         if not user_input:
             raise EmptyInputError("Empty message")
@@ -148,7 +148,7 @@ class Agent:
             output = guardrails.output_filter()
             for chunk in self.client.chat_stream(
                 self.config.model, pending, options, think=self.config.think, usage=usage,
-                tools=tools or None, tool_calls=calls,
+                tools=tools or None, tool_calls=calls, format=format,
             ):
                 shown = output.feed(chunk)
                 if shown:
