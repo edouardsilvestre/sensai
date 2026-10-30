@@ -38,6 +38,7 @@ from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
+from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.mcp import MCPConfigError
 from sensai.core.tools.registry import ToolRegistry
@@ -71,6 +72,7 @@ Commands:
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
   /review QUESTION        the investigator answers, the fact-checker checks, the editor writes the text
+  /json QUESTION          answer in JSON: the answer, its claims with their excerpts, the entities and the events
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /exit, /quit            leave (or press Ctrl+D)"""
@@ -234,8 +236,7 @@ def prompt(session: Session) -> str:
     return f"\n[{persona.id}] > " if persona else "\n> "
 
 
-def print_sources(sources: list[SearchResult], answer: str) -> None:
-    cited = cited_numbers(answer)
+def print_sources(sources: list[SearchResult], cited: list[int]) -> None:
     valid = [number for number in cited if 1 <= number <= len(sources)]
     if valid:
         print("\nSources:")
@@ -291,7 +292,7 @@ def chat_turn(session: Session, line: str) -> None:
     show_events(session, session.agent.run(line))
 
 
-def show_events(session: Session, events: Iterator[Event]) -> None:
+def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -313,6 +314,9 @@ def show_events(session: Session, events: Iterator[Event]) -> None:
                 documents = len({source.source for source in sources})
                 print(f"[search] {len(sources)} excerpts from {documents} documents")
             elif isinstance(event, TokenEvent):
+                # A JSON answer is printed once complete and checked, indented.
+                if structured:
+                    continue
                 print(event.text, end="", flush=True)
                 mid_line = not event.text.endswith("\n")
             elif isinstance(event, ToolCallEvent):
@@ -331,9 +335,12 @@ def show_events(session: Session, events: Iterator[Event]) -> None:
                     mid_line = False
                 print_guardrail(event.hit)
             elif isinstance(event, DoneEvent):
+                if structured:
+                    print_structured(event.content, sources)
+                    continue
                 print()
                 if sources:
-                    print_sources(sources, event.content)
+                    print_sources(sources, cited_numbers(event.content))
             elif isinstance(event, DocumentEvent):
                 print_document_report(event.report)
             elif isinstance(event, DocumentFailedEvent):
@@ -687,6 +694,25 @@ def review_command(session: Session, argument: str) -> None:
     show_events(session, review.run(argument))
 
 
+def print_structured(answer: str, sources: list[SearchResult]) -> None:
+    try:
+        data = parse_answer(answer)
+    except StructuredError as e:
+        error(f"{e}:\n{answer}")
+        return
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+    if sources:
+        print_sources(sources, cited_sources(data))
+
+
+def json_command(session: Session, argument: str) -> None:
+    if not argument:
+        error("Usage: /json QUESTION")
+        return
+    session.last_sources = []
+    show_events(session, session.agent.run(argument, ANSWER_SCHEMA), structured=True)
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -726,6 +752,8 @@ def handle_command(session: Session, line: str) -> bool:
         persona_command(session, argument)
     elif name == "/review":
         review_command(session, argument)
+    elif name == "/json":
+        json_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
