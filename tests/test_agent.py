@@ -15,7 +15,7 @@ from sensai.core.events import (
 )
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.rag.models import SearchResult
-from sensai.core.tools.registry import ToolRegistry, ToolResult, requires_approval
+from sensai.core.tools.registry import SchemaTool, ToolRegistry, ToolResult, requires_approval
 from sensai.core.tools.code_runner import CodeRunner, Execution
 from sensai.core.tools.registry import ToolRegistry, ToolResult
 
@@ -369,3 +369,19 @@ def test_the_model_sees_its_traceback_and_runs_fixed_code(config, client):
     assert "ZeroDivisionError" in client.chats[1][0][-1]["content"]
     assert "2.5" in client.chats[2][0][-1]["content"]
     assert events[-1] == DoneEvent("Hello there ")
+
+
+def test_a_schema_tool_is_offered_run_and_approved_like_the_others(config, client):
+    tool = SchemaTool(
+        "lookup", "Look a company up.", {"type": "object", "properties": {"query": {"type": "string"}}},
+        lambda arguments: f"{arguments['query']} is registered in Lisbon.", approval_reason=SECRET,
+    )
+    approver = FakeApprover(Approval(True))
+    client.tool_rounds = [[CALL]]
+    agent = Agent(config, client, tools=ToolRegistry([tool]), approver=approver)
+
+    events = list(agent.run("Where is Alvor based?"))
+
+    assert client.tools_seen[0] == [tool.schema()]
+    assert approver.asked == [(CALL, SECRET)]
+    assert ToolResultEvent(CALL, ToolResult("Alvor is registered in Lisbon.")) in events

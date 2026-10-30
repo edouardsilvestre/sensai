@@ -90,7 +90,7 @@ class OllamaClient:
         options: dict | None = None,
         think: bool | None = None,
         usage: Usage | None = None,
-        tools: list[Callable] | None = None,
+        tools: list[Callable | dict] | None = None,
         tool_calls: list[ToolCall] | None = None,
     ) -> Iterator[str]:
         try:
