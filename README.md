@@ -18,6 +18,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
 - 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
+- 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -109,12 +110,37 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 `/review QUESTION` has the three personas work on the same question, one after the other, instead of switching them by hand:
 
 1. The **investigator** answers, with the documents and the tools.
-2. The **fact-checker** gets the question and the answer, answers in JSON, following a schema sent to Ollama (`{"claims": [{"claim", "verdict", "reason"}]}`), and the answer is approved only when every claim is `supported` or `common knowledge`. Rejected, the investigator gets its remarks, corrects its answer and the fact-checker checks it again, up to `SENSAI_MAX_REVIEW_ROUNDS` checks (2 by default).
+2. The **fact-checker** gets the question and the answer, answers in JSON, following a schema sent to Ollama (`{"claims": [{"claim", "reason", "verdict"}]}`), and the answer is approved only when every claim is `supported` or `common knowledge`. Rejected, the investigator gets its remarks, corrects its answer and the fact-checker checks it again, up to `SENSAI_MAX_REVIEW_ROUNDS` checks (2 by default).
 3. Once approved, the **editor** writes the text from the checked answer. Never approved, the review stops without the editor and says so.
 
 `orchestrator.py`: `Review` builds one `Agent` per persona and passes the text from one to the next. Each agent has its own memory: the fact-checker and the editor only get the text they work on, so the reasoning of the investigator does not sway them, and only the investigator can search the documents and call tools. The investigator starts from the conversation, so a follow-up question is understood. The guardrails, the approvals and the profile apply to every agent.
 
-Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. The investigator reads the working document, but the review agents never edit it: the document is updated once, from the editor's text, and only when the fact-checker approved it. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. The investigator reads the working document, but the review agents never edit it: the document is updated once, from the editor's text, and only when the fact-checker approved it. A verdict that cannot be read, or that lists no claim, counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+
+### Structured outputs
+
+A prose answer is for the journalist; a program needs data it can read without guessing. Sensai sends a JSON schema to Ollama as `format` ([structured outputs](https://docs.ollama.com/capabilities/structured-outputs)): the model can only write JSON that follows it, instead of free text. Three places use it:
+
+| Where | Schema | What reads it |
+|---|---|---|
+| `/json QUESTION` | `ANSWER_SCHEMA` (`structured.py`) | the journalist, or any tool the JSON is copied into |
+| the working document | `EDITS_SCHEMA` (`document/editor.py`) | `Document.apply`, which applies the edits |
+| `/review` | `VERDICT_SCHEMA` (`orchestrator.py`) | `approved`, which computes the approval from the verdicts |
+
+`/json` answers like a message, with the documents, the profile and the guardrails, but in this form:
+
+```json
+{
+  "answer": "Orion a payé 2M à Delta le 4 avril.",
+  "claims": [{"text": "Orion a payé 2M à Delta", "sources": [1, 3]}],
+  "entities": [{"name": "Orion", "type": "company"}, {"name": "Delta", "type": "company"}],
+  "events": [{"date": "2024-04-04", "description": "Virement de 2M d'Orion à Delta"}]
+}
+```
+
+`sources` are the numbers of the excerpts listed below the JSON, as `[1]` in a prose answer, and an `entities` type is one of `person`, `company`, `place` or `other`. The JSON is printed once complete, indented, after being checked by `parse_answer` against the schema: Ollama already constrains the reply, but a guardrail can cut it and another server could ignore `format`. A reply that does not follow the schema is printed as it is, with what is wrong; an excerpt number that does not exist is flagged, like in a prose answer.
+
+The schema constrains every token the model writes, so it could not call a tool: an answer with a schema is given no tool (`Agent.run`), only the excerpts of the documents. The order of the fields matters too, since the model writes them in that order: the fact-checker gives the `reason` of each verdict before the `verdict`, so that it decides after having reasoned.
 
 ### Tools
 
@@ -287,6 +313,7 @@ Sources:
 | `/document` | show the working document |
 | `/document undo` | undo the changes made to the document by the last answer |
 | `/document export PATH` | write the document to a Markdown file |
+| `/json QUESTION` | answer in JSON that follows a schema: the answer, its claims with their excerpts, the entities and the events |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/help` | list the commands |
