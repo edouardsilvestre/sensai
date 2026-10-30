@@ -2,11 +2,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sensai.core.config import Config
+from sensai.core.document.document import Document
 from sensai.core.llm.ollama import OllamaClient, Usage
 from sensai.core.memory.profile import PROFILE_HEADER
 from sensai.core.memory.prompt import build_summary_prompt, summary_word_limit
 
 SUMMARY_HEADER = "Summary of the earlier conversation (older turns were condensed into it):"
+DOCUMENT_HEADER = (
+    "Working document, kept up to date separately after each answer: refer to it, but do not rewrite it in your answers."
+)
 
 
 @dataclass
@@ -30,6 +34,8 @@ class ConversationMemory:
         self.summary = ""
         # The user's profile, sent after the system prompt while the profile feature is on.
         self.profile = ""
+        # The deliverable of the conversation (M4): never condensed, it only changes through edits.
+        self.document = Document()
         self.last_usage: Usage | None = None
         self.summary_usage: Usage | None = None
         self.turns: list[Turn] = []
@@ -46,6 +52,8 @@ class ConversationMemory:
         parts = [self.system_prompt] if self.system_prompt else []
         if self.profile and self.config.features["profile"]:
             parts.append(f"{PROFILE_HEADER}\n{self.profile}")
+        if self.config.features["document"] and not self.document.is_empty:
+            parts.append(f"{DOCUMENT_HEADER}\n{self.document.markdown().strip()}")
         if self.summary:
             parts.append(f"{SUMMARY_HEADER}\n{self.summary}")
         return {"role": "system", "content": "\n\n".join(parts)} if parts else None

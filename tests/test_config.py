@@ -12,7 +12,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
-    "SENSAI_APPROVAL",
+    "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
     "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE", "SENSAI_FILES_READ", "SENSAI_FILES_WRITE", "SENSAI_FILES_DENY",
 ]
 
@@ -33,7 +33,8 @@ def test_defaults(env_file):
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
-        "sessions": True, "profile": True, "guardrails": True,
+        "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
+        "orchestration": True,
     }
 
 
@@ -58,6 +59,20 @@ def test_memory_path_from_environment(env_file, monkeypatch):
 def test_guardrails_path_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_GUARDRAILS_PATH", "/cases/alvor/guardrails.json")
     assert load_config(env_file).guardrails_path == Path("/cases/alvor/guardrails.json")
+
+
+def test_mcp_settings_from_environment(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_MCP_PATH", "/cases/alvor/mcp.json")
+    monkeypatch.setenv("SENSAI_MCP_TIMEOUT", "60")
+    config = load_config(env_file)
+    assert (config.mcp_path, config.mcp_timeout) == (Path("/cases/alvor/mcp.json"), 60)
+
+
+@pytest.mark.parametrize("value", ["0", "301"])
+def test_mcp_timeout_out_of_bounds(env_file, monkeypatch, value):
+    monkeypatch.setenv("SENSAI_MCP_TIMEOUT", value)
+    with pytest.raises(ConfigError, match="SENSAI_MCP_TIMEOUT"):
+        load_config(env_file)
 
 
 def test_persona_settings_from_environment(env_file, monkeypatch):
@@ -147,6 +162,12 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
     assert (config.max_tool_rounds, config.web_search_results) == (3, 8)
 
 
+def test_review_rounds_from_environment(env_file, monkeypatch):
+    assert load_config(env_file).max_review_rounds == 2
+    monkeypatch.setenv("SENSAI_MAX_REVIEW_ROUNDS", "4")
+    assert load_config(env_file).max_review_rounds == 4
+
+
 def test_approval_asks_for_critical_tools_by_default(env_file):
     assert load_config(env_file).approval == "critical"
 
@@ -210,6 +231,9 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
         ("SENSAI_FEATURE_CODE_EXEC", "maybe"),
         ("SENSAI_CODE_TIMEOUT", "0"),
         ("SENSAI_CODE_TIMEOUT", "61"),
+        ("SENSAI_MAX_REVIEW_ROUNDS", "0"),
+        ("SENSAI_MAX_REVIEW_ROUNDS", "6"),
+        ("SENSAI_FEATURE_ORCHESTRATION", "maybe"),
     ],
 )
 def test_invalid_values_are_rejected(env_file, monkeypatch, name, value):

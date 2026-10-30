@@ -1,37 +1,46 @@
 import argparse
-import inspect
 import json
 import shlex
 import sys
 import textwrap
 from dataclasses import dataclass, field
+from collections.abc import Iterator
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.approval import Approval
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
+    AgentStartedEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
+    DocumentEvent,
+    DocumentFailedEvent,
     DoneEvent,
+    Event,
     GuardrailEvent,
+    ReviewDoneEvent,
     SourcesEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from sensai.core.document.document import Document, Edit, EditReport
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
+from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
+from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
 from sensai.core.tools.catalog import build_registry
+from sensai.core.tools.mcp import MCPConfigError
 from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
@@ -57,10 +66,15 @@ Commands:
   /profile                show the instructions the model gets about you
   /profile add TEXT       add an instruction to your profile
   /profile remove N       remove instruction N from your profile
+  /document               show the working document the model keeps up to date
+  /document undo          undo the changes made to the document by the last answer
+  /document export PATH   write the document to a Markdown file
   /features               list the features and whether they are on
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
+  /review QUESTION        the investigator answers, the fact-checker checks, the editor writes the text
+  /json QUESTION          answer in JSON: the answer, its claims with their excerpts, the entities and the events
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /exit, /quit            leave (or press Ctrl+D)"""
@@ -224,8 +238,7 @@ def prompt(session: Session) -> str:
     return f"\n[{persona.id}] > " if persona else "\n> "
 
 
-def print_sources(sources: list[SearchResult], answer: str) -> None:
-    cited = cited_numbers(answer)
+def print_sources(sources: list[SearchResult], cited: list[int]) -> None:
     valid = [number for number in cited if 1 <= number <= len(sources)]
     if valid:
         print("\nSources:")
@@ -276,17 +289,36 @@ def print_guardrail(hit: Hit) -> None:
 
 
 def chat_turn(session: Session, line: str) -> None:
-    sources: list[SearchResult] = []
     if line.strip():
         session.last_sources = []
+    show_events(session, session.agent.run(line))
+
+
+def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
+    sources: list[SearchResult] = []
     mid_line = False
     try:
-        for event in session.agent.run(line):
-            if isinstance(event, SourcesEvent):
+        for event in events:
+            if isinstance(event, AgentStartedEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                sources = []
+                print(f"\n── {event.persona.id} ({event.persona.name}) ──")
+            elif isinstance(event, ReviewDoneEvent):
+                rounds = plural(event.rounds, "check")
+                if event.approved:
+                    print(f"\n[review] approved by the fact-checker after {rounds}, the editor's text is kept.")
+                else:
+                    warning(f"Answer not approved after {rounds}: the last answer is kept, check the remarks above.")
+            elif isinstance(event, SourcesEvent):
                 sources = session.last_sources = event.sources
                 documents = len({source.source for source in sources})
                 print(f"[search] {len(sources)} excerpts from {documents} documents")
             elif isinstance(event, TokenEvent):
+                # A JSON answer is printed once complete and checked, indented.
+                if structured:
+                    continue
                 print(event.text, end="", flush=True)
                 mid_line = not event.text.endswith("\n")
             elif isinstance(event, ToolCallEvent):
@@ -305,9 +337,16 @@ def chat_turn(session: Session, line: str) -> None:
                     mid_line = False
                 print_guardrail(event.hit)
             elif isinstance(event, DoneEvent):
+                if structured:
+                    print_structured(event.content, sources)
+                    continue
                 print()
                 if sources:
-                    print_sources(sources, event.content)
+                    print_sources(sources, cited_numbers(event.content))
+            elif isinstance(event, DocumentEvent):
+                print_document_report(event.report)
+            elif isinstance(event, DocumentFailedEvent):
+                warning(f"The document was not updated: {event.message}")
             elif isinstance(event, CompactionStartedEvent):
                 print(f"[memory] context at {event.tokens}/{session.config.num_ctx} tokens, condensing the oldest turns...")
             elif isinstance(event, CompactionEvent):
@@ -322,6 +361,25 @@ def chat_turn(session: Session, line: str) -> None:
     except KeyboardInterrupt:
         print("\n[interrupted]")
     save_session(session)
+
+
+CHANGES = {"append": "added to {}", "replace": "corrected in {}", "rewrite": "{} rewritten", "add_section": "new section {}"}
+
+
+def describe_edits(edits: list[Edit]) -> str:
+    # One entry per section and kind of change: "2 added to Timeline" rather than the same line twice.
+    counts: dict[str, int] = {}
+    for edit in edits:
+        change = CHANGES[edit.op].format(" ".join(edit.section.split()))
+        counts[change] = counts.get(change, 0) + 1
+    return ", ".join(f"{count} {change}" if count > 1 else change for change, count in counts.items())
+
+
+def print_document_report(report: EditReport) -> None:
+    if report.applied:
+        print(f"[document] {describe_edits(report.applied)}. /document to read it.")
+    for rejected in report.rejected:
+        warning(f"document edit rejected ({rejected.edit.describe()}): {rejected.reason}")
 
 
 def save_session(session: Session) -> None:
@@ -384,6 +442,7 @@ def new_command(session: Session) -> None:
     memory = session.agent.memory
     previous = session.session_id
     memory.summary, memory.turns, memory.last_usage = "", [], None
+    memory.document = Document()
     session.session_id = None
     session.last_sources = []
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
@@ -430,6 +489,43 @@ def show_profile(session: Session) -> None:
         print(f"  {number}. {entry}")
 
 
+def document_command(session: Session, argument: str) -> None:
+    memory = session.agent.memory
+    action, _, value = argument.partition(" ")
+    if action == "undo":
+        if memory.document.undo():
+            print("The changes of the last answer are undone.")
+            save_session(session)
+        else:
+            print("Nothing to undo.")
+    elif action == "export":
+        path = Path(value.strip().strip('"'))
+        if not value.strip():
+            error("Usage: /document export PATH")
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(memory.document.markdown(), encoding="utf-8")
+        except OSError as e:
+            error(f"Cannot write {path}: {e}")
+            return
+        print(f"Document written to {path}.")
+    elif action:
+        error("Usage: /document [undo | export PATH]")
+    else:
+        show_document(session)
+
+
+def show_document(session: Session) -> None:
+    document = session.agent.memory.document
+    if not session.config.features["document"]:
+        print("The document feature is off: /feature document on to update it after every answer.")
+    if document.is_empty:
+        print(f"The document is empty. It fills in as the conversation establishes facts: {', '.join(document.names())}.")
+        return
+    print(document.markdown().rstrip())
+
+
 def ingest_command(session: Session, argument: str) -> None:
     try:
         paths = [Path(path) for path in shlex.split(argument)]
@@ -462,9 +558,8 @@ def tools_command(session: Session) -> None:
                 print(f"  {name}: {feature.description}")
         return
     print("Tools:")
-    for tool in agent.tools.tools():
-        description = " ".join((inspect.getdoc(tool) or "").split("\n\n")[0].split())
-        print(f"  {tool.__name__}: {description}")
+    for name, description in agent.tools.descriptions().items():
+        print(f"  {name}: {description}")
 
 
 def folders(permissions: Permissions, paths: list[Path]) -> str:
@@ -564,7 +659,7 @@ def feature_command(session: Session, argument: str) -> None:
 def reload_tools(session: Session) -> None:
     try:
         session.agent.tools = load_tools(session.config, session.agent.client)
-    except (LLMError, MemoryStoreError) as e:
+    except (LLMError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
         return
     if session.agent.tools:
@@ -602,6 +697,41 @@ def persona_command(session: Session, argument: str) -> None:
     print(f"Switched to {persona.name}. The conversation history is kept.")
 
 
+def review_command(session: Session, argument: str) -> None:
+    if not session.config.features["orchestration"]:
+        print("The orchestration feature is off: /feature orchestration on to review answers.")
+        return
+    if not argument:
+        error("Usage: /review QUESTION")
+        return
+    try:
+        review = Review(session.agent, session.personas)
+    except ReviewError as e:
+        error(f"{e} (in {session.config.personas_dir}).")
+        return
+    session.last_sources = []
+    show_events(session, review.run(argument))
+
+
+def print_structured(answer: str, sources: list[SearchResult]) -> None:
+    try:
+        data = parse_answer(answer)
+    except StructuredError as e:
+        error(f"{e}:\n{answer}")
+        return
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+    if sources:
+        print_sources(sources, cited_sources(data))
+
+
+def json_command(session: Session, argument: str) -> None:
+    if not argument:
+        error("Usage: /json QUESTION")
+        return
+    session.last_sources = []
+    show_events(session, session.agent.run(argument, ANSWER_SCHEMA), structured=True)
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -627,6 +757,8 @@ def handle_command(session: Session, line: str) -> bool:
         new_command(session)
     elif name == "/profile":
         profile_command(session, argument)
+    elif name == "/document":
+        document_command(session, argument)
     elif name == "/guardrails":
         guardrails_command(session)
     elif name == "/approval":
@@ -639,6 +771,10 @@ def handle_command(session: Session, line: str) -> bool:
         list_personas(session)
     elif name == "/persona":
         persona_command(session, argument)
+    elif name == "/review":
+        review_command(session, argument)
+    elif name == "/json":
+        json_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True
@@ -659,7 +795,7 @@ def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
-    for message in tools.prepare():
+    for message in tools.warnings + tools.prepare():
         warning(message)
     return tools
 
@@ -710,7 +846,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
         agent.guardrails = load_guardrails(config, agent.client)
-    except (LLMError, GuardrailError, MemoryStoreError) as e:
+    except (LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
         return 1
 

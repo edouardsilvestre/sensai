@@ -30,9 +30,13 @@ FEATURES = {
     # Off by default: the model reads and writes files on this machine, within SENSAI_FILES_READ and SENSAI_FILES_WRITE.
     "files": Feature("let the model read and write files in the folders you allow", default=False, tool=True),
     "memory": Feature("let the model save and look up facts about people, companies and places", tool=True),
+    # Without a file at mcp_path, no server is started.
+    "mcp": Feature("let the model call the tools of the MCP servers listed in the MCP file", tool=True),
     "sessions": Feature("save every conversation so that it can be resumed"),
     "profile": Feature("send your profile to the model at the start of every conversation"),
+    "document": Feature("keep a working document of the established facts, updated after every answer"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
+    "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -63,6 +67,7 @@ class Config:
     profile_path: Path = Path(".sensai/profile.md")
     memory_path: Path = Path(".sensai/memory.db")
     guardrails_path: Path = Path(".sensai/guardrails.json")
+    mcp_path: Path = Path(".sensai/mcp.json")
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
@@ -74,10 +79,12 @@ class Config:
     web_search_results: int = 5
     code_timeout: int = 10
     sandbox_image: str = "python:3.12-slim"
+    mcp_timeout: int = 30
     files_read: list[Path] = field(default_factory=lambda: [Path(".")])
     files_write: list[Path] = field(default_factory=list)
     files_deny: list[str] = field(default_factory=list)
     max_tool_rounds: int = 5
+    max_review_rounds: int = 2
     approval: str = "critical"
 
 
@@ -161,6 +168,7 @@ def load_config(path: Path | None = None) -> Config:
         profile_path=Path(os.getenv("SENSAI_PROFILE_PATH", str(Config.profile_path))),
         memory_path=Path(os.getenv("SENSAI_MEMORY_PATH", str(Config.memory_path))),
         guardrails_path=Path(os.getenv("SENSAI_GUARDRAILS_PATH", str(Config.guardrails_path))),
+        mcp_path=Path(os.getenv("SENSAI_MCP_PATH", str(Config.mcp_path))),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
@@ -170,10 +178,12 @@ def load_config(path: Path | None = None) -> Config:
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
         code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),
         sandbox_image=os.getenv("SENSAI_SANDBOX_IMAGE", Config.sandbox_image),
+        mcp_timeout=_int_env("SENSAI_MCP_TIMEOUT", Config.mcp_timeout, minimum=1, maximum=300),
         files_read=[Path(path) for path in _list_env("SENSAI_FILES_READ", ["."])],
         files_write=[Path(path) for path in _list_env("SENSAI_FILES_WRITE", [])],
         files_deny=_list_env("SENSAI_FILES_DENY", []),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
+        max_review_rounds=_int_env("SENSAI_MAX_REVIEW_ROUNDS", Config.max_review_rounds, minimum=1, maximum=5),
         approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
     )
     if config.chunk_overlap >= config.chunk_size:
