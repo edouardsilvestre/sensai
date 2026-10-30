@@ -3,12 +3,16 @@ from typing import Protocol
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
 from sensai.core.config import Config
+from sensai.core.document.document import DocumentError, Edit, Rejected
+from sensai.core.document.editor import DocumentEditor, model_editor
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
+    DocumentEvent,
+    DocumentFailedEvent,
     DoneEvent,
     Event,
     GuardrailEvent,
@@ -46,6 +50,7 @@ class Agent:
         guardrails: Guardrails | None = None,
         persona: Persona | None = None,
         approver: Approver | None = None,
+        editor: DocumentEditor | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -53,6 +58,7 @@ class Agent:
         self.tools = tools or ToolRegistry()
         self.approver = approver
         self.memory = ConversationMemory(config, self.client)
+        self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
         self.persona: Persona | None = None
         if persona is not None:
@@ -73,6 +79,30 @@ class Agent:
         if self.approver is None:
             return Approval(False, NO_APPROVER_REASON)
         return self.approver(call, reason)
+
+    def _update_document(self, user_input: str, answer: str, guardrails: Guardrails) -> Iterator[Event]:
+        """Asks for the edits of this turn and applies them. A failure leaves the document as it was."""
+        try:
+            edits = self.editor(self.memory.document, user_input, answer)
+        except (LLMError, DocumentError) as e:
+            yield DocumentFailedEvent(str(e))
+            return
+        # The document is a deliverable: what may not be shown in an answer may not be written in it either.
+        allowed: list[Edit] = []
+        blocked: list[Rejected] = []
+        for edit in edits:
+            checked = guardrails.check("output", edit.text)
+            for hit in checked.hits:
+                yield GuardrailEvent(hit)
+            if checked.blocked:
+                blocked.append(Rejected(edit, f"blocked by the guardrail {checked.blocked.rule} ({checked.blocked.found})"))
+            else:
+                edit.text = checked.text
+                allowed.append(edit)
+        report = self.memory.document.apply(allowed)
+        report.rejected = blocked + report.rejected
+        if report:
+            yield DocumentEvent(report)
 
     def run(self, user_input: str) -> Iterator[Event]:
         user_input = user_input.strip()
@@ -154,6 +184,8 @@ class Agent:
         content = "".join(answer)
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
+        if self.config.features["document"] and content.strip() and not output.blocked:
+            yield from self._update_document(user_input, content, guardrails)
 
         # The turn is saved: from here on, a failure only delays the compaction to the next turn.
         if self.memory.needs_compaction(usage.total_tokens):
