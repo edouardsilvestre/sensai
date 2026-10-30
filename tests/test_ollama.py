@@ -64,6 +64,13 @@ def test_chat_returns_the_whole_answer():
     assert make_client().chat("model", []) == "A summary."
 
 
+def test_chat_sends_the_json_schema_as_format():
+    client = make_client()
+    schema = {"type": "object", "properties": {"edits": {"type": "array"}}}
+    client.chat("model", [], format=schema)
+    assert client._client.kwargs["format"] == schema
+
+
 def test_chat_fills_usage():
     usage = Usage()
     make_client().chat("model", [], usage=usage)
