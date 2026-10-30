@@ -25,6 +25,7 @@ from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
+from sensai.core.memory.store import MemoryStoreError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -544,7 +545,7 @@ def feature_command(session: Session, argument: str) -> None:
 def reload_tools(session: Session) -> None:
     try:
         session.agent.tools = load_tools(session.config, session.agent.client)
-    except LLMError as e:
+    except (LLMError, MemoryStoreError) as e:
         error(str(e))
         return
     if session.agent.tools:
@@ -688,7 +689,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
         agent.guardrails = load_guardrails(config, agent.client)
-    except (LLMError, GuardrailError) as e:
+    except (LLMError, GuardrailError, MemoryStoreError) as e:
         error(str(e))
         return 1
 
