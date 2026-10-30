@@ -80,6 +80,15 @@ class ToolRegistry:
             descriptions[name] = " ".join((text or "").strip().split("\n\n")[0].split())
         return descriptions
 
+    def parameters(self) -> dict[str, list[str]]:
+        parameters = {}
+        for name, tool in self._tools.items():
+            if isinstance(tool, SchemaTool):
+                parameters[name] = list(tool.parameters.get("properties", {}))
+            else:
+                parameters[name] = list(inspect.signature(tool).parameters)
+        return parameters
+
     def approval_reason(self, name: str) -> str | None:
         return getattr(self._tools.get(name), "approval_reason", None)
 

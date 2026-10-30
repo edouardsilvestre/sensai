@@ -201,3 +201,7 @@ def test_a_schema_tool_can_require_the_users_approval():
 
 def test_descriptions_keep_the_first_paragraph():
     assert ToolRegistry([echo, schema_add()]).descriptions() == {"echo": "Repeat the text.", "add": "Add two numbers."}
+
+
+def test_parameters_lists_the_arguments_of_each_tool():
+    assert ToolRegistry([echo, schema_add()]).parameters() == {"echo": ["text", "times"], "add": ["a", "b"]}
