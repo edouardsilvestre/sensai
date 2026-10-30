@@ -18,9 +18,34 @@ class ToolResult:
     error: bool = False
 
 
+@dataclass
+class SchemaTool:
+    """
+    A tool that comes with its JSON schema, like the tools of an MCP server.
+    `run` gets the arguments as they are: whoever runs the tool checks them against the schema.
+    """
+
+    name: str
+    description: str
+    parameters: dict
+    run: Callable[[dict], str | ToolResult]
+    approval_reason: str | None = None
+
+    def schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {"name": self.name, "description": self.description, "parameters": self.parameters},
+        }
+
+
 # A tool is a plain function: Ollama builds its schema from the type hints and the docstring (Args, Returns).
 # It returns the text for the model, or a ToolResult to also give the user a summary.
-Tool = Callable[..., str | ToolResult]
+# A SchemaTool brings its schema instead.
+Tool = Callable[..., str | ToolResult] | SchemaTool
+
+
+def _name(tool: Tool) -> str:
+    return tool.name if isinstance(tool, SchemaTool) else tool.__name__
 
 
 def requires_approval(reason: str) -> Callable[[Tool], Tool]:
@@ -33,7 +58,7 @@ def requires_approval(reason: str) -> Callable[[Tool], Tool]:
 
 class ToolRegistry:
     def __init__(self, tools: Iterable[Tool] = ()):
-        self._tools = {tool.__name__: tool for tool in tools}
+        self._tools = {_name(tool): tool for tool in tools}
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -41,11 +66,21 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
-    def tools(self) -> list[Tool]:
-        return list(self._tools.values())
+    def tools(self) -> list[Callable | dict]:
+        """The tools as Ollama takes them: the functions, and the schema of each SchemaTool."""
+        return [tool.schema() if isinstance(tool, SchemaTool) else tool for tool in self._tools.values()]
+
+    def descriptions(self) -> dict[str, str]:
+        """The first paragraph of the description of each tool, for the user."""
+        descriptions = {}
+        for name, tool in self._tools.items():
+            text = tool.description if isinstance(tool, SchemaTool) else inspect.getdoc(tool)
+            descriptions[name] = " ".join((text or "").strip().split("\n\n")[0].split())
+        return descriptions
 
     def approval_reason(self, name: str) -> str | None:
         return getattr(self._tools.get(name), "approval_reason", None)
+
     def prepare(self) -> list[str]:
         """
         Calls `prepare()` on the object of each tool that has one, like the CodeRunner that pulls its Docker image.
@@ -68,12 +103,13 @@ class ToolRegistry:
         tool = self._tools.get(call.name)
         if tool is None:
             return _error(f"Unknown tool '{call.name}'. Available tools: {', '.join(self._tools) or 'none'}")
+        if not isinstance(tool, SchemaTool):
+            try:
+                inspect.signature(tool).bind(**call.arguments)
+            except TypeError as e:
+                return _error(f"{call.name}: {e}")
         try:
-            inspect.signature(tool).bind(**call.arguments)
-        except TypeError as e:
-            return _error(f"{call.name}: {e}")
-        try:
-            output = tool(**call.arguments)
+            output = tool.run(call.arguments) if isinstance(tool, SchemaTool) else tool(**call.arguments)
         except ToolError as e:
             return _error(str(e))
         return output if isinstance(output, ToolResult) else ToolResult(str(output))
