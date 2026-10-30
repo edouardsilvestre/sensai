@@ -147,6 +147,15 @@ def test_fact_checker_is_told_when_nothing_was_found(config):
         assert NO_EVIDENCE in chat[0][-1]["content"]
 
 
+def test_only_the_claims_about_the_case_need_a_source(config):
+    client = ScriptedClient(["Paris is the capital of France.", "VERDICT: APPROVED", "The text"])
+    list(Review(Agent(config, client), PERSONAS).run("Where is Orion based?"))
+
+    check = client.chats[1][0][-1]["content"]
+    assert "A claim about the case (a person, an organization, an amount, a date, an event, an accusation)" in check
+    assert "common knowledge" in check and "If in doubt, treat it as a claim about the case." in check
+
+
 def test_only_the_question_and_the_final_text_are_kept(config):
     client = ScriptedClient(["The answer", "VERDICT: APPROVED", "The text"])
     agent = Agent(config, client)

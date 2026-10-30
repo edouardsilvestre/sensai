@@ -13,9 +13,11 @@ REJECTED = "VERDICT: REJECTED"
 NO_EVIDENCE = "None: the investigator found no document excerpt and no tool result."
 
 CHECK_PROMPT = f"""Check the answer below, given to the question of a journalist, against the evidence the investigator found.
-A claim is supported only if the evidence states it: a source the answer cites but that is not in the evidence does not count.
-Give a verdict for each claim: supported, unsupported or contradicted, with the reason.
-End with a last line that is exactly {APPROVED} if every claim is supported, otherwise {REJECTED}.
+A claim about the case (a person, an organization, an amount, a date, an event, an accusation) is supported only if the evidence states it: a source the answer cites but that is not in the evidence does not count.
+A widely known general fact that the case does not depend on can be marked common knowledge, and does not need a source.
+If in doubt, treat it as a claim about the case.
+Give a verdict for each claim: supported, common knowledge, unsupported or contradicted, with the reason.
+End with a last line that is exactly {APPROVED} if every claim is supported or common knowledge, otherwise {REJECTED}.
 
 Question: {{question}}
 
