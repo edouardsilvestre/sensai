@@ -168,9 +168,18 @@ class Document:
         return True
 
 
+# A parenthesis that cites where a fact comes from, "(email of 4 April)" or "(report.pdf, p. 3)". Any other
+# parenthesis is part of the fact: "Marc Vidal (CEO)" and "Marc Vidal (CFO)" are two different facts.
+CITATION = re.compile(
+    r"\((?:e-?mail|mail|source|page|p\.|doc|document|file|report|interview|article|according|see|cf)\b[^)]*\)"
+    r"|\([^)]*\.\w{2,4}\b[^)]*\)",
+    re.IGNORECASE,
+)
+
+
 def _fact(line: str) -> str:
     # The same fact cited another way, "[mail of 4 April]" or "(email of 4 April)", is still the same fact.
-    line = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", line)
+    line = CITATION.sub(" ", re.sub(r"\[[^\]]*\]", " ", line))
     return " ".join(re.findall(r"\w+", line.casefold()))
 
 

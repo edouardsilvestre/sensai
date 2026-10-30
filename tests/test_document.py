@@ -97,6 +97,23 @@ def test_invalid_edits_are_rejected_with_the_reason(document, edit, reason):
     assert document.markdown() == CASE
 
 
+@pytest.mark.parametrize(
+    ("known", "new"),
+    [("- Marc Vidal (CEO)", "- Marc Vidal (CFO)"), ("- Transfer (EUR 2M)", "- Transfer (EUR 5M)")],
+)
+def test_a_parenthesis_that_is_not_a_citation_is_part_of_the_fact(known, new):
+    document = Document(f"## People\n{known}")
+    report = document.apply([Edit("append", "People", new)])
+    assert report.applied and document.section("People").body == f"{known}\n{new}"
+
+
+@pytest.mark.parametrize("citation", ["(email of 4 April)", "(source: Claire)", "(alvor_invoices.pdf, p. 3)"])
+def test_a_fact_cited_in_a_parenthesis_is_a_duplicate(citation):
+    document = Document("## People\n- Marc Vidal, CFO [mail of 4 April 2023]")
+    report = document.apply([Edit("append", "People", f"- Marc Vidal, CFO {citation}")])
+    assert reasons(report) == ["the section already says it"]
+
+
 def test_a_new_fact_close_to_a_known_one_is_added(document):
     report = document.apply([Edit("append", "Timeline", "- 6 April 2023: Marc Vidal approves the transfer of 48 250 EUR")])
     assert report.applied
