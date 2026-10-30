@@ -33,7 +33,7 @@ def test_defaults(env_file):
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "memory": True,
-        "sessions": True, "profile": True, "guardrails": True,
+        "sessions": True, "profile": True, "document": True, "guardrails": True,
     }
 
 

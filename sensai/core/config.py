@@ -30,6 +30,7 @@ FEATURES = {
     "memory": Feature("let the model save and look up facts about people, companies and places", tool=True),
     "sessions": Feature("save every conversation so that it can be resumed"),
     "profile": Feature("send your profile to the model at the start of every conversation"),
+    "document": Feature("keep a working document of the established facts, updated after every answer"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
 }
 APPROVAL_MODES = ("critical", "all", "off")

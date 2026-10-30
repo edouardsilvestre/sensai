@@ -31,6 +31,7 @@ def test_features_lists_every_feature(session, capsys):
         ["memory", "on", "let the model save and look up facts about people, companies and places"],
         ["sessions", "on", "save every conversation so that it can be resumed"],
         ["profile", "on", "send your profile to the model at the start of every conversation"],
+        ["document", "on", "keep a working document of the established facts, updated after every answer"],
         ["guardrails", "on", "check the messages, the answers and the tool calls against the guardrail rules"],
     ]
 
@@ -114,4 +115,5 @@ def test_status_shows_the_features(config, capsys):
     config.features["rag"] = False
     run_status(config)
     out = capsys.readouterr().out
-    assert "Features: rag off, tools on, web_search off, code_exec off, memory on, sessions on, profile on, guardrails on" in out
+    features = "rag off, tools on, web_search off, code_exec off, memory on, sessions on, profile on, document on"
+    assert f"Features: {features}, guardrails on" in out
