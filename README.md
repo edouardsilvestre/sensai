@@ -114,7 +114,7 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 
 `orchestrator.py`: `Review` builds one `Agent` per persona and passes the text from one to the next. Each agent has its own memory: the fact-checker and the editor only get the text they work on, so the reasoning of the investigator does not sway them, and only the investigator can search the documents and call tools. The investigator starts from the conversation, so a follow-up question is understood. The guardrails, the approvals and the profile apply to every agent.
 
-Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. The investigator reads the working document, but the review agents never edit it: the document is updated once, from the editor's text, and only when the fact-checker approved it. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
 
 ### Tools
 

@@ -60,6 +60,8 @@ class Agent:
         self.memory = ConversationMemory(config, self.client)
         self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
+        # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
+        self.keeps_document = True
         self.persona: Persona | None = None
         if persona is not None:
             self.set_persona(persona)
@@ -72,6 +74,10 @@ class Agent:
     def messages(self) -> list[dict]:
         return self.memory.messages()
 
+    @property
+    def active_guardrails(self) -> Guardrails:
+        return self.guardrails if self.config.features["guardrails"] else Guardrails()
+
     def _approve(self, call: ToolCall) -> Approval | None:
         reason = approval_reason(self.config.approval, self.tools, call)
         if reason is None:
@@ -80,7 +86,7 @@ class Agent:
             return Approval(False, NO_APPROVER_REASON)
         return self.approver(call, reason)
 
-    def _update_document(self, user_input: str, answer: str, guardrails: Guardrails) -> Iterator[Event]:
+    def update_document(self, user_input: str, answer: str, guardrails: Guardrails) -> Iterator[Event]:
         """Asks for the edits of this turn and applies them. A failure leaves the document as it was."""
         try:
             edits = self.editor(self.memory.document, user_input, answer)
@@ -111,7 +117,7 @@ class Agent:
         if not user_input:
             raise EmptyInputError("Empty message")
 
-        guardrails = self.guardrails if self.config.features["guardrails"] else Guardrails()
+        guardrails = self.active_guardrails
         checked = guardrails.check_input(user_input)
         for hit in checked.hits:
             yield GuardrailEvent(hit)
@@ -186,8 +192,8 @@ class Agent:
         content = "".join(answer)
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
-        if self.config.features["document"] and content.strip() and not output.blocked:
-            yield from self._update_document(user_input, content, guardrails)
+        if self.keeps_document and self.config.features["document"] and content.strip() and not output.blocked:
+            yield from self.update_document(user_input, content, guardrails)
 
         # The turn is saved: from here on, a failure only delays the compaction to the next turn.
         if self.memory.needs_compaction(usage.total_tokens):
