@@ -4,19 +4,23 @@ import shlex
 import sys
 import textwrap
 from dataclasses import dataclass, field
+from collections.abc import Iterator
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.approval import Approval
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
+    AgentStartedEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
     DocumentEvent,
     DocumentFailedEvent,
     DoneEvent,
+    Event,
     GuardrailEvent,
+    ReviewDoneEvent,
     SourcesEvent,
     TokenEvent,
     ToolCallEvent,
@@ -28,6 +32,7 @@ from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
+from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -65,6 +70,7 @@ Commands:
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
+  /review QUESTION        the investigator answers, the fact-checker checks, the editor writes the text
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /exit, /quit            leave (or press Ctrl+D)"""
@@ -280,13 +286,29 @@ def print_guardrail(hit: Hit) -> None:
 
 
 def chat_turn(session: Session, line: str) -> None:
-    sources: list[SearchResult] = []
     if line.strip():
         session.last_sources = []
+    show_events(session, session.agent.run(line))
+
+
+def show_events(session: Session, events: Iterator[Event]) -> None:
+    sources: list[SearchResult] = []
     mid_line = False
     try:
-        for event in session.agent.run(line):
-            if isinstance(event, SourcesEvent):
+        for event in events:
+            if isinstance(event, AgentStartedEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                sources = []
+                print(f"\n── {event.persona.id} ({event.persona.name}) ──")
+            elif isinstance(event, ReviewDoneEvent):
+                rounds = plural(event.rounds, "check")
+                if event.approved:
+                    print(f"\n[review] approved by the fact-checker after {rounds}, the editor's text is kept.")
+                else:
+                    warning(f"Answer not approved after {rounds}: the last answer is kept, check the remarks above.")
+            elif isinstance(event, SourcesEvent):
                 sources = session.last_sources = event.sources
                 documents = len({source.source for source in sources})
                 print(f"[search] {len(sources)} excerpts from {documents} documents")
@@ -649,6 +671,22 @@ def persona_command(session: Session, argument: str) -> None:
     print(f"Switched to {persona.name}. The conversation history is kept.")
 
 
+def review_command(session: Session, argument: str) -> None:
+    if not session.config.features["orchestration"]:
+        print("The orchestration feature is off: /feature orchestration on to review answers.")
+        return
+    if not argument:
+        error("Usage: /review QUESTION")
+        return
+    try:
+        review = Review(session.agent, session.personas)
+    except ReviewError as e:
+        error(f"{e} (in {session.config.personas_dir}).")
+        return
+    session.last_sources = []
+    show_events(session, review.run(argument))
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -686,6 +724,8 @@ def handle_command(session: Session, line: str) -> bool:
         list_personas(session)
     elif name == "/persona":
         persona_command(session, argument)
+    elif name == "/review":
+        review_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True

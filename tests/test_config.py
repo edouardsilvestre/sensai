@@ -12,7 +12,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
-    "SENSAI_APPROVAL", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
+    "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
     "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE",
 ]
 
@@ -33,7 +33,7 @@ def test_defaults(env_file):
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "memory": True, "mcp": True,
-        "sessions": True, "profile": True, "document": True, "guardrails": True,
+        "sessions": True, "profile": True, "document": True, "guardrails": True, "orchestration": True,
     }
 
 
@@ -161,6 +161,12 @@ def test_tool_settings_from_environment(env_file, monkeypatch):
     assert (config.max_tool_rounds, config.web_search_results) == (3, 8)
 
 
+def test_review_rounds_from_environment(env_file, monkeypatch):
+    assert load_config(env_file).max_review_rounds == 2
+    monkeypatch.setenv("SENSAI_MAX_REVIEW_ROUNDS", "4")
+    assert load_config(env_file).max_review_rounds == 4
+
+
 def test_approval_asks_for_critical_tools_by_default(env_file):
     assert load_config(env_file).approval == "critical"
 
@@ -205,6 +211,9 @@ def test_code_exec_settings_from_environment(env_file, monkeypatch):
         ("SENSAI_FEATURE_CODE_EXEC", "maybe"),
         ("SENSAI_CODE_TIMEOUT", "0"),
         ("SENSAI_CODE_TIMEOUT", "61"),
+        ("SENSAI_MAX_REVIEW_ROUNDS", "0"),
+        ("SENSAI_MAX_REVIEW_ROUNDS", "6"),
+        ("SENSAI_FEATURE_ORCHESTRATION", "maybe"),
     ],
 )
 def test_invalid_values_are_rejected(env_file, monkeypatch, name, value):
