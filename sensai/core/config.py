@@ -27,6 +27,7 @@ FEATURES = {
     "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
     # Off by default: the code runs on this machine, and needs Docker.
     "code_exec": Feature("let the model run Python code in a Docker sandbox", default=False, tool=True),
+    "memory": Feature("let the model save and look up facts about people, companies and places", tool=True),
     "sessions": Feature("save every conversation so that it can be resumed"),
     "profile": Feature("send your profile to the model at the start of every conversation"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
@@ -58,6 +59,7 @@ class Config:
 
     sessions_dir: Path = Path(".sensai/sessions")
     profile_path: Path = Path(".sensai/profile.md")
+    memory_path: Path = Path(".sensai/memory.db")
     guardrails_path: Path = Path(".sensai/guardrails.json")
 
     embed_model: str = "qwen3-embedding:0.6b"
@@ -144,6 +146,7 @@ def load_config(path: Path | None = None) -> Config:
         keep_recent_turns=_int_env("SENSAI_KEEP_RECENT_TURNS", Config.keep_recent_turns, minimum=1),
         sessions_dir=Path(os.getenv("SENSAI_SESSIONS_DIR", str(Config.sessions_dir))),
         profile_path=Path(os.getenv("SENSAI_PROFILE_PATH", str(Config.profile_path))),
+        memory_path=Path(os.getenv("SENSAI_MEMORY_PATH", str(Config.memory_path))),
         guardrails_path=Path(os.getenv("SENSAI_GUARDRAILS_PATH", str(Config.guardrails_path))),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
