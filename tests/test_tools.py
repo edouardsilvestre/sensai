@@ -112,12 +112,17 @@ def test_a_tool_whose_setup_fails_is_removed():
     assert registry.names() == ["echo"]
 
 
-def test_no_tool_is_enabled_by_default(config, client):
-    assert not build_registry(config, client)
+def test_only_the_memory_is_enabled_by_default(config, client):
+    assert build_registry(config, client).names() == [
+        "memory_search", "memory_add_fact", "memory_update_fact",
+        "memory_delete_fact", "memory_link", "memory_unlink",
+    ]
+    assert build_registry(config, client).approval_reason("memory_add_fact") is None
 
 
 def test_web_search_is_enabled_by_its_setting(config, client):
     config.features["web_search"] = True
+    config.features["memory"] = False
     assert build_registry(config, client).names() == ["web_search"]
 
 
@@ -150,4 +155,5 @@ def test_web_search_requires_approval(config, client):
     assert convert_function_to_tool(registry.tools()[0]).function.name == "web_search"
 def test_code_execution_is_enabled_by_its_setting(config, client):
     config.features["code_exec"] = True
+    config.features["memory"] = False
     assert build_registry(config, client).names() == ["run_python"]

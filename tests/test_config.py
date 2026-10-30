@@ -7,7 +7,7 @@ from sensai.core.config import FEATURES, Config, ConfigError, load_config
 
 VARIABLES = [
     "SENSAI_MODEL", "OLLAMA_HOST", "SENSAI_SYSTEM_PROMPT", "SENSAI_NUM_CTX", "SENSAI_THINK", "SENSAI_COMPACT_THRESHOLD",
-    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_SESSIONS_DIR", "SENSAI_PROFILE_PATH", "SENSAI_EMBED_MODEL",
+    "SENSAI_KEEP_RECENT_TURNS", "SENSAI_SESSIONS_DIR", "SENSAI_PROFILE_PATH", "SENSAI_MEMORY_PATH", "SENSAI_EMBED_MODEL",
     "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
@@ -32,7 +32,7 @@ def test_defaults(env_file):
 
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
-        "rag": True, "tools": True, "web_search": False, "code_exec": False,
+        "rag": True, "tools": True, "web_search": False, "code_exec": False, "memory": True,
         "sessions": True, "profile": True, "guardrails": True,
     }
 
@@ -50,6 +50,11 @@ def test_memory_files_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_PROFILE_PATH", "/cases/profile.md")
     config = load_config(env_file)
     assert (config.sessions_dir, config.profile_path) == (Path("/cases/alvor/sessions"), Path("/cases/profile.md"))
+
+
+def test_memory_path_from_environment(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_MEMORY_PATH", "/cases/alvor/memory.db")
+    assert load_config(env_file).memory_path == Path("/cases/alvor/memory.db")
 def test_guardrails_path_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_GUARDRAILS_PATH", "/cases/alvor/guardrails.json")
     assert load_config(env_file).guardrails_path == Path("/cases/alvor/guardrails.json")

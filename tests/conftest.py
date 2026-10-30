@@ -86,4 +86,5 @@ def config(tmp_path) -> Config:
         chunk_overlap=40,
         sessions_dir=tmp_path / "sessions",
         profile_path=tmp_path / "profile.md",
+        memory_path=tmp_path / "memory.db",
     )
