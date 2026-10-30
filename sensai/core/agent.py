@@ -138,7 +138,8 @@ class Agent:
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
-        functions = self.tools.tools() if self.config.features["tools"] else []
+        # The schema constrains every token of the answer: the model could not call a tool.
+        functions = self.tools.tools() if self.config.features["tools"] and format is None else []
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.
         max_rounds = self.config.max_tool_rounds
         for round_number in range(max_rounds + 1):

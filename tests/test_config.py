@@ -13,7 +13,7 @@ VARIABLES = [
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
     "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
-    "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE",
+    "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE", "SENSAI_FILES_READ", "SENSAI_FILES_WRITE", "SENSAI_FILES_DENY",
 ]
 
 
@@ -32,8 +32,9 @@ def test_defaults(env_file):
 
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
-        "rag": True, "tools": True, "web_search": False, "code_exec": False, "memory": True, "mcp": True,
-        "sessions": True, "profile": True, "document": True, "guardrails": True, "orchestration": True,
+        "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
+        "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
+        "orchestration": True,
     }
 
 
@@ -188,6 +189,25 @@ def test_code_exec_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_SANDBOX_IMAGE", "python:3.13-slim")
     config = load_config(env_file)
     assert (config.features["code_exec"], config.code_timeout, config.sandbox_image) == (True, 30, "python:3.13-slim")
+
+
+def test_file_settings_default_to_reading_the_current_folder_only(env_file):
+    config = load_config(env_file)
+    assert (config.files_read, config.files_write, config.files_deny) == ([Path(".")], [], [])
+
+
+def test_file_settings_from_environment(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_FILES_READ", "leak, notes ,")
+    monkeypatch.setenv("SENSAI_FILES_WRITE", "drafts")
+    monkeypatch.setenv("SENSAI_FILES_DENY", "sources,*.key")
+    config = load_config(env_file)
+    assert config.files_read == [Path("leak"), Path("notes")] and config.files_write == [Path("drafts")]
+    assert config.files_deny == ["sources", "*.key"]
+
+
+def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
+    monkeypatch.setenv("SENSAI_FILES_READ", "")
+    assert load_config(env_file).files_read == []
 
 
 @pytest.mark.parametrize(

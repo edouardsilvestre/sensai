@@ -186,6 +186,12 @@ def web_search(self, query: str) -> ToolResult:
 `SENSAI_APPROVAL` sets when Sensai asks: `critical` (default) for the tools that declare it, `all` before every tool call, `off` never. The core does not ask the user itself: the interface gives the agent an approver, a function that returns the decision, so a web interface can show buttons instead of a terminal prompt. Without an approver, critical calls are refused.
 **Code execution** (`tools/code_runner.py`) lets the model run the Python code it writes, like ChatGPT's Code Interpreter. Each call starts a new Docker container from `SENSAI_SANDBOX_IMAGE`, sends the code to `python -` on its standard input and removes the container afterwards. The container has no network, 256 MB of memory, one CPU, 64 processes at most, a read-only disk (only `/tmp` is writable) and runs as `nobody` without privileges; nothing from the host is mounted. A program running longer than `SENSAI_CODE_TIMEOUT` seconds is killed. The model gets the exit code, the output and the traceback, each cut to their last 2000 characters. A crash is not a tool error: the model reads the traceback, fixes its code and calls `run_python` again, within the `SENSAI_MAX_TOOL_ROUNDS` limit. At startup Sensai checks that Docker runs and downloads the image if needed, otherwise it warns and chats without code execution.
 
+**File access** (`tools/files.py`) lets the model work with the journalist's own files: `list_files(folder)`, `read_file(path, start_line)` and `write_file(path, content)`. `read_file` extracts the text of the formats Sensai indexes (PDF with its page numbers, emails, spreadsheets, HTML) and reads the others as text; a long file is sent 6000 characters at a time, and the model reads on with the `start_line` it is given. Like web pages, the content is marked as data, not instructions. `write_file` creates or replaces a whole text file, written next to it then renamed, so that a failure never leaves half a file; it needs approval, and the CLI shows the path and the full content before asking. There is no tool to delete a file.
+
+Every path goes through `tools/permissions.py` before the file is touched. `Permissions` resolves the path first, following `..` and links, then checks that it is inside a folder of `SENSAI_FILES_READ` (to list and read) or of `SENSAI_FILES_WRITE` (to write, which also allows reading), and that no part of it matches a pattern of `SENSAI_FILES_DENY`, like `sources` or `*.key`. `.env`, `.env.*`, `.sensai` and `.git` are always denied, even inside an allowed folder: the model can never read the API key, the index, the saved sessions, the memory or the guardrail rules, which hold the names to protect. A refused path is sent back to the model with the reason, and `list_files` leaves out what may not be read. The arguments of `write_file` go through the guardrails like every tool call, so the source's name is redacted in the files the model writes too.
+
+It is the `files` feature, off by default because the model reads and writes files on this machine. Turned on, it reads the folder Sensai runs in and writes nowhere, until `SENSAI_FILES_WRITE` names a folder. `/files` shows what is allowed.
+
 ### MCP servers
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) lets a program, the server, offer tools to an AI application. Sensai is an MCP client: it reads the tools of the servers listed in `SENSAI_MCP_PATH`, and the model calls them like its own tools. Only servers reached by their URL are supported (Streamable HTTP transport).
@@ -302,6 +308,7 @@ Sources:
 | `/sources` | show the full excerpts retrieved for the last message |
 | `/context` | show the tokens used by the last message and the summary of older turns |
 | `/tools` | list the tools the model can call |
+| `/files` | show the folders the model may read and write, and the patterns always denied |
 | `/features` | list the features and whether they are on |
 | `/feature NAME on\|off` | turn a feature on or off for the session |
 | `/personas` | list the personas, `*` marks the active one |
@@ -397,6 +404,25 @@ FROM python:3.12-slim
 RUN pip install pandas numpy
 ```
 
+With `SENSAI_FEATURE_FILES=true`, `SENSAI_FILES_READ=leak` and `SENSAI_FILES_WRITE=drafts`, the model reads the leak and writes its drafts, and nothing else:
+
+```
+> Lis le mail de Marc Vidal dans leak et écris un brouillon de trois lignes dans drafts/virement.md.
+[list_files] folder="leak"
+[list_files] 3 entries, 1 not allowed
+[read_file] path="leak/mail-vidal.eml"
+[read_file] leak/mail-vidal.eml, lines 1-12 of 12
+[write_file] path="drafts/virement.md"
+  content:
+    Le 4 avril 2023, Marc Vidal valide un virement de 48 250 € vers Kestrel Ltd, sans facture.
+    [...]
+Allow write_file? It writes a file on this machine. [y]es / [n]o / [a]lways this session: y
+[write_file] drafts/virement.md created
+> Lis aussi leak/sources/contact.txt.
+[read_file] path="leak/sources/contact.txt"
+[warning] read_file failed: read_file: permission denied, leak/sources/contact.txt is denied by the pattern 'sources'
+```
+
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
 
 ### Configuration
@@ -416,6 +442,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
+| `SENSAI_FEATURE_FILES` | `false` | `true` lets the model list, read and write files in the allowed folders; needs a model that supports tools |
 | `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
 | `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
@@ -441,6 +468,9 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_CODE_TIMEOUT` | `10` | seconds a program may run before it is stopped (1-60) |
 | `SENSAI_SANDBOX_IMAGE` | `python:3.12-slim` | Docker image the code runs in; use one with pandas to analyse CSV files |
 | `SENSAI_MCP_TIMEOUT` | `30` | seconds an MCP server may take to answer a tool call (1-300) |
+| `SENSAI_FILES_READ` | `.` | folders the model may list and read, separated by commas; empty: none |
+| `SENSAI_FILES_WRITE` | empty | folders the model may write in (and read), separated by commas |
+| `SENSAI_FILES_DENY` | empty | name patterns never readable nor writable inside these folders, like `sources,*.key`; `.env`, `.sensai` and `.git` always are |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 | `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
 
@@ -454,10 +484,11 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `tools` | every tool the model can call, whatever their own feature or setting |
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
+| `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 
-The features are on by default, except `web_search` and `code_exec`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec` and `files`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 

@@ -27,6 +27,8 @@ FEATURES = {
     "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
     # Off by default: the code runs on this machine, and needs Docker.
     "code_exec": Feature("let the model run Python code in a Docker sandbox", default=False, tool=True),
+    # Off by default: the model reads and writes files on this machine, within SENSAI_FILES_READ and SENSAI_FILES_WRITE.
+    "files": Feature("let the model read and write files in the folders you allow", default=False, tool=True),
     "memory": Feature("let the model save and look up facts about people, companies and places", tool=True),
     # Without a file at mcp_path, no server is started.
     "mcp": Feature("let the model call the tools of the MCP servers listed in the MCP file", tool=True),
@@ -78,6 +80,9 @@ class Config:
     code_timeout: int = 10
     sandbox_image: str = "python:3.12-slim"
     mcp_timeout: int = 30
+    files_read: list[Path] = field(default_factory=lambda: [Path(".")])
+    files_write: list[Path] = field(default_factory=list)
+    files_deny: list[str] = field(default_factory=list)
     max_tool_rounds: int = 5
     max_review_rounds: int = 2
     approval: str = "critical"
@@ -106,6 +111,14 @@ def _bool_env(name: str) -> bool | None:
     if raw in ("0", "false", "no", "off"):
         return False
     raise ConfigError(f"{name} must be true or false, got '{raw}'")
+
+
+def _list_env(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    # Comma-separated, like "leak, notes": an empty value means none.
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
@@ -166,6 +179,9 @@ def load_config(path: Path | None = None) -> Config:
         code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),
         sandbox_image=os.getenv("SENSAI_SANDBOX_IMAGE", Config.sandbox_image),
         mcp_timeout=_int_env("SENSAI_MCP_TIMEOUT", Config.mcp_timeout, minimum=1, maximum=300),
+        files_read=[Path(path) for path in _list_env("SENSAI_FILES_READ", ["."])],
+        files_write=[Path(path) for path in _list_env("SENSAI_FILES_WRITE", [])],
+        files_deny=_list_env("SENSAI_FILES_DENY", []),
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
         max_review_rounds=_int_env("SENSAI_MAX_REVIEW_ROUNDS", Config.max_review_rounds, minimum=1, maximum=5),
         approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
