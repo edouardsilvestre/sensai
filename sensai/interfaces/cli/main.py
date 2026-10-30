@@ -14,6 +14,8 @@ from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
+    DocumentEvent,
+    DocumentFailedEvent,
     DoneEvent,
     GuardrailEvent,
     SourcesEvent,
@@ -21,6 +23,7 @@ from sensai.core.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from sensai.core.document.document import Document, Edit, EditReport
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
@@ -55,6 +58,9 @@ Commands:
   /profile                show the instructions the model gets about you
   /profile add TEXT       add an instruction to your profile
   /profile remove N       remove instruction N from your profile
+  /document               show the working document the model keeps up to date
+  /document undo          undo the changes made to the document by the last answer
+  /document export PATH   write the document to a Markdown file
   /features               list the features and whether they are on
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
@@ -306,6 +312,10 @@ def chat_turn(session: Session, line: str) -> None:
                 print()
                 if sources:
                     print_sources(sources, event.content)
+            elif isinstance(event, DocumentEvent):
+                print_document_report(event.report)
+            elif isinstance(event, DocumentFailedEvent):
+                warning(f"The document was not updated: {event.message}")
             elif isinstance(event, CompactionStartedEvent):
                 print(f"[memory] context at {event.tokens}/{session.config.num_ctx} tokens, condensing the oldest turns...")
             elif isinstance(event, CompactionEvent):
@@ -320,6 +330,25 @@ def chat_turn(session: Session, line: str) -> None:
     except KeyboardInterrupt:
         print("\n[interrupted]")
     save_session(session)
+
+
+CHANGES = {"append": "added to {}", "replace": "corrected in {}", "rewrite": "{} rewritten", "add_section": "new section {}"}
+
+
+def describe_edits(edits: list[Edit]) -> str:
+    # One entry per section and kind of change: "2 added to Timeline" rather than the same line twice.
+    counts: dict[str, int] = {}
+    for edit in edits:
+        change = CHANGES[edit.op].format(" ".join(edit.section.split()))
+        counts[change] = counts.get(change, 0) + 1
+    return ", ".join(f"{count} {change}" if count > 1 else change for change, count in counts.items())
+
+
+def print_document_report(report: EditReport) -> None:
+    if report.applied:
+        print(f"[document] {describe_edits(report.applied)}. /document to read it.")
+    for rejected in report.rejected:
+        warning(f"document edit rejected ({rejected.edit.describe()}): {rejected.reason}")
 
 
 def save_session(session: Session) -> None:
@@ -382,6 +411,7 @@ def new_command(session: Session) -> None:
     memory = session.agent.memory
     previous = session.session_id
     memory.summary, memory.turns, memory.last_usage = "", [], None
+    memory.document = Document()
     session.session_id = None
     session.last_sources = []
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
@@ -426,6 +456,43 @@ def show_profile(session: Session) -> None:
     print(f"Profile ({profile.path}){state}:")
     for number, entry in enumerate(profile.entries, start=1):
         print(f"  {number}. {entry}")
+
+
+def document_command(session: Session, argument: str) -> None:
+    memory = session.agent.memory
+    action, _, value = argument.partition(" ")
+    if action == "undo":
+        if memory.document.undo():
+            print("The changes of the last answer are undone.")
+            save_session(session)
+        else:
+            print("Nothing to undo.")
+    elif action == "export":
+        path = Path(value.strip().strip('"'))
+        if not value.strip():
+            error("Usage: /document export PATH")
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(memory.document.markdown(), encoding="utf-8")
+        except OSError as e:
+            error(f"Cannot write {path}: {e}")
+            return
+        print(f"Document written to {path}.")
+    elif action:
+        error("Usage: /document [undo | export PATH]")
+    else:
+        show_document(session)
+
+
+def show_document(session: Session) -> None:
+    document = session.agent.memory.document
+    if not session.config.features["document"]:
+        print("The document feature is off: /feature document on to update it after every answer.")
+    if document.is_empty:
+        print(f"The document is empty. It fills in as the conversation establishes facts: {', '.join(document.names())}.")
+        return
+    print(document.markdown().rstrip())
 
 
 def ingest_command(session: Session, argument: str) -> None:
@@ -606,6 +673,8 @@ def handle_command(session: Session, line: str) -> bool:
         new_command(session)
     elif name == "/profile":
         profile_command(session, argument)
+    elif name == "/document":
+        document_command(session, argument)
     elif name == "/guardrails":
         guardrails_command(session)
     elif name == "/approval":
