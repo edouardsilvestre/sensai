@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import Protocol
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
@@ -74,6 +74,25 @@ class Agent:
             return Approval(False, NO_APPROVER_REASON)
         return self.approver(call, reason)
 
+    def _run_tool(self, call: ToolCall, guardrails: Guardrails) -> Generator[Event, None, ToolResult]:
+        yield ToolCallEvent(call)
+        call, checked = guardrails.check_tool_call(call)
+        for hit in checked.hits:
+            yield GuardrailEvent(hit)
+        if checked.blocked:
+            # The model is told why, so that it can call the tool again without the blocked data.
+            hit = checked.blocked
+            reason = hit.message or f"the arguments contain {hit.found}"
+            result = ToolResult(f"Error: blocked by the guardrail '{hit.rule}' ({hit.found}): {reason}", error=True)
+        else:
+            # Asked after the guardrails: the user approves the redacted call, the one that runs.
+            approval = self._approve(call)
+            if approval is not None:
+                yield ApprovalEvent(call, approval)
+            result = self.tools.execute(call) if approval is None or approval.approved else refusal(approval)
+        yield ToolResultEvent(call, result)
+        return result
+
     def run(self, user_input: str) -> Iterator[Event]:
         user_input = user_input.strip()
         if not user_input:
@@ -133,22 +152,7 @@ class Agent:
             # Tool calls and results only live in this turn's messages, like the excerpts.
             pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
             for call in calls:
-                yield ToolCallEvent(call)
-                call, checked = guardrails.check_tool_call(call)
-                for hit in checked.hits:
-                    yield GuardrailEvent(hit)
-                if checked.blocked:
-                    # The model is told why, so that it can call the tool again without the blocked data.
-                    hit = checked.blocked
-                    reason = hit.message or f"the arguments contain {hit.found}"
-                    result = ToolResult(f"Error: blocked by the guardrail '{hit.rule}' ({hit.found}): {reason}", error=True)
-                else:
-                    # Asked after the guardrails: the user approves the redacted call, the one that runs.
-                    approval = self._approve(call)
-                    if approval is not None:
-                        yield ApprovalEvent(call, approval)
-                    result = self.tools.execute(call) if approval is None or approval.approved else refusal(approval)
-                yield ToolResultEvent(call, result)
+                result = yield from self._run_tool(call, guardrails)
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)
