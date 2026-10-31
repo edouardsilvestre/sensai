@@ -132,6 +132,9 @@ class ExampleLibrary:
         return [self.examples[number] for similarity, number in scored[:k] if similarity >= self.min_similarity]
 
     def add(self, example: Example) -> None:
+        for number, kept in enumerate(self.examples, start=1):
+            if (kept.question, kept.answer) == (example.question, example.answer):
+                raise ExampleError(f"This answer is already kept as example {number}")
         self.examples.append(example)
         self._save()
 

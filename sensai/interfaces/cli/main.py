@@ -4,10 +4,11 @@ import shlex
 import sys
 import textwrap
 from dataclasses import dataclass, field
+from datetime import datetime
 from collections.abc import Iterator
 from pathlib import Path
 
-from sensai.core.agent import Agent, EmptyInputError
+from sensai.core.agent import STOPPED, Agent, EmptyInputError
 from sensai.core.approval import Approval
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
@@ -19,6 +20,8 @@ from sensai.core.events import (
     DocumentFailedEvent,
     DoneEvent,
     Event,
+    ExamplesEvent,
+    ExamplesFailedEvent,
     GuardrailEvent,
     ReasoningStoppedEvent,
     ReviewDoneEvent,
@@ -29,13 +32,16 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.document.document import Document, Edit, EditReport
+from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
+from sensai.core.memory.conversation import Turn
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
+from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
@@ -80,6 +86,8 @@ Commands:
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /reasoning [N]          list the questions reasoned about, or show the steps of question N
+  /examples               list the answers kept as examples, * marks those shown for the last answer
+  /example add|remove N   keep the last answer as an example for similar questions, or remove example N
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
@@ -209,6 +217,9 @@ class Session:
     profile: Profile | None = None
     always_allowed: set[str] = field(default_factory=set)
     personas: dict[str, Persona] = field(default_factory=dict)
+    examples: ExampleLibrary | None = None
+    examples_used: list[Example] = field(default_factory=list)
+    answered: tuple[Turn, list[SearchResult]] | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -294,7 +305,13 @@ def print_guardrail(hit: Hit) -> None:
 def chat_turn(session: Session, line: str) -> None:
     if line.strip():
         session.last_sources = []
+        session.examples_used = []
+    turns = session.agent.memory.turns
+    last = turns[-1] if turns else None
     show_events(session, session.agent.run(line))
+    turns = session.agent.memory.turns
+    if turns and turns[-1] is not last:
+        session.answered = (turns[-1], list(session.last_sources))
 
 
 def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
@@ -308,6 +325,12 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                     mid_line = False
                 sources = []
                 print(f"\n── {event.persona.id} ({event.persona.name}) ──")
+            elif isinstance(event, ExamplesEvent):
+                session.examples_used = event.examples
+                questions = ", ".join(f'"{example.question}"' for example in event.examples)
+                print(f"[examples] {plural(len(event.examples), 'example')}: {questions}")
+            elif isinstance(event, ExamplesFailedEvent):
+                warning(f"No examples were shown to the model: {event.message}")
             elif isinstance(event, ReviewDoneEvent):
                 rounds = plural(event.rounds, "check")
                 if event.approved:
@@ -438,6 +461,8 @@ def resume(session: Session, session_id: str) -> bool:
     session.session_id = session_id
     session.last_sources = []
     session.agent.reasoning.clear()
+    memory_turns = session.agent.memory.turns
+    session.answered = (memory_turns[-1], []) if memory_turns else None
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
     print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
     return True
@@ -457,6 +482,7 @@ def new_command(session: Session) -> None:
     session.session_id = None
     session.last_sources = []
     session.agent.reasoning.clear()
+    session.answered = None
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
     print(f"New conversation.{saved}")
 
@@ -666,6 +692,8 @@ def feature_command(session: Session, argument: str) -> None:
             session.agent.retriever = session.index
         else:
             print("No documents indexed yet: /ingest PATH to search your files.")
+    if name == "examples" and value == "on" and session.examples is None:
+        session.examples = session.agent.examples = load_examples(config, session.agent.client)
 
 
 def reload_tools(session: Session) -> None:
@@ -750,6 +778,71 @@ def reasoning_command(session: Session, argument: str) -> None:
             print(textwrap.indent(step.result.content, "    "))
 
 
+def kept_on(example: Example) -> str:
+    if not example.created_at:
+        return ""
+    return f" (kept on {datetime.fromisoformat(example.created_at).astimezone():%Y-%m-%d})"
+
+
+def examples_off(session: Session) -> None:
+    if not session.config.features["examples"]:
+        print("The examples feature is off: /feature examples on to show them to the model.")
+
+
+def list_examples(session: Session) -> None:
+    if session.examples is None:
+        print("The examples could not be loaded: /feature examples on to try again.")
+        return
+    examples = session.examples.examples
+    if not examples:
+        print("No examples yet: /example add after a good answer to keep it.")
+    else:
+        print("Answers kept as examples (* shown to the model for the last answer):")
+        for number, example in enumerate(examples, start=1):
+            mark = "*" if any(example is used for used in session.examples_used) else " "
+            print(f"  {mark} {number}. {example.question}{kept_on(example)}")
+    examples_off(session)
+
+
+def add_example(session: Session) -> None:
+    turns = session.agent.memory.turns
+    if session.answered is None or not turns or turns[-1] is not session.answered[0]:
+        error("No answer to keep yet: ask a question, then /example add to keep its answer.")
+        return
+    turn, sources = session.answered
+    if STOPPED in turn.assistant:
+        error("An answer stopped by a guardrail cannot be kept as an example.")
+        return
+    try:
+        example = make_example(turn.user, turn.assistant, sources)
+        session.examples.add(example)
+    except ExampleError as e:
+        error(str(e))
+        return
+    print(f'Answer kept as example {len(session.examples.examples)}: "{example.question}"')
+    examples_off(session)
+
+
+def example_command(session: Session, argument: str) -> None:
+    action, _, number = argument.partition(" ")
+    number = number.strip()
+    if not (action == "add" and not number) and not (action == "remove" and number.isdigit()):
+        error("Usage: /example add, or /example remove N")
+        return
+    if session.examples is None:
+        print("The examples could not be loaded: /feature examples on to try again.")
+        return
+    if action == "add":
+        add_example(session)
+        return
+    try:
+        removed = session.examples.remove(int(number))
+    except ExampleError as e:
+        error(str(e))
+        return
+    print(f'Example {number} removed: "{removed.question}"')
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -802,6 +895,10 @@ def handle_command(session: Session, line: str) -> bool:
         approval_command(session, argument.lower())
     elif name == "/reasoning":
         reasoning_command(session, argument)
+    elif name == "/examples":
+        list_examples(session)
+    elif name == "/example":
+        example_command(session, argument.lower())
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -827,6 +924,18 @@ def load_existing_index(config: Config, client: OllamaClient) -> DocumentIndex |
     except (LLMError, StoreError) as e:
         warning(f"Document search disabled: {e}")
         return None
+
+
+def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None:
+    embedder = Embedder(client, config.embed_model, max_chars=config.chunk_size)
+    try:
+        examples = ExampleLibrary(config.examples_path, embedder.embed_query)
+        if examples.examples and config.features["examples"]:
+            client.ensure_model(config.embed_model)
+    except (ExampleError, LLMError) as e:
+        warning(f"Examples disabled: {e}")
+        return None
+    return examples
 
 
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
@@ -893,6 +1002,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
+    session.examples = agent.examples = load_examples(config, agent.client)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
     disabled = [name for name, enabled in config.features.items() if not enabled]
@@ -904,6 +1014,9 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
         else:
             print("No documents indexed yet: /ingest PATH to search your files.")
+    if session.examples is not None and session.examples.examples and config.features["examples"]:
+        kept = plural(len(session.examples.examples), "answer")
+        print(f"Examples: {kept} kept as examples. /examples to list them.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
