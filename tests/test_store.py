@@ -36,6 +36,23 @@ def test_search_returns_closest_chunks_first(store):
     assert results[0].score > results[1].score
 
 
+def test_the_fingerprint_changes_with_the_documents(store):
+    def add(path: str, sha: str) -> None:
+        store.save_document(record(path, sha), [Chunk(path)], [FakeClient.vector(path)], "m")
+
+    empty = store.fingerprint()
+    add("/docs/a.txt", "sha-a")
+    first = store.fingerprint()
+    assert first != empty and store.fingerprint() == first
+    add("/docs/a.txt", "sha-a-corrected")
+    corrected = store.fingerprint()
+    assert corrected != first
+    add("/docs/b.txt", "sha-b")
+    assert store.fingerprint() != corrected
+    store.delete_document(store.get_document("/docs/b.txt").id)
+    assert store.fingerprint() == corrected
+
+
 def test_empty_index(store):
     assert store.is_empty()
     assert store.search(FakeClient.vector("anything"), k=3) == []
