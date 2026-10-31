@@ -1,12 +1,17 @@
+import hashlib
+import json
 from collections.abc import Generator, Iterator
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
+from sensai.core.cache import CacheError, CachedAnswer, ConfirmCache, SemanticCache
 from sensai.core.config import Config
 from sensai.core.document.document import DocumentError, Edit, Rejected
 from sensai.core.document.editor import DocumentEditor, model_editor
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
+    CacheFailedEvent,
+    CacheHitEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
@@ -50,6 +55,8 @@ class Agent:
         persona: Persona | None = None,
         approver: Approver | None = None,
         editor: DocumentEditor | None = None,
+        cache: SemanticCache | None = None,
+        confirm_cache: ConfirmCache | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -60,6 +67,8 @@ class Agent:
         self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
         self.reasoning: list[Reasoning] = []
+        self.cache = cache
+        self.confirm_cache = confirm_cache
         # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
         self.keeps_document = True
         self.persona: Persona | None = None
@@ -144,6 +153,21 @@ class Agent:
         yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
         return reasoning
 
+    def _context(self) -> str:
+        fingerprint = getattr(self.retriever, "fingerprint", None)
+        context = {
+            "model": self.config.model,
+            "messages": self.memory.messages(),
+            "documents": fingerprint() if fingerprint and self.config.features["rag"] else None,
+            "features": {name: self.config.features[name] for name in ("rag", "tools", "reasoning")},
+        }
+        return hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def _find_in_cache(self, question: str) -> tuple[list[float], str, CachedAnswer | None]:
+        context = self._context()
+        vector = self.cache.embed(question)
+        return vector, context, self.cache.find(vector, context)
+
     def update_document(self, user_input: str, answer: str, guardrails: Guardrails) -> Iterator[Event]:
         """Asks for the edits of this turn and applies them. A failure leaves the document as it was."""
         try:
@@ -185,6 +209,23 @@ class Agent:
             return
         user_input = checked.text
 
+        vector, context = None, ""
+        cache_on = self.cache is not None and self.confirm_cache is not None and self.config.features["cache"]
+        if cache_on and format is None:
+            try:
+                vector, context, cached = self._find_in_cache(user_input)
+            except (LLMError, CacheError) as e:
+                yield CacheFailedEvent(str(e))
+                cached = None
+            if cached is not None and self.confirm_cache(cached):
+                yield CacheHitEvent(cached)
+                if cached.sources:
+                    yield SourcesEvent(cached.sources)
+                yield TokenEvent(cached.answer)
+                self.memory.commit(user_input, cached.answer, [source.citation for source in cached.sources])
+                yield DoneEvent(cached.answer)
+                return
+
         prompt = user_input
         sources: list[SearchResult] = []
         if self.retriever is not None and self.config.features["rag"]:
@@ -198,6 +239,7 @@ class Agent:
         options = {"num_ctx": self.config.num_ctx}
         # The schema constrains every token of the answer: the model could not call a tool.
         functions = self.tools.tools() if self.config.features["tools"] and format is None else []
+        used_tools = False
         if self.config.features["reasoning"] and format is None:
             found = len(sources)
             sources = list(sources)
@@ -206,6 +248,7 @@ class Agent:
                 yield SourcesEvent(list(sources))
             pending.insert(-1, {"role": "system", "content": reasoning.context()})
             functions = []
+            used_tools = any(step.result is not None for step in reasoning.steps)
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.
         max_rounds = self.config.max_tool_rounds
         for round_number in range(max_rounds + 1):
@@ -235,6 +278,7 @@ class Agent:
                 break
             if not calls:
                 break
+            used_tools = True
             # Tool calls and results only live in this turn's messages, like the excerpts.
             pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
             for call in calls:
@@ -244,6 +288,11 @@ class Agent:
         content = "".join(answer)
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
+        if vector is not None and not used_tools and not output.blocked and content.strip():
+            try:
+                self.cache.add(user_input, vector, context, content, sources)
+            except CacheError as e:
+                yield CacheFailedEvent(str(e))
         if self.keeps_document and self.config.features["document"] and content.strip() and not output.blocked:
             yield from self.update_document(user_input, content, guardrails)
 

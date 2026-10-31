@@ -37,6 +37,9 @@ class CachedAnswer:
     similarity: float
 
 
+ConfirmCache = Callable[[CachedAnswer], bool]
+
+
 @dataclass
 class CacheStats:
     answers: int
@@ -65,6 +68,12 @@ class SemanticCache:
             raise CacheError(f"Cannot open the cache at {path}: {e}") from e
 
     def find(self, vector: list[float], context: str) -> CachedAnswer | None:
+        try:
+            return self._find(vector, context)
+        except sqlite3.Error as e:
+            raise CacheError(f"Cannot read the cache at {self.path}: {e}") from e
+
+    def _find(self, vector: list[float], context: str) -> CachedAnswer | None:
         rows = self._db.execute(
             "SELECT id, question, vector, answer, sources, created_at FROM answers WHERE context = ?", (context,)
         ).fetchall()
@@ -79,6 +88,12 @@ class SemanticCache:
         return CachedAnswer(question, answer, results, datetime.fromisoformat(created_at), similarity)
 
     def add(self, question: str, vector: list[float], context: str, answer: str, sources: list[SearchResult]) -> None:
+        try:
+            self._add(question, vector, context, answer, sources)
+        except sqlite3.Error as e:
+            raise CacheError(f"Cannot write to the cache at {self.path}: {e}") from e
+
+    def _add(self, question: str, vector: list[float], context: str, answer: str, sources: list[SearchResult]) -> None:
         with self._db:
             self._db.execute(
                 "INSERT INTO answers (context, question, vector, answer, sources, created_at) "
