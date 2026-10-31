@@ -27,7 +27,7 @@ from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
-from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema
+from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema, tool_messages
 from sensai.core.tools.documents import DocumentSearch, Retriever
 from sensai.core.tools.registry import ToolRegistry, ToolResult
 
@@ -118,6 +118,7 @@ class Agent:
         actions = tools.names()
         schema = step_schema(tools)
         messages = pending[:-1] + [{"role": "system", "content": instructions(tools)}] + pending[-1:]
+        native = self.client.can_call_tools(self.config.model)
         for number in range(1, self.config.max_tool_rounds + 1):
             reply = self.client.chat(self.config.model, messages, options, think=self.config.think, format=schema)
             try:
@@ -139,8 +140,7 @@ class Agent:
                 return reasoning
             call, step.result = yield from self._run_tool(step.call(), guardrails, tools)
             step.arguments = call.arguments
-            messages.append({"role": "assistant", "content": step.message()})
-            messages.append({"role": "user", "content": f"Result of {step.action}: {step.result.content}"})
+            messages += tool_messages(step, native)
         yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
         return reasoning
 
