@@ -19,6 +19,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
 - 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
+- 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -141,6 +142,36 @@ A prose answer is for the journalist; a program needs data it can read without g
 `sources` are the numbers of the excerpts listed below the JSON, as `[1]` in a prose answer, and an `entities` type is one of `person`, `company`, `place` or `other`. The JSON is printed once complete, indented, after being checked by `parse_answer` against the schema: Ollama already constrains the reply, but a guardrail can cut it and another server could ignore `format`. A reply that does not follow the schema is printed as it is, with what is wrong; an excerpt number that does not exist is flagged, like in a prose answer.
 
 The schema constrains every token the model writes, so it could not call a tool: an answer with a schema is given no tool (`Agent.run`), only the excerpts of the documents. The order of the fields matters too, since the model writes them in that order: the fact-checker gives the `reason` of each verdict before the `verdict`, so that it decides after having reasoned.
+
+### Reasoning
+
+With `/feature reasoning on` (or `SENSAI_FEATURE_REASONING=true`), Sensai reasons step by step before answering, and shows each step: what it knows, what is missing, and the document search or the tool it uses next. It is off by default, because each step is a call to the model.
+
+```
+> /feature reasoning on
+reasoning is on.
+> Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu de l'argent de Nordbank ?
+[search] 3 excerpts from 3 documents
+[thought 1] The first excerpt contains the information about the legal structure of Orion Delta Consulting, and the second excerpt mentions a specific transaction involving Marc Vidal [...]
+[search_documents] query="Orion Delta Consulting gérant"
+[search_documents] 3 excerpts: docs/statuts_orion.txt, docs/releve_nordbank_2023-04.txt, docs/meteo.txt
+[thought 2] [...] it states that the company is governed by Marc Vidal with no term limit. [...] it mentions a transfer of 480,000 EUR to Marc Vidal's personal account on April 5, 2023 [...]
+Les documents indiquent que la société Orion Delta Consulting est gouvernée par Marc Vidal. L'excerpt [1] mentionne que Marc Vidal est nommé gérant de la société pour une durée illimitée. L'extrait [2] cite un virement de 480 000 EUR vers son compte personnel sur la banque Norbahn le 5 avril 2023, libellé "conseil stratégique".
+
+> /reasoning 1
+Question 1: Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu de l'argent de Nordbank ?
+[thought 1] ...
+  [search_documents] query="Orion Delta Consulting gérant"
+    <excerpt source="docs/statuts_orion.txt">
+    [...] La société est gérée par M. Marc Vidal, nommé gérant pour une durée illimitée.
+    [...]
+```
+
+`/reasoning` lists the questions of the conversation, `/reasoning N` shows the thoughts, the tool calls and the full results of question N, so that the journalist can check what a conclusion rests on. The reasoning is never sent back to the model: only the question and the answer are kept in the history. `/new` and `/resume` clear it.
+
+`reasoning.py` and `Agent._reason`: at each step, the model replies with a JSON object `{"thought", "action", "arguments"}` that Ollama is forced to follow (the `format` option of the chat API). The schema has one form per tool, with the arguments of that tool, plus `answer`: the model cannot invent a tool or an argument. A tool chosen by the model goes through the guardrails and the approval like any tool call, and its result is given back to the model for the next step; the thoughts go through the output guardrails before they are shown. Once the model picks `answer`, the final answer is streamed from the steps and their results, without tools. With indexed documents and the `rag` feature on, the reasoning can also call `search_documents`, which searches the documents again with the model's own words to follow a lead (the manager found in the statutes, then his transfers). The excerpts it finds are numbered after those of the first search, so that the answer can cite them, and they are listed with the sources and in `/sources`. As the actions come from the schema, the reasoning also works with models that cannot call tools, like `llama3`.
+
+The reasoning stops after `SENSAI_MAX_TOOL_ROUNDS` steps, or on a step that is not valid, and Sensai answers from what it found. Its quality depends on the model: a small model like `qwen2.5:1.5b` may write its thoughts in English, stop before following every lead, or misspell a name it copies (Nordbank became "Norbahn" in the answer above). The agents of `/review` show their thoughts but do not add them to `/reasoning`. An answer that follows a schema of its own, like `/json` or the verdict of the fact-checker, is given without reasoning.
 
 ### Tools
 
@@ -323,6 +354,7 @@ Sources:
 | `/json QUESTION` | answer in JSON that follows a schema: the answer, its claims with their excerpts, the entities and the events |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
+| `/reasoning [N]` | list the questions reasoned about in this conversation, or show the steps of question N |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -487,8 +519,9 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
+| `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 
-The features are on by default, except `web_search`, `code_exec` and `files`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 
