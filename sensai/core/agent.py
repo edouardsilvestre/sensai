@@ -30,6 +30,8 @@ from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 # Ends an answer that a block rule stopped, in the history, so that the model knows it was cut.
 STOPPED = "[answer stopped by a guardrail]"
+# Ends an answer the user interrupted, in the history, so that the model knows it was cut.
+INTERRUPTED = "[answer interrupted by the user]"
 
 
 class EmptyInputError(ValueError):
@@ -62,6 +64,9 @@ class Agent:
         self.guardrails = guardrails or Guardrails()
         # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
         self.keeps_document = True
+        # The turn being answered and the text shown so far, for `interrupt`.
+        self.answering: tuple[str, list[str]] | None = None
+        self.shown: list[str] = []
         self.persona: Persona | None = None
         if persona is not None:
             self.set_persona(persona)
@@ -77,6 +82,17 @@ class Agent:
     @property
     def active_guardrails(self) -> Guardrails:
         return self.guardrails if self.config.features["guardrails"] else Guardrails()
+
+    def interrupt(self) -> bool:
+        """
+        Call it when `run` was stopped midway. The question and the text already shown go to the history, so that the
+        next message can redirect the answer. The document does not change: a cut answer establishes nothing.
+        """
+        if self.answering is None:
+            return False
+        (user_input, citations), self.answering = self.answering, None
+        self.memory.commit(user_input, "\n".join(filter(None, ["".join(self.shown), INTERRUPTED])), citations)
+        return True
 
     def _approve(self, call: ToolCall) -> Approval | None:
         reason = approval_reason(self.config.approval, self.tools, call)
@@ -113,6 +129,7 @@ class Agent:
             yield DocumentEvent(report)
 
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
+        self.answering, self.shown = None, []
         user_input = user_input.strip()
         if not user_input:
             raise EmptyInputError("Empty message")
@@ -135,6 +152,8 @@ class Agent:
                 yield SourcesEvent(sources)
                 prompt = build_prompt(user_input, sources)
 
+        # A JSON answer cut halfway is of no use to anyone: only a prose answer is kept.
+        self.answering = None if format else (user_input, [source.citation for source in sources])
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
@@ -143,7 +162,7 @@ class Agent:
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.
         max_rounds = self.config.max_tool_rounds
         for round_number in range(max_rounds + 1):
-            answer: list[str] = []
+            answer = self.shown = []
             calls: list[ToolCall] = []
             tools = functions if round_number < max_rounds else []
             output = guardrails.output_filter()
@@ -191,6 +210,7 @@ class Agent:
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)
+        self.answering = None
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
         if self.keeps_document and self.config.features["document"] and content.strip() and not output.blocked:
