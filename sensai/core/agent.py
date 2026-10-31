@@ -88,11 +88,11 @@ class Agent:
 
     def _run_tool(
         self, call: ToolCall, guardrails: Guardrails, tools: ToolRegistry
-    ) -> Generator[Event, None, ToolResult]:
-        yield ToolCallEvent(call)
+    ) -> Generator[Event, None, tuple[ToolCall, ToolResult]]:
         call, checked = guardrails.check_tool_call(call)
         for hit in checked.hits:
             yield GuardrailEvent(hit)
+        yield ToolCallEvent(call)
         if checked.blocked:
             # The model is told why, so that it can call the tool again without the blocked data.
             hit = checked.blocked
@@ -105,7 +105,7 @@ class Agent:
                 yield ApprovalEvent(call, approval)
             result = tools.execute(call) if approval is None or approval.approved else refusal(approval)
         yield ToolResultEvent(call, result)
-        return result
+        return call, result
 
     def _reason(
         self, question: str, pending: list[dict], options: dict, guardrails: Guardrails
@@ -137,8 +137,9 @@ class Agent:
             yield ThoughtEvent(number, step.thought)
             if step.final:
                 return reasoning
-            step.result = yield from self._run_tool(step.call(), guardrails, tools)
-            messages.append({"role": "assistant", "content": reply})
+            call, step.result = yield from self._run_tool(step.call(), guardrails, tools)
+            step.arguments = call.arguments
+            messages.append({"role": "assistant", "content": step.message()})
             messages.append({"role": "user", "content": f"Result of {step.action}: {step.result.content}"})
         yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
         return reasoning
@@ -233,7 +234,7 @@ class Agent:
             # Tool calls and results only live in this turn's messages, like the excerpts.
             pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
             for call in calls:
-                result = yield from self._run_tool(call, guardrails, self.tools)
+                call, result = yield from self._run_tool(call, guardrails, self.tools)
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)

@@ -13,6 +13,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.guardrails.rules import Guardrails, parse_rules
+from sensai.core.llm.ollama import ToolCall
 from sensai.core.rag.models import SearchResult
 from sensai.core.reasoning import ANSWER, Step
 from sensai.core.tools.registry import ToolRegistry, ToolResult, requires_approval
@@ -165,6 +166,27 @@ def test_a_thought_is_redacted_before_it_is_shown(reasoning_config, client):
     events = list(agent.run("Qui a écrit ?"))
     assert thoughts(events) == [(1, "[SOURCE] wrote the email.")]
     assert agent.reasoning[0].steps[0].thought == "[SOURCE] wrote the email."
+
+
+def test_the_reasoning_only_keeps_the_redacted_step(reasoning_config, client):
+    queries = []
+    agent = make_agent(reasoning_config, client, queries, SOURCE)
+    client.steps = [step("Claire Benoit sent the email.", "search_documents", query="Claire Benoit Orion")]
+
+    events = list(agent.run("Qui a envoyé le mail ?"))
+
+    redacted = {"query": "[SOURCE] Orion"}
+    assert queries == ["[SOURCE] Orion"]
+    assert [event.call for event in events if isinstance(event, ToolCallEvent)] == [
+        ToolCall("search_documents", redacted)
+    ]
+    assert agent.reasoning[0].steps[0].arguments == redacted
+    following = client.steps_seen[1][0]
+    assert json.loads(following[-2]["content"]) == {
+        "thought": "[SOURCE] sent the email.", "action": "search_documents", "arguments": redacted
+    }
+    final = client.chats[-1][0]
+    assert all("Claire Benoit" not in message["content"] for message in following + final)
 
 
 def test_an_answer_that_follows_a_schema_is_given_without_reasoning(reasoning_config, client):

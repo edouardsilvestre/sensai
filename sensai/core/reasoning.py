@@ -51,6 +51,10 @@ class Step:
     def call(self) -> ToolCall:
         return ToolCall(self.action, self.arguments)
 
+    def message(self) -> str:
+        step = {"thought": self.thought, "action": self.action, "arguments": self.arguments}
+        return json.dumps(step, ensure_ascii=False)
+
 
 @dataclass
 class Reasoning:
