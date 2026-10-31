@@ -31,6 +31,7 @@ def test_features_lists_every_feature(session, capsys):
         ["files", "off", "let the model read and write files in the folders you allow"],
         ["memory", "on", "let the model save and look up facts about people, companies and places"],
         ["mcp", "on", "let the model call the tools of the MCP servers listed in the MCP file"],
+        ["questions", "on", "let the model ask you a question when your request is ambiguous"],
         ["sessions", "on", "save every conversation so that it can be resumed"],
         ["profile", "on", "send your profile to the model at the start of every conversation"],
         ["document", "on", "keep a working document of the established facts, updated after every answer"],
@@ -119,7 +120,7 @@ def test_status_shows_the_features(config, capsys):
     run_status(config)
     out = capsys.readouterr().out
     features = (
-        "rag off, tools on, web_search off, code_exec off, files off, memory on, mcp on, sessions on, profile on, "
-        "document on"
+        "rag off, tools on, web_search off, code_exec off, files off, memory on, mcp on, questions on, sessions on, "
+        "profile on, document on"
     )
     assert f"Features: {features}, guardrails on" in out
