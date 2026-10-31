@@ -15,6 +15,8 @@ from sensai.core.events import (
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
+    DocumentEvent,
+    DocumentFailedEvent,
     DoneEvent,
     Event,
     GuardrailEvent,
@@ -26,6 +28,7 @@ from sensai.core.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from sensai.core.document.document import Document, Edit, EditReport
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
@@ -37,8 +40,10 @@ from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
+from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.mcp import MCPConfigError
+from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
@@ -55,6 +60,7 @@ Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
   /sources                show the excerpts retrieved for the last message
   /tools                  list the tools the model can call
+  /files                  show the folders the model may read and write
   /context                show the context usage and the summary of older turns
   /sessions               list the saved conversations
   /resume [ID]            continue a saved conversation (the last one without ID)
@@ -62,11 +68,15 @@ Commands:
   /profile                show the instructions the model gets about you
   /profile add TEXT       add an instruction to your profile
   /profile remove N       remove instruction N from your profile
+  /document               show the working document the model keeps up to date
+  /document undo          undo the changes made to the document by the last answer
+  /document export PATH   write the document to a Markdown file
   /features               list the features and whether they are on
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
   /persona [ID]           show the active persona, or switch to another one (the history is kept)
   /review QUESTION        the investigator answers, the fact-checker checks, the editor writes the text
+  /json QUESTION          answer in JSON: the answer, its claims with their excerpts, the entities and the events
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /reasoning [N]          list the questions reasoned about, or show the steps of question N
@@ -231,8 +241,7 @@ def prompt(session: Session) -> str:
     return f"\n[{persona.id}] > " if persona else "\n> "
 
 
-def print_sources(sources: list[SearchResult], answer: str) -> None:
-    cited = cited_numbers(answer)
+def print_sources(sources: list[SearchResult], cited: list[int]) -> None:
     valid = [number for number in cited if 1 <= number <= len(sources)]
     if valid:
         print("\nSources:")
@@ -288,7 +297,7 @@ def chat_turn(session: Session, line: str) -> None:
     show_events(session, session.agent.run(line))
 
 
-def show_events(session: Session, events: Iterator[Event]) -> None:
+def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -310,6 +319,9 @@ def show_events(session: Session, events: Iterator[Event]) -> None:
                 documents = len({source.source for source in sources})
                 print(f"[search] {len(sources)} excerpts from {documents} documents")
             elif isinstance(event, TokenEvent):
+                # A JSON answer is printed once complete and checked, indented.
+                if structured:
+                    continue
                 print(event.text, end="", flush=True)
                 mid_line = not event.text.endswith("\n")
             elif isinstance(event, ToolCallEvent):
@@ -335,9 +347,16 @@ def show_events(session: Session, events: Iterator[Event]) -> None:
             elif isinstance(event, ReasoningStoppedEvent):
                 warning(f"Reasoning stopped: {event.reason}. Sensai answers from what it found.")
             elif isinstance(event, DoneEvent):
+                if structured:
+                    print_structured(event.content, sources)
+                    continue
                 print()
                 if sources:
-                    print_sources(sources, event.content)
+                    print_sources(sources, cited_numbers(event.content))
+            elif isinstance(event, DocumentEvent):
+                print_document_report(event.report)
+            elif isinstance(event, DocumentFailedEvent):
+                warning(f"The document was not updated: {event.message}")
             elif isinstance(event, CompactionStartedEvent):
                 print(f"[memory] context at {event.tokens}/{session.config.num_ctx} tokens, condensing the oldest turns...")
             elif isinstance(event, CompactionEvent):
@@ -352,6 +371,25 @@ def show_events(session: Session, events: Iterator[Event]) -> None:
     except KeyboardInterrupt:
         print("\n[interrupted]")
     save_session(session)
+
+
+CHANGES = {"append": "added to {}", "replace": "corrected in {}", "rewrite": "{} rewritten", "add_section": "new section {}"}
+
+
+def describe_edits(edits: list[Edit]) -> str:
+    # One entry per section and kind of change: "2 added to Timeline" rather than the same line twice.
+    counts: dict[str, int] = {}
+    for edit in edits:
+        change = CHANGES[edit.op].format(" ".join(edit.section.split()))
+        counts[change] = counts.get(change, 0) + 1
+    return ", ".join(f"{count} {change}" if count > 1 else change for change, count in counts.items())
+
+
+def print_document_report(report: EditReport) -> None:
+    if report.applied:
+        print(f"[document] {describe_edits(report.applied)}. /document to read it.")
+    for rejected in report.rejected:
+        warning(f"document edit rejected ({rejected.edit.describe()}): {rejected.reason}")
 
 
 def save_session(session: Session) -> None:
@@ -415,6 +453,7 @@ def new_command(session: Session) -> None:
     memory = session.agent.memory
     previous = session.session_id
     memory.summary, memory.turns, memory.last_usage = "", [], None
+    memory.document = Document()
     session.session_id = None
     session.last_sources = []
     session.agent.reasoning.clear()
@@ -462,6 +501,43 @@ def show_profile(session: Session) -> None:
         print(f"  {number}. {entry}")
 
 
+def document_command(session: Session, argument: str) -> None:
+    memory = session.agent.memory
+    action, _, value = argument.partition(" ")
+    if action == "undo":
+        if memory.document.undo():
+            print("The changes of the last answer are undone.")
+            save_session(session)
+        else:
+            print("Nothing to undo.")
+    elif action == "export":
+        path = Path(value.strip().strip('"'))
+        if not value.strip():
+            error("Usage: /document export PATH")
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(memory.document.markdown(), encoding="utf-8")
+        except OSError as e:
+            error(f"Cannot write {path}: {e}")
+            return
+        print(f"Document written to {path}.")
+    elif action:
+        error("Usage: /document [undo | export PATH]")
+    else:
+        show_document(session)
+
+
+def show_document(session: Session) -> None:
+    document = session.agent.memory.document
+    if not session.config.features["document"]:
+        print("The document feature is off: /feature document on to update it after every answer.")
+    if document.is_empty:
+        print(f"The document is empty. It fills in as the conversation establishes facts: {', '.join(document.names())}.")
+        return
+    print(document.markdown().rstrip())
+
+
 def ingest_command(session: Session, argument: str) -> None:
     try:
         paths = [Path(path) for path in shlex.split(argument)]
@@ -496,6 +572,23 @@ def tools_command(session: Session) -> None:
     print("Tools:")
     for name, description in agent.tools.descriptions().items():
         print(f"  {name}: {description}")
+
+
+def folders(permissions: Permissions, paths: list[Path]) -> str:
+    shown = [permissions.display(path) + ("" if path.is_dir() else " (missing)") for path in paths]
+    return ", ".join(shown) or "none"
+
+
+def files_command(session: Session) -> None:
+    config = session.config
+    if not config.features["files"]:
+        print("The files feature is off: /feature files on to let the model read and write files.")
+    permissions = Permissions(config.files_read, config.files_write, config.files_deny)
+    print(f"Read (SENSAI_FILES_READ): {folders(permissions, permissions.read)}")
+    print(f"Read and write (SENSAI_FILES_WRITE): {folders(permissions, permissions.write)}")
+    print(f"Always denied: {', '.join(ALWAYS_DENIED + tuple(permissions.deny))}")
+    if config.approval != "off":
+        print("Sensai asks before every file written: /approval to change it.")
 
 
 def context_command(session: Session) -> None:
@@ -657,6 +750,25 @@ def reasoning_command(session: Session, argument: str) -> None:
             print(textwrap.indent(step.result.content, "    "))
 
 
+def print_structured(answer: str, sources: list[SearchResult]) -> None:
+    try:
+        data = parse_answer(answer)
+    except StructuredError as e:
+        error(f"{e}:\n{answer}")
+        return
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+    if sources:
+        print_sources(sources, cited_sources(data))
+
+
+def json_command(session: Session, argument: str) -> None:
+    if not argument:
+        error("Usage: /json QUESTION")
+        return
+    session.last_sources = []
+    show_events(session, session.agent.run(argument, ANSWER_SCHEMA), structured=True)
+
+
 def handle_command(session: Session, line: str) -> bool:
     name, _, argument = line.strip().partition(" ")
     argument = argument.strip()
@@ -668,6 +780,8 @@ def handle_command(session: Session, line: str) -> bool:
         show_excerpts(session.last_sources)
     elif name == "/tools":
         tools_command(session)
+    elif name == "/files":
+        files_command(session)
     elif name == "/ingest":
         ingest_command(session, argument)
     elif name == "/context":
@@ -680,6 +794,8 @@ def handle_command(session: Session, line: str) -> bool:
         new_command(session)
     elif name == "/profile":
         profile_command(session, argument)
+    elif name == "/document":
+        document_command(session, argument)
     elif name == "/guardrails":
         guardrails_command(session)
     elif name == "/approval":
@@ -696,6 +812,8 @@ def handle_command(session: Session, line: str) -> bool:
         persona_command(session, argument)
     elif name == "/review":
         review_command(session, argument)
+    elif name == "/json":
+        json_command(session, argument)
     else:
         error(f"Unknown command {name}. Type /help for the list.")
     return True

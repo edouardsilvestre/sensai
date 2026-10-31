@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from sensai.core.document.document import Document
 from sensai.core.memory.conversation import ConversationMemory, Turn
 
 FORMAT_VERSION = 1
@@ -57,6 +58,7 @@ class SessionStore:
             "model": model,
             "summary": memory.summary,
             "turns": [asdict(turn) for turn in memory.turns],
+            "document": memory.document.markdown(),
         }
         path = self._path(session_id)
         # Written next to the session then renamed, so that a crash never leaves half a conversation.
@@ -72,7 +74,12 @@ class SessionStore:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             turns = [Turn(turn["user"], turn["assistant"], list(turn.get("citations", []))) for turn in data["turns"]]
-            return {"summary": str(data.get("summary", "")), "turns": turns, "updated": datetime.fromisoformat(data["updated"])}
+            # Sessions saved before the document existed start with an empty one.
+            document = Document(data["document"]) if isinstance(data.get("document"), str) else Document()
+            return {
+                "summary": str(data.get("summary", "")), "turns": turns, "document": document,
+                "updated": datetime.fromisoformat(data["updated"]),
+            }
         except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
             raise SessionError(f"Cannot read the conversation {path.name}: {e}") from None
 
@@ -83,6 +90,7 @@ class SessionStore:
             raise SessionError(f"No saved conversation '{session_id}': /sessions lists them")
         data = self._read(path)
         memory.summary, memory.turns, memory.last_usage = data["summary"], data["turns"], None
+        memory.document = data["document"]
         return len(data["turns"])
 
     def list(self) -> list[SessionInfo]:

@@ -16,8 +16,9 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
 - 🕸️ **Entity graph memory**: the model saves what is established about people, companies and places, and who is linked to whom, in a local database it reads and corrects across sessions.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
-- 📂 **Living investigation file**: a case document that grows as the investigation progresses, gathering findings, leads and their supporting evidence.
+- 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
+- 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
@@ -64,6 +65,25 @@ Every call is printed in the CLI (`[memory_add_fact] fact 3 saved`), so the jour
 
 It is the `memory` feature, on by default, and needs a model that supports tools. Small models like `qwen3:1.7b` only call the tools reliably with their thinking phase on: leave `SENSAI_THINK` empty or `true`.
 
+### Working document
+
+The chat is a transcript; the working document is the deliverable. `ConversationMemory` holds a `Document` (`document/document.py`), a Markdown file made of `## ` sections, by default `Summary`, `People and companies`, `Timeline` and `Open questions`. It is never condensed by the compaction, and it is saved with the conversation and resumed with it.
+
+After each answer, `document/editor.py` asks the chat model, in a call of its own, how the exchange changes the document. The model never rewrites the document: it answers with edits, and Ollama's structured outputs (`format`, a JSON schema) make sure the reply is always `{"edits": [...]}`:
+
+| Edit | What it does |
+|---|---|
+| `{"op": "append", "section", "text"}` | adds lines at the end of a section |
+| `{"op": "replace", "section", "find", "text"}` | corrects a passage, which must be found exactly once in that section |
+| `{"op": "rewrite", "section", "text"}` | replaces one section |
+| `{"op": "add_section", "section", "text"}` | creates a section |
+
+`Document.apply` checks each edit on its own and rejects it with the reason instead of guessing: an unknown section, a passage to correct that is not found or found twice, a line the section already has (whatever the way its source is cited), more than 8 edits in one turn. A `## ` line in a text is turned into `### `, so an edit can never split the document. The valid edits are applied, the others are printed as warnings, and an invalid reply leaves the document as it was.
+
+The edits go through the guardrails like an answer: the source's name is redacted in the document too, and an edit with blocked data is not written. The document is sent to the model after the profile, so that it can answer "what is still missing?", and `/document undo` puts back the document as it was before the last answer.
+
+It is the `document` feature, on by default. It costs one more call to the model after each answer, and the edits are only as good as the model: small models often fail to quote the passage to correct, and their correction is then rejected instead of applied.
+
 ### Personas
 
 A persona sets the agent's name, role, tone and scope: it is the system message of the conversation. Each `personas/<id>.json` file defines one, so a newsroom can add its own profile without touching the code. Sensai starts without persona unless `SENSAI_PERSONA` or `-p ID` picks one, and ships three personas that follow an investigation:
@@ -91,12 +111,37 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 `/review QUESTION` has the three personas work on the same question, one after the other, instead of switching them by hand:
 
 1. The **investigator** answers, with the documents and the tools.
-2. The **fact-checker** gets the question and the answer, gives a verdict per claim and ends with `VERDICT: APPROVED` or `VERDICT: REJECTED`. Rejected, the investigator gets its remarks, corrects its answer and the fact-checker checks it again, up to `SENSAI_MAX_REVIEW_ROUNDS` checks (2 by default).
+2. The **fact-checker** gets the question and the answer, answers in JSON, following a schema sent to Ollama (`{"claims": [{"claim", "reason", "verdict"}]}`), and the answer is approved only when every claim is `supported` or `common knowledge`. Rejected, the investigator gets its remarks, corrects its answer and the fact-checker checks it again, up to `SENSAI_MAX_REVIEW_ROUNDS` checks (2 by default).
 3. Once approved, the **editor** writes the text from the checked answer. Never approved, the review stops without the editor and says so.
 
 `orchestrator.py`: `Review` builds one `Agent` per persona and passes the text from one to the next. Each agent has its own memory: the fact-checker and the editor only get the text they work on, so the reasoning of the investigator does not sway them, and only the investigator can search the documents and call tools. The investigator starts from the conversation, so a follow-up question is understood. The guardrails, the approvals and the profile apply to every agent.
 
-Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. A verdict that does not end with an explicit approval counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+Only the question and the final text (the editor's, or the last answer when it was not approved) are added to the conversation and saved with the session. The investigator reads the working document, but the review agents never edit it: the document is updated once, from the editor's text, and only when the fact-checker approved it. A verdict that cannot be read, or that lists no claim, counts as a rejection, so an unclear fact-checker never lets an answer through. It is the `orchestration` feature, on by default; plain messages are still answered by a single agent.
+
+### Structured outputs
+
+A prose answer is for the journalist; a program needs data it can read without guessing. Sensai sends a JSON schema to Ollama as `format` ([structured outputs](https://docs.ollama.com/capabilities/structured-outputs)): the model can only write JSON that follows it, instead of free text. Three places use it:
+
+| Where | Schema | What reads it |
+|---|---|---|
+| `/json QUESTION` | `ANSWER_SCHEMA` (`structured.py`) | the journalist, or any tool the JSON is copied into |
+| the working document | `EDITS_SCHEMA` (`document/editor.py`) | `Document.apply`, which applies the edits |
+| `/review` | `VERDICT_SCHEMA` (`orchestrator.py`) | `approved`, which computes the approval from the verdicts |
+
+`/json` answers like a message, with the documents, the profile and the guardrails, but in this form:
+
+```json
+{
+  "answer": "Orion a payé 2M à Delta le 4 avril.",
+  "claims": [{"text": "Orion a payé 2M à Delta", "sources": [1, 3]}],
+  "entities": [{"name": "Orion", "type": "company"}, {"name": "Delta", "type": "company"}],
+  "events": [{"date": "2024-04-04", "description": "Virement de 2M d'Orion à Delta"}]
+}
+```
+
+`sources` are the numbers of the excerpts listed below the JSON, as `[1]` in a prose answer, and an `entities` type is one of `person`, `company`, `place` or `other`. The JSON is printed once complete, indented, after being checked by `parse_answer` against the schema: Ollama already constrains the reply, but a guardrail can cut it and another server could ignore `format`. A reply that does not follow the schema is printed as it is, with what is wrong; an excerpt number that does not exist is flagged, like in a prose answer.
+
+The schema constrains every token the model writes, so it could not call a tool: an answer with a schema is given no tool (`Agent.run`), only the excerpts of the documents. The order of the fields matters too, since the model writes them in that order: the fact-checker gives the `reason` of each verdict before the `verdict`, so that it decides after having reasoned.
 
 ### Reasoning
 
@@ -126,7 +171,7 @@ Question 1: Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu 
 
 `reasoning.py` and `Agent._reason`: at each step, the model replies with a JSON object `{"thought", "action", "arguments"}` that Ollama is forced to follow (the `format` option of the chat API). The schema has one form per tool, with the arguments of that tool, plus `answer`: the model cannot invent a tool or an argument. A tool chosen by the model goes through the guardrails and the approval like any tool call, and its result is given back to the model for the next step; the thoughts go through the output guardrails before they are shown. Once the model picks `answer`, the final answer is streamed from the steps and their results, without tools. With indexed documents and the `rag` feature on, the reasoning can also call `search_documents`, which searches the documents again with the model's own words to follow a lead (the manager found in the statutes, then his transfers). As the actions come from the schema, the reasoning also works with models that cannot call tools, like `llama3`.
 
-The reasoning stops after `SENSAI_MAX_TOOL_ROUNDS` steps, or on a step that is not valid, and Sensai answers from what it found. Its quality depends on the model: a small model like `qwen2.5:1.5b` may write its thoughts in English, stop before following every lead, or misspell a name it copies (Nordbank became "Norbahn" in the answer above). The excerpts found by `search_documents` are in `/reasoning N`, not in `/sources`, and the agents of `/review` show their thoughts but do not add them to `/reasoning`.
+The reasoning stops after `SENSAI_MAX_TOOL_ROUNDS` steps, or on a step that is not valid, and Sensai answers from what it found. Its quality depends on the model: a small model like `qwen2.5:1.5b` may write its thoughts in English, stop before following every lead, or misspell a name it copies (Nordbank became "Norbahn" in the answer above). The excerpts found by `search_documents` are in `/reasoning N`, not in `/sources`, and the agents of `/review` show their thoughts but do not add them to `/reasoning`. An answer that follows a schema of its own, like `/json` or the verdict of the fact-checker, is given without reasoning.
 
 ### Tools
 
@@ -171,6 +216,12 @@ def web_search(self, query: str) -> ToolResult:
 
 `SENSAI_APPROVAL` sets when Sensai asks: `critical` (default) for the tools that declare it, `all` before every tool call, `off` never. The core does not ask the user itself: the interface gives the agent an approver, a function that returns the decision, so a web interface can show buttons instead of a terminal prompt. Without an approver, critical calls are refused.
 **Code execution** (`tools/code_runner.py`) lets the model run the Python code it writes, like ChatGPT's Code Interpreter. Each call starts a new Docker container from `SENSAI_SANDBOX_IMAGE`, sends the code to `python -` on its standard input and removes the container afterwards. The container has no network, 256 MB of memory, one CPU, 64 processes at most, a read-only disk (only `/tmp` is writable) and runs as `nobody` without privileges; nothing from the host is mounted. A program running longer than `SENSAI_CODE_TIMEOUT` seconds is killed. The model gets the exit code, the output and the traceback, each cut to their last 2000 characters. A crash is not a tool error: the model reads the traceback, fixes its code and calls `run_python` again, within the `SENSAI_MAX_TOOL_ROUNDS` limit. At startup Sensai checks that Docker runs and downloads the image if needed, otherwise it warns and chats without code execution.
+
+**File access** (`tools/files.py`) lets the model work with the journalist's own files: `list_files(folder)`, `read_file(path, start_line)` and `write_file(path, content)`. `read_file` extracts the text of the formats Sensai indexes (PDF with its page numbers, emails, spreadsheets, HTML) and reads the others as text; a long file is sent 6000 characters at a time, and the model reads on with the `start_line` it is given. Like web pages, the content is marked as data, not instructions. `write_file` creates or replaces a whole text file, written next to it then renamed, so that a failure never leaves half a file; it needs approval, and the CLI shows the path and the full content before asking. There is no tool to delete a file.
+
+Every path goes through `tools/permissions.py` before the file is touched. `Permissions` resolves the path first, following `..` and links, then checks that it is inside a folder of `SENSAI_FILES_READ` (to list and read) or of `SENSAI_FILES_WRITE` (to write, which also allows reading), and that no part of it matches a pattern of `SENSAI_FILES_DENY`, like `sources` or `*.key`. `.env`, `.env.*`, `.sensai` and `.git` are always denied, even inside an allowed folder: the model can never read the API key, the index, the saved sessions, the memory or the guardrail rules, which hold the names to protect. A refused path is sent back to the model with the reason, and `list_files` leaves out what may not be read. The arguments of `write_file` go through the guardrails like every tool call, so the source's name is redacted in the files the model writes too.
+
+It is the `files` feature, off by default because the model reads and writes files on this machine. Turned on, it reads the folder Sensai runs in and writes nowhere, until `SENSAI_FILES_WRITE` names a folder. `/files` shows what is allowed.
 
 ### MCP servers
 
@@ -288,6 +339,7 @@ Sources:
 | `/sources` | show the full excerpts retrieved for the last message |
 | `/context` | show the tokens used by the last message and the summary of older turns |
 | `/tools` | list the tools the model can call |
+| `/files` | show the folders the model may read and write, and the patterns always denied |
 | `/features` | list the features and whether they are on |
 | `/feature NAME on\|off` | turn a feature on or off for the session |
 | `/personas` | list the personas, `*` marks the active one |
@@ -296,6 +348,10 @@ Sources:
 | `/resume [ID]` | continue a saved conversation, the last one without ID |
 | `/new` | start a new conversation; the current one stays saved |
 | `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
+| `/document` | show the working document |
+| `/document undo` | undo the changes made to the document by the last answer |
+| `/document export PATH` | write the document to a Markdown file |
+| `/json QUESTION` | answer in JSON that follows a schema: the answer, its claims with their excerpts, the entities and the events |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/reasoning [N]` | list the questions reasoned about in this conversation, or show the steps of question N |
@@ -321,8 +377,21 @@ Resumed conversation 20261027-153012: 4 turns. /context shows them.
 > Et la facture, finalement ?
 ```
 
+After each answer, the working document is updated with what was established, section by section:
+
+```
+> Dans le mail du 4 avril 2023, Marc Vidal, directeur financier d'Alvor, approuve un virement de 48 250 € vers Kestrel Ltd.
+[...]
+[document] added to People and companies, added to Timeline. /document to read it.
+> Correction : Marc Vidal est le directeur général.
+[...]
+[document] corrected in People and companies. /document to read it.
+> /document export enquete-alvor.md
+Document written to enquete-alvor.md.
+```
+
 With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed before it is sent, so you know exactly what leaves the machine:
-With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query is printed and has to be approved before it is sent, so nothing leaves the machine without your consent:
+With `SENSAI_FEATURE_WEB_SEARCH=true` (or `/feature web_search on` during a chat), the model searches the web when the question needs it. Each query has to be approved before it is sent, so nothing leaves the machine without your consent:
 
 ```
 > Quelle est la dernière version stable de Python publiée ? Cherche sur le web.
@@ -367,6 +436,25 @@ FROM python:3.12-slim
 RUN pip install pandas numpy
 ```
 
+With `SENSAI_FEATURE_FILES=true`, `SENSAI_FILES_READ=leak` and `SENSAI_FILES_WRITE=drafts`, the model reads the leak and writes its drafts, and nothing else:
+
+```
+> Lis le mail de Marc Vidal dans leak et écris un brouillon de trois lignes dans drafts/virement.md.
+[list_files] folder="leak"
+[list_files] 3 entries, 1 not allowed
+[read_file] path="leak/mail-vidal.eml"
+[read_file] leak/mail-vidal.eml, lines 1-12 of 12
+[write_file] path="drafts/virement.md"
+  content:
+    Le 4 avril 2023, Marc Vidal valide un virement de 48 250 € vers Kestrel Ltd, sans facture.
+    [...]
+Allow write_file? It writes a file on this machine. [y]es / [n]o / [a]lways this session: y
+[write_file] drafts/virement.md created
+> Lis aussi leak/sources/contact.txt.
+[read_file] path="leak/sources/contact.txt"
+[warning] read_file failed: read_file: permission denied, leak/sources/contact.txt is denied by the pattern 'sources'
+```
+
 Supported files: `.pdf`, `.eml`, `.csv`, `.tsv`, `.xlsx`, `.html`, `.htm`, `.md`, `.txt`. Hidden files and folders are skipped.
 
 ### Configuration
@@ -386,10 +474,12 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
+| `SENSAI_FEATURE_FILES` | `false` | `true` lets the model list, read and write files in the allowed folders; needs a model that supports tools |
 | `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
 | `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
+| `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -410,6 +500,9 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_CODE_TIMEOUT` | `10` | seconds a program may run before it is stopped (1-60) |
 | `SENSAI_SANDBOX_IMAGE` | `python:3.12-slim` | Docker image the code runs in; use one with pandas to analyse CSV files |
 | `SENSAI_MCP_TIMEOUT` | `30` | seconds an MCP server may take to answer a tool call (1-300) |
+| `SENSAI_FILES_READ` | `.` | folders the model may list and read, separated by commas; empty: none |
+| `SENSAI_FILES_WRITE` | empty | folders the model may write in (and read), separated by commas |
+| `SENSAI_FILES_DENY` | empty | name patterns never readable nor writable inside these folders, like `sources,*.key`; `.env`, `.sensai` and `.git` always are |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 | `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
 
@@ -423,10 +516,12 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `tools` | every tool the model can call, whatever their own feature or setting |
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
+| `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 
-The features are on by default, except `web_search`, `code_exec` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 

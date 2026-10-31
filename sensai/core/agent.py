@@ -2,12 +2,16 @@ from collections.abc import Generator, Iterator
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
 from sensai.core.config import Config
+from sensai.core.document.document import DocumentError, Edit, Rejected
+from sensai.core.document.editor import DocumentEditor, model_editor
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
+    DocumentEvent,
+    DocumentFailedEvent,
     DoneEvent,
     Event,
     GuardrailEvent,
@@ -45,6 +49,7 @@ class Agent:
         guardrails: Guardrails | None = None,
         persona: Persona | None = None,
         approver: Approver | None = None,
+        editor: DocumentEditor | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -52,8 +57,11 @@ class Agent:
         self.tools = tools or ToolRegistry()
         self.approver = approver
         self.memory = ConversationMemory(config, self.client)
+        self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
         self.reasoning: list[Reasoning] = []
+        # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
+        self.keeps_document = True
         self.persona: Persona | None = None
         if persona is not None:
             self.set_persona(persona)
@@ -65,6 +73,10 @@ class Agent:
     @property
     def messages(self) -> list[dict]:
         return self.memory.messages()
+
+    @property
+    def active_guardrails(self) -> Guardrails:
+        return self.guardrails if self.config.features["guardrails"] else Guardrails()
 
     def _approve(self, call: ToolCall, tools: ToolRegistry) -> Approval | None:
         reason = approval_reason(self.config.approval, tools, call)
@@ -131,12 +143,38 @@ class Agent:
         yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
         return reasoning
 
-    def run(self, user_input: str) -> Iterator[Event]:
+    def update_document(self, user_input: str, answer: str, guardrails: Guardrails) -> Iterator[Event]:
+        """Asks for the edits of this turn and applies them. A failure leaves the document as it was."""
+        try:
+            edits = self.editor(self.memory.document, user_input, answer)
+        except (LLMError, DocumentError) as e:
+            yield DocumentFailedEvent(str(e))
+            return
+        # The document is a deliverable: what may not be shown in an answer may not be written in it either.
+        allowed: list[Edit] = []
+        blocked: list[Rejected] = []
+        for edit in edits:
+            # The section name is written too: add_section makes it a heading of the document.
+            name, text = guardrails.check("output", edit.section), guardrails.check("output", edit.text)
+            for hit in name.hits + text.hits:
+                yield GuardrailEvent(hit)
+            hit = name.blocked or text.blocked
+            if hit:
+                blocked.append(Rejected(edit, f"blocked by the guardrail {hit.rule} ({hit.found})"))
+            else:
+                edit.section, edit.text = name.text, text.text
+                allowed.append(edit)
+        report = self.memory.document.apply(allowed)
+        report.rejected = blocked + report.rejected
+        if report:
+            yield DocumentEvent(report)
+
+    def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
         user_input = user_input.strip()
         if not user_input:
             raise EmptyInputError("Empty message")
 
-        guardrails = self.guardrails if self.config.features["guardrails"] else Guardrails()
+        guardrails = self.active_guardrails
         checked = guardrails.check_input(user_input)
         for hit in checked.hits:
             yield GuardrailEvent(hit)
@@ -157,8 +195,9 @@ class Agent:
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
-        functions = self.tools.tools() if self.config.features["tools"] else []
-        if self.config.features["reasoning"]:
+        # The schema constrains every token of the answer: the model could not call a tool.
+        functions = self.tools.tools() if self.config.features["tools"] and format is None else []
+        if self.config.features["reasoning"] and format is None:
             reasoning = yield from self._reason(user_input, pending, options, guardrails)
             pending.insert(-1, {"role": "system", "content": reasoning.context()})
             functions = []
@@ -171,7 +210,7 @@ class Agent:
             output = guardrails.output_filter()
             for chunk in self.client.chat_stream(
                 self.config.model, pending, options, think=self.config.think, usage=usage,
-                tools=tools or None, tool_calls=calls,
+                tools=tools or None, tool_calls=calls, format=format,
             ):
                 shown = output.feed(chunk)
                 if shown:
@@ -200,6 +239,8 @@ class Agent:
         content = "".join(answer)
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
+        if self.keeps_document and self.config.features["document"] and content.strip() and not output.blocked:
+            yield from self.update_document(user_input, content, guardrails)
 
         # The turn is saved: from here on, a failure only delays the compaction to the next turn.
         if self.memory.needs_compaction(usage.total_tokens):

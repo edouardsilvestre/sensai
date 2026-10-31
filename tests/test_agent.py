@@ -187,6 +187,14 @@ def test_without_tools_no_schema_is_sent(config, client):
     assert client.tools_seen == [None]
 
 
+def test_an_answer_with_a_schema_gets_no_tools(config, client):
+    agent, _ = tool_agent(config, client)
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+    list(agent.run("Where is Alvor based?", schema))
+    assert client.tools_seen == [None]
+    assert client.formats_seen == [schema]
+
+
 def test_tool_call_is_run_and_its_result_sent_back(config, client):
     agent, tool = tool_agent(config, client)
     client.tool_rounds = [[ToolCall("lookup", {"query": "Alvor"})]]

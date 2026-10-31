@@ -92,10 +92,11 @@ class OllamaClient:
         usage: Usage | None = None,
         tools: list[Callable | dict] | None = None,
         tool_calls: list[ToolCall] | None = None,
+        format: dict | None = None,
     ) -> Iterator[str]:
         try:
             for chunk in self._client.chat(
-                model=model, messages=messages, stream=True, options=options, think=think, tools=tools
+                model=model, messages=messages, stream=True, options=options, think=think, tools=tools, format=format
             ):
                 if chunk.message.content:
                     yield chunk.message.content
@@ -120,6 +121,7 @@ class OllamaClient:
         usage: Usage | None = None,
         format: dict | None = None,
     ) -> str:
+        """`format` is a JSON schema the answer must follow (Ollama's structured outputs)."""
         try:
             response = self._client.chat(
                 model=model, messages=messages, stream=False, options=options, think=think, format=format
