@@ -108,13 +108,13 @@ class Agent:
         return call, result
 
     def _reason(
-        self, question: str, pending: list[dict], options: dict, guardrails: Guardrails
+        self, question: str, pending: list[dict], options: dict, guardrails: Guardrails, sources: list[SearchResult]
     ) -> Generator[Event, None, Reasoning]:
         reasoning = Reasoning(question)
         self.reasoning.append(reasoning)
         tools = self.tools if self.config.features["tools"] else ToolRegistry()
         if self.retriever is not None and self.config.features["rag"]:
-            tools = tools.extended([DocumentSearch(self.retriever, self.config.rag_top_k).search_documents])
+            tools = tools.extended([DocumentSearch(self.retriever, self.config.rag_top_k, sources).search_documents])
         actions = tools.names()
         schema = step_schema(tools)
         messages = pending[:-1] + [{"role": "system", "content": instructions(tools)}] + pending[-1:]
@@ -199,7 +199,11 @@ class Agent:
         # The schema constrains every token of the answer: the model could not call a tool.
         functions = self.tools.tools() if self.config.features["tools"] and format is None else []
         if self.config.features["reasoning"] and format is None:
-            reasoning = yield from self._reason(user_input, pending, options, guardrails)
+            found = len(sources)
+            sources = list(sources)
+            reasoning = yield from self._reason(user_input, pending, options, guardrails, sources)
+            if len(sources) > found:
+                yield SourcesEvent(list(sources))
             pending.insert(-1, {"role": "system", "content": reasoning.context()})
             functions = []
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.

@@ -30,7 +30,8 @@ Before answering the user's message, you reasoned step by step. Your steps and t
 {steps}
 
 Now answer the user's message from them, in plain text and in the language of the message.
-Only state what the results or the documents say, and say so when they do not answer the message."""
+Only state what the results or the documents say, and say so when they do not answer the message.
+Cite each excerpt you rely on by its number, like [2]."""
 
 
 class ReasoningError(Exception):

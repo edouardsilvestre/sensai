@@ -7,6 +7,7 @@ from sensai.core.approval import Approval
 from sensai.core.events import (
     DoneEvent,
     ReasoningStoppedEvent,
+    SourcesEvent,
     ThoughtEvent,
     TokenEvent,
     ToolCallEvent,
@@ -294,3 +295,25 @@ def test_without_reasoning_documents_are_only_searched_once(config, client):
     list(Agent(config, client, retriever=retriever).run("Qui dirige Orion ?"))
     assert retriever.queries == ["Qui dirige Orion ?"]
     assert client.tools_seen == [None] and client.steps_seen == []
+
+
+def test_the_excerpts_found_while_reasoning_become_sources(reasoning_config, client):
+    agent = Agent(reasoning_config, client, retriever=KeywordRetriever({"orion": [STATUTES], "vidal": [STATEMENT]}))
+    client.steps = [step("I look for his transfers.", "search_documents", query="Vidal transfers"), step("Done.")]
+
+    events = list(agent.run("Qui dirige Orion ?"))
+
+    assert [event.sources for event in events if isinstance(event, SourcesEvent)] == [[STATUTES], [STATUTES, STATEMENT]]
+    assert '<excerpt id="2" source="releve.xlsx, row 12">' in client.steps_seen[1][0][-1]["content"]
+    assert "Cite each excerpt you rely on by its number" in client.chats[-1][0][-2]["content"]
+    assert agent.memory.turns[0].citations == ["statuts_orion.pdf, p. 2", "releve.xlsx, row 12"]
+
+
+def test_an_excerpt_found_again_keeps_its_number(reasoning_config, client):
+    agent = Agent(reasoning_config, client, retriever=KeywordRetriever({"orion": [STATUTES]}))
+    client.steps = [step("I check the statutes.", "search_documents", query="Orion statutes"), step("Done.")]
+
+    events = list(agent.run("Qui dirige Orion ?"))
+
+    assert [event.sources for event in events if isinstance(event, SourcesEvent)] == [[STATUTES]]
+    assert '<excerpt id="1" source="statuts_orion.pdf, p. 2">' in client.steps_seen[1][0][-1]["content"]
