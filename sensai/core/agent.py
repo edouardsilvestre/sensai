@@ -1,5 +1,4 @@
 from collections.abc import Generator, Iterator
-from typing import Protocol
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
 from sensai.core.config import Config
@@ -25,6 +24,7 @@ from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
 from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema
+from sensai.core.tools.documents import DocumentSearch, Retriever
 from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 # Ends an answer that a block rule stopped, in the history, so that the model knows it was cut.
@@ -33,10 +33,6 @@ STOPPED = "[answer stopped by a guardrail]"
 
 class EmptyInputError(ValueError):
     pass
-
-
-class Retriever(Protocol):
-    def search(self, query: str, k: int) -> list[SearchResult]: ...
 
 
 class Agent:
@@ -70,15 +66,17 @@ class Agent:
     def messages(self) -> list[dict]:
         return self.memory.messages()
 
-    def _approve(self, call: ToolCall) -> Approval | None:
-        reason = approval_reason(self.config.approval, self.tools, call)
+    def _approve(self, call: ToolCall, tools: ToolRegistry) -> Approval | None:
+        reason = approval_reason(self.config.approval, tools, call)
         if reason is None:
             return None
         if self.approver is None:
             return Approval(False, NO_APPROVER_REASON)
         return self.approver(call, reason)
 
-    def _run_tool(self, call: ToolCall, guardrails: Guardrails) -> Generator[Event, None, ToolResult]:
+    def _run_tool(
+        self, call: ToolCall, guardrails: Guardrails, tools: ToolRegistry
+    ) -> Generator[Event, None, ToolResult]:
         yield ToolCallEvent(call)
         call, checked = guardrails.check_tool_call(call)
         for hit in checked.hits:
@@ -90,10 +88,10 @@ class Agent:
             result = ToolResult(f"Error: blocked by the guardrail '{hit.rule}' ({hit.found}): {reason}", error=True)
         else:
             # Asked after the guardrails: the user approves the redacted call, the one that runs.
-            approval = self._approve(call)
+            approval = self._approve(call, tools)
             if approval is not None:
                 yield ApprovalEvent(call, approval)
-            result = self.tools.execute(call) if approval is None or approval.approved else refusal(approval)
+            result = tools.execute(call) if approval is None or approval.approved else refusal(approval)
         yield ToolResultEvent(call, result)
         return result
 
@@ -103,6 +101,8 @@ class Agent:
         reasoning = Reasoning(question)
         self.reasoning.append(reasoning)
         tools = self.tools if self.config.features["tools"] else ToolRegistry()
+        if self.retriever is not None and self.config.features["rag"]:
+            tools = tools.extended([DocumentSearch(self.retriever, self.config.rag_top_k).search_documents])
         actions = tools.names()
         schema = step_schema(actions)
         messages = pending[:-1] + [{"role": "system", "content": instructions(tools)}] + pending[-1:]
@@ -125,7 +125,7 @@ class Agent:
             yield ThoughtEvent(number, step.thought)
             if step.final:
                 return reasoning
-            step.result = yield from self._run_tool(step.call(), guardrails)
+            step.result = yield from self._run_tool(step.call(), guardrails, tools)
             messages.append({"role": "assistant", "content": reply})
             messages.append({"role": "user", "content": f"Result of {step.action}: {step.result.content}"})
         yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
@@ -194,7 +194,7 @@ class Agent:
             # Tool calls and results only live in this turn's messages, like the excerpts.
             pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
             for call in calls:
-                result = yield from self._run_tool(call, guardrails)
+                result = yield from self._run_tool(call, guardrails, self.tools)
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)

@@ -17,7 +17,9 @@ At each step, reply with:
 Rules:
 - Call one tool per step, and read its result before the next step.
 - Never make up the result of a tool: only rely on what the results say.
-- Pick "answer" as soon as you can answer, or when the tools cannot help.
+- Excerpts sent with the message come from a single search with its words: if they do not answer every part of it,
+  search again with more precise words, like a name, a company or a date found so far.
+- Pick "answer" once you can answer every part of the message, or when the tools cannot help.
 - Write your thoughts in the language of the user's message.
 
 Tools:

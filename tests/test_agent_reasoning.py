@@ -13,6 +13,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.guardrails.rules import Guardrails, parse_rules
+from sensai.core.rag.models import SearchResult
 from sensai.core.reasoning import ANSWER, Step
 from sensai.core.tools.registry import ToolRegistry, ToolResult, requires_approval
 
@@ -200,3 +201,68 @@ def test_the_session_keeps_the_reasoning_of_each_question_but_not_the_history(re
         Step("Marc Vidal.", ANSWER),
     ]
     assert all("I need the manager" not in message["content"] for message in agent.messages)
+
+
+STATUTES = SearchResult(1, "Gérant : Marc Vidal.", "p. 2", "statuts_orion.pdf", "", 0.9)
+STATEMENT = SearchResult(
+    2, "05/04/2023 virement Nordbank vers Marc Vidal, 480 000 EUR.", "row 12", "releve.xlsx", "", 0.8
+)
+
+
+class KeywordRetriever:
+    def __init__(self, results: dict[str, list[SearchResult]]):
+        self.results = results
+        self.queries: list[str] = []
+
+    def search(self, query: str, k: int) -> list[SearchResult]:
+        self.queries.append(query)
+        return [result for word, found in self.results.items() if word in query.lower() for result in found]
+
+
+def offered(client) -> list[list[str]]:
+    return [schema["properties"]["action"]["enum"] for _, schema in client.steps_seen]
+
+
+def test_the_reasoning_follows_a_lead_through_the_documents(reasoning_config, client):
+    retriever = KeywordRetriever({"orion": [STATUTES], "vidal": [STATEMENT]})
+    agent = Agent(reasoning_config, client, retriever=retriever)
+    client.steps = [
+        step("I need the manager of Orion.", "search_documents", query="Orion manager"),
+        step("Marc Vidal manages Orion: I look for his transfers.", "search_documents", query="Vidal transfers"),
+        step("Nordbank sent him 480 000 EUR."),
+    ]
+
+    list(agent.run("Qui dirige Orion, et a-t-il reçu de l'argent ?"))
+
+    assert retriever.queries[1:] == ["Orion manager", "Vidal transfers"]
+    assert "Gérant : Marc Vidal." in client.steps_seen[1][0][-1]["content"]
+    assert "480 000 EUR" in client.steps_seen[2][0][-1]["content"]
+    assert agent.reasoning[0].steps[1].result.summary == "1 excerpt: releve.xlsx"
+
+
+def test_document_search_is_offered_with_the_rag_feature(reasoning_config, client):
+    agent = Agent(reasoning_config, client, retriever=KeywordRetriever({}))
+    list(agent.run("Qui dirige Orion ?"))
+    reasoning_config.features["rag"] = False
+    list(agent.run("Et Nordbank ?"))
+    assert offered(client) == [["search_documents", ANSWER], [ANSWER]]
+
+
+def test_document_search_needs_indexed_documents(reasoning_config, client):
+    list(Agent(reasoning_config, client).run("Qui dirige Orion ?"))
+    assert offered(client) == [[ANSWER]]
+
+
+def test_document_search_stays_local_without_the_tools_feature(reasoning_config, client):
+    reasoning_config.features["tools"] = False
+    agent = make_agent(reasoning_config, client, [])
+    agent.retriever = KeywordRetriever({})
+    list(agent.run("Qui dirige Orion ?"))
+    assert offered(client) == [["search_documents", ANSWER]]
+
+
+def test_without_reasoning_documents_are_only_searched_once(config, client):
+    retriever = KeywordRetriever({"orion": [STATUTES]})
+    list(Agent(config, client, retriever=retriever).run("Qui dirige Orion ?"))
+    assert retriever.queries == ["Qui dirige Orion ?"]
+    assert client.tools_seen == [None] and client.steps_seen == []

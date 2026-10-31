@@ -68,6 +68,9 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
+    def extended(self, tools: Iterable[Tool]) -> "ToolRegistry":
+        return ToolRegistry([*self._tools.values(), *tools], self.warnings)
+
     def tools(self) -> list[Callable | dict]:
         """The tools as Ollama takes them: the functions, and the schema of each SchemaTool."""
         return [tool.schema() if isinstance(tool, SchemaTool) else tool for tool in self._tools.values()]
