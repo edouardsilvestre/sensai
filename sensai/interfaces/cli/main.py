@@ -563,7 +563,7 @@ def profile_command(session: Session, argument: str) -> None:
             profile.add(value)
             print(f"Added as instruction {len(profile.entries)}.")
         elif action == "remove":
-            if not value.strip().isdigit():
+            if not value.strip().isdecimal():
                 error("Usage: /profile remove N")
                 return
             print(f"Removed: {profile.remove(int(value))}")
