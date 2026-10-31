@@ -4,7 +4,7 @@ import shlex
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from collections.abc import Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
@@ -20,13 +20,15 @@ from sensai.core.events import (
     DoneEvent,
     Event,
     GuardrailEvent,
+    ReasoningStoppedEvent,
     ReviewDoneEvent,
     SourcesEvent,
+    ThoughtEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from sensai.core.document.document import Document, Edit, EditReport
+from sensai.core.document.document import Edit, EditReport
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
@@ -53,6 +55,7 @@ APPROVAL_DESCRIPTIONS = {
     "all": "asks before every tool call",
     "off": "never asks",
 }
+SHORT_TEXT = 70
 HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
@@ -63,6 +66,10 @@ Commands:
   /sessions               list the saved conversations
   /resume [ID]            continue a saved conversation (the last one without ID)
   /new                    start a new conversation, the current one stays saved
+  /history                list the messages of this branch with their numbers
+  /edit N [TEXT]          replace message N in a new branch; the original conversation stays in its branch
+  /branches               list the branches of this conversation
+  /branch N               continue branch N
   /profile                show the instructions the model gets about you
   /profile add TEXT       add an instruction to your profile
   /profile remove N       remove instruction N from your profile
@@ -77,7 +84,9 @@ Commands:
   /json QUESTION          answer in JSON: the answer, its claims with their excerpts, the entities and the events
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
-  /exit, /quit            leave (or press Ctrl+D)"""
+  /reasoning [N]          list the questions reasoned about, or show the steps of question N
+  /exit, /quit            leave (or press Ctrl+D)
+Ctrl+C during an answer stops it: what was written is kept, and your next message redirects it."""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -294,7 +303,12 @@ def chat_turn(session: Session, line: str) -> None:
     show_events(session, session.agent.run(line))
 
 
-def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
+def show_events(
+    session: Session,
+    events: Generator[Event, None, None],
+    structured: bool = False,
+    interrupt: Callable[[], bool] | None = None,
+) -> None:
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -336,6 +350,13 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                     print()
                     mid_line = False
                 print_guardrail(event.hit)
+            elif isinstance(event, ThoughtEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                print(f"[thought {event.number}] {event.thought}")
+            elif isinstance(event, ReasoningStoppedEvent):
+                warning(f"Reasoning stopped: {event.reason}. Sensai answers from what it found.")
             elif isinstance(event, DoneEvent):
                 if structured:
                     print_structured(event.content, sources)
@@ -359,7 +380,12 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
         print()
         error(str(e))
     except KeyboardInterrupt:
-        print("\n[interrupted]")
+        # Closes the connection too: Ollama stops generating.
+        events.close()
+        if session.config.features["branching"] and (interrupt or session.agent.interrupt)():
+            print("\n[interrupted] What was written is kept: tell the model how to go on, or /edit to change the question.")
+        else:
+            print("\n[interrupted]")
     save_session(session)
 
 
@@ -427,8 +453,12 @@ def resume(session: Session, session_id: str) -> bool:
         return False
     session.session_id = session_id
     session.last_sources = []
+    session.agent.reasoning.clear()
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
     print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
+    branches = session.agent.memory.branches()
+    if len(branches) > 1:
+        print(f"On branch {session.agent.memory.branch.number} of {len(branches)}: /branches lists them.")
     return True
 
 
@@ -439,14 +469,99 @@ def resume_command(session: Session, argument: str) -> None:
 
 
 def new_command(session: Session) -> None:
-    memory = session.agent.memory
     previous = session.session_id
-    memory.summary, memory.turns, memory.last_usage = "", [], None
-    memory.document = Document()
+    session.agent.memory.clear()
     session.session_id = None
     session.last_sources = []
+    session.agent.reasoning.clear()
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
     print(f"New conversation.{saved}")
+
+
+def shorten(text: str) -> str:
+    return textwrap.shorten(text, width=SHORT_TEXT, placeholder="...")
+
+
+def history_command(session: Session) -> None:
+    memory = session.agent.memory
+    if not memory.turns:
+        print("No message kept verbatim on this branch." if memory.summary else "No message yet.")
+        return
+    print(f"Branch {memory.branch.number}:")
+    for number, turn in enumerate(memory.turns, start=1):
+        print(f"  {number}. {shorten(turn.user)}")
+        print(f"     {shorten(turn.assistant)}")
+    print("/edit N to try another message instead of one of them.")
+
+
+def branching_enabled(session: Session) -> bool:
+    if not session.config.features["branching"]:
+        print("The branching feature is off: /feature branching on to edit past messages and switch branches.")
+    return session.config.features["branching"]
+
+
+def edit_command(session: Session, argument: str) -> None:
+    if not branching_enabled(session):
+        return
+    memory = session.agent.memory
+    number, _, text = argument.partition(" ")
+    if not number.isdecimal():
+        error("Usage: /edit N [TEXT], /history gives the numbers")
+        return
+    if not 1 <= int(number) <= len(memory.turns):
+        error(f"No message {number} on this branch: /history lists them.")
+        return
+    number = int(number)
+    if not text.strip():
+        print(f"Message {number}: {memory.turns[number - 1].user}")
+        try:
+            text = input("New message (empty to cancel): ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not text.strip():
+            return
+    previous = memory.branch.number
+    memory.fork(number)
+    print(f"[branch] Branch {memory.branch.number}, from message {number} of branch {previous}, which stays as it was.")
+    forked = memory.turns
+    chat_turn(session, text)
+    if memory.turns is forked:
+        # Blocked by a guardrail, or the model failed: the edit gave nothing to keep.
+        memory.discard_branch()
+        save_session(session)
+        print(f"[branch] Nothing was answered: back on branch {previous}.")
+
+
+def branches_command(session: Session) -> None:
+    if not branching_enabled(session):
+        return
+    memory = session.agent.memory
+    for branch in memory.branches():
+        marker = "*" if branch.number == memory.branch.number else " "
+        origin = "original" if branch.parent is None else f"from message {branch.turn} of branch {branch.parent}"
+        label = f": {shorten(branch.label)}" if branch.label else ""
+        print(f"{marker} {branch.number}  {plural(len(branch.turns), 'turn'):>9}  {origin}{label}")
+    print("/branch N to continue one of them, /edit N to start another.")
+
+
+def branch_command(session: Session, argument: str) -> None:
+    if not branching_enabled(session):
+        return
+    memory = session.agent.memory
+    if not argument:
+        print(f"On branch {memory.branch.number}. /branches lists them.")
+    elif not argument.isdecimal():
+        error("Usage: /branch N, /branches gives the numbers")
+    elif int(argument) == memory.branch.number:
+        print(f"Already on branch {argument}.")
+    elif not memory.switch(int(argument)):
+        error(f"No branch {argument}: /branches lists them.")
+    else:
+        session.last_sources = []
+        save_session(session)
+        last = f" Last answer: {shorten(memory.turns[-1].assistant)}" if memory.turns else ""
+        print(f"On branch {argument}, {plural(len(memory.turns), 'turn')}.{last}")
 
 
 def profile_command(session: Session, argument: str) -> None:
@@ -460,7 +575,7 @@ def profile_command(session: Session, argument: str) -> None:
             profile.add(value)
             print(f"Added as instruction {len(profile.entries)}.")
         elif action == "remove":
-            if not value.strip().isdigit():
+            if not value.strip().isdecimal():
                 error("Usage: /profile remove N")
                 return
             print(f"Removed: {profile.remove(int(value))}")
@@ -710,7 +825,32 @@ def review_command(session: Session, argument: str) -> None:
         error(f"{e} (in {session.config.personas_dir}).")
         return
     session.last_sources = []
-    show_events(session, review.run(argument))
+    show_events(session, review.run(argument), interrupt=review.interrupt)
+
+
+def reasoning_command(session: Session, argument: str) -> None:
+    history = session.agent.reasoning
+    if not history:
+        hint = "ask a question" if session.config.features["reasoning"] else "/feature reasoning on, then ask one"
+        print(f"No reasoning yet in this conversation: {hint}.")
+        return
+    if not argument:
+        print("Reasoning of this conversation:")
+        for number, reasoning in enumerate(history, start=1):
+            print(f"  {number}. {reasoning.question} ({plural(len(reasoning.steps), 'step')})")
+        print("/reasoning N to read the steps of question N.")
+        return
+    if not argument.isdigit() or not 1 <= int(argument) <= len(history):
+        error(f"Usage: /reasoning [N], with N between 1 and {len(history)}")
+        return
+    reasoning = history[int(argument) - 1]
+    print(f"Question {argument}: {reasoning.question}")
+    for number, step in enumerate(reasoning.steps, start=1):
+        print(f"[thought {number}] {step.thought}")
+        if not step.final:
+            print(textwrap.indent(describe_call(step.call()), "  "))
+        if step.result is not None:
+            print(textwrap.indent(step.result.content, "    "))
 
 
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
@@ -755,6 +895,14 @@ def handle_command(session: Session, line: str) -> bool:
         resume_command(session, argument)
     elif name == "/new":
         new_command(session)
+    elif name == "/history":
+        history_command(session)
+    elif name == "/edit":
+        edit_command(session, argument)
+    elif name == "/branches":
+        branches_command(session)
+    elif name == "/branch":
+        branch_command(session, argument)
     elif name == "/profile":
         profile_command(session, argument)
     elif name == "/document":
@@ -763,6 +911,8 @@ def handle_command(session: Session, line: str) -> bool:
         guardrails_command(session)
     elif name == "/approval":
         approval_command(session, argument.lower())
+    elif name == "/reasoning":
+        reasoning_command(session, argument)
     elif name == "/features":
         list_features(session)
     elif name == "/feature":

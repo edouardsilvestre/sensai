@@ -77,6 +77,12 @@ def test_chat_fills_usage():
     assert usage == Usage(prompt_tokens=300, completion_tokens=20)
 
 
+def test_chat_replies_freely_without_a_schema():
+    client = make_client()
+    client.chat("model", [])
+    assert client._client.kwargs["format"] is None
+
+
 def test_tool_calls_are_collected():
     client = make_client()
     def web_search(query: str) -> str:

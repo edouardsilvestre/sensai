@@ -10,6 +10,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
 - 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
+- 🌿 **Branches & interruption**: `/edit` tries another question from any point of the conversation without losing the first version, and Ctrl+C stops an answer to redirect it.
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔌 **MCP servers**: the model can call the tools of any MCP server reached by its URL, like a company registry lookup, each call approved first.
@@ -19,6 +20,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
 - 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
+- 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -43,6 +45,17 @@ Answering: the message is embedded, the closest chunks are added to the prompt a
 - `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
 
 Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
+
+### Branches & interruption
+
+A conversation is not a straight line: the journalist often wants to ask a question differently without losing what the first version gave, or to stop an answer that goes the wrong way.
+
+- `ConversationMemory` (`memory/conversation.py`) holds several `Branch`es. `/edit N` calls `fork`: the new branch gets the turns before message N, the summary, and the working document as it was before that turn, which each `Turn` records. Each branch has its own copy of its history and of its document, so that an answer, a compaction or a document edit in one branch never reaches another. The cost is some repeated text in the session file; the older turns cannot be edited, since the compaction has replaced them with the summary.
+- `SessionStore` saves the active branch as before, and the others in `other_branches`: older session files are read as a conversation with one branch.
+- An edit that gets no answer (blocked by a guardrail, or Ollama failed) removes its branch instead of leaving an empty one.
+- Ctrl+C stops the generator of `Agent.run`, which closes the connection, so Ollama stops generating too. `Agent.interrupt` then adds the question and the text already shown to the history, followed by `[answer interrupted by the user]`, so that the next message redirects the answer: the model sees where it was stopped. Only the text that passed the guardrails is kept, along with the earlier text and the tool results of the turn, including those of the reasoning, which go through the same rules, so that the model can go on from there. It stays out of the working document, a cut `/json` answer is not kept, and an interrupted `/review` keeps the question and the last text written.
+
+It is the `branching` feature, on by default: off, the commands are refused and an interrupted turn is dropped, as a stopped generation has nothing to keep.
 
 ### Long-term memory
 
@@ -141,6 +154,36 @@ A prose answer is for the journalist; a program needs data it can read without g
 `sources` are the numbers of the excerpts listed below the JSON, as `[1]` in a prose answer, and an `entities` type is one of `person`, `company`, `place` or `other`. The JSON is printed once complete, indented, after being checked by `parse_answer` against the schema: Ollama already constrains the reply, but a guardrail can cut it and another server could ignore `format`. A reply that does not follow the schema is printed as it is, with what is wrong; an excerpt number that does not exist is flagged, like in a prose answer.
 
 The schema constrains every token the model writes, so it could not call a tool: an answer with a schema is given no tool (`Agent.run`), only the excerpts of the documents. The order of the fields matters too, since the model writes them in that order: the fact-checker gives the `reason` of each verdict before the `verdict`, so that it decides after having reasoned.
+
+### Reasoning
+
+With `/feature reasoning on` (or `SENSAI_FEATURE_REASONING=true`), Sensai reasons step by step before answering, and shows each step: what it knows, what is missing, and the document search or the tool it uses next. It is off by default, because each step is a call to the model.
+
+```
+> /feature reasoning on
+reasoning is on.
+> Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu de l'argent de Nordbank ?
+[search] 3 excerpts from 3 documents
+[thought 1] The first excerpt contains the information about the legal structure of Orion Delta Consulting, and the second excerpt mentions a specific transaction involving Marc Vidal [...]
+[search_documents] query="Orion Delta Consulting gérant"
+[search_documents] 3 excerpts: docs/statuts_orion.txt, docs/releve_nordbank_2023-04.txt, docs/meteo.txt
+[thought 2] [...] it states that the company is governed by Marc Vidal with no term limit. [...] it mentions a transfer of 480,000 EUR to Marc Vidal's personal account on April 5, 2023 [...]
+Les documents indiquent que la société Orion Delta Consulting est gouvernée par Marc Vidal. L'excerpt [1] mentionne que Marc Vidal est nommé gérant de la société pour une durée illimitée. L'extrait [2] cite un virement de 480 000 EUR vers son compte personnel sur la banque Norbahn le 5 avril 2023, libellé "conseil stratégique".
+
+> /reasoning 1
+Question 1: Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu de l'argent de Nordbank ?
+[thought 1] ...
+  [search_documents] query="Orion Delta Consulting gérant"
+    <excerpt source="docs/statuts_orion.txt">
+    [...] La société est gérée par M. Marc Vidal, nommé gérant pour une durée illimitée.
+    [...]
+```
+
+`/reasoning` lists the questions of the conversation, `/reasoning N` shows the thoughts, the tool calls and the full results of question N, so that the journalist can check what a conclusion rests on. The reasoning is never sent back to the model: only the question and the answer are kept in the history, plus the tool results of a turn the user interrupts. `/new` and `/resume` clear it.
+
+`reasoning.py` and `Agent._reason`: at each step, the model replies with a JSON object `{"thought", "action", "arguments"}` that Ollama is forced to follow (the `format` option of the chat API). The schema has one form per tool, with the arguments of that tool, plus `answer`: the model cannot invent a tool or an argument. A tool chosen by the model goes through the guardrails and the approval like any tool call, and its result is given back to the model for the next step; the thoughts go through the output guardrails before they are shown. Once the model picks `answer`, the final answer is streamed from the steps and their results, without tools. With indexed documents and the `rag` feature on, the reasoning can also call `search_documents`, which searches the documents again with the model's own words to follow a lead (the manager found in the statutes, then his transfers). The excerpts it finds are numbered after those of the first search, so that the answer can cite them, and they are listed with the sources and in `/sources`. As the actions come from the schema, the reasoning also works with models that cannot call tools, like `llama3`.
+
+The reasoning stops after `SENSAI_MAX_TOOL_ROUNDS` steps, or on a step that is not valid, and Sensai answers from what it found. Its quality depends on the model: a small model like `qwen2.5:1.5b` may write its thoughts in English, stop before following every lead, or misspell a name it copies (Nordbank became "Norbahn" in the answer above). The agents of `/review` show their thoughts but do not add them to `/reasoning`. An answer that follows a schema of its own, like `/json` or the verdict of the fact-checker, is given without reasoning.
 
 ### Tools
 
@@ -316,6 +359,10 @@ Sources:
 | `/sessions` | list the saved conversations, the current one marked with `*` |
 | `/resume [ID]` | continue a saved conversation, the last one without ID |
 | `/new` | start a new conversation; the current one stays saved |
+| `/history` | list the messages of this branch with their numbers |
+| `/edit N [TEXT]` | replace message N in a new branch; the original conversation stays in its branch |
+| `/branches` | list the branches of this conversation, the active one marked with `*` |
+| `/branch N` | continue branch N |
 | `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
 | `/document` | show the working document |
 | `/document undo` | undo the changes made to the document by the last answer |
@@ -323,6 +370,7 @@ Sources:
 | `/json QUESTION` | answer in JSON that follows a schema: the answer, its claims with their excerpts, the entities and the events |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
+| `/reasoning [N]` | list the questions reasoned about in this conversation, or show the steps of question N |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -453,6 +501,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
 | `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
 | `SENSAI_MEMORY_PATH` | `.sensai/memory.db` | SQLite file holding the long-term memory |
+| `SENSAI_FEATURE_BRANCHING` | `true` | edit past messages into branches, and keep an interrupted answer |
 | `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
@@ -486,9 +535,11 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `branching` | `/edit`, `/branches` and `/branch`, and keeping an interrupted answer; the branches stay saved |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
+| `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 
-The features are on by default, except `web_search`, `code_exec` and `files`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 
