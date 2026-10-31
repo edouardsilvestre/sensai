@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -130,6 +131,10 @@ class ExampleLibrary:
             ((_cosine(vector, other), number) for number, other in enumerate(self._vectors)), reverse=True
         )
         return [self.examples[number] for similarity, number in scored[:k] if similarity >= self.min_similarity]
+
+    def fingerprint(self) -> str:
+        data = [asdict(example) for example in self.examples]
+        return hashlib.sha256(json.dumps(data, ensure_ascii=False).encode()).hexdigest()
 
     def add(self, example: Example) -> None:
         for number, kept in enumerate(self.examples, start=1):

@@ -160,11 +160,16 @@ class Agent:
 
     def _context(self) -> str:
         fingerprint = getattr(self.retriever, "fingerprint", None)
+        examples = (
+            self.examples is not None and self.examples.examples
+            and self.config.examples_k > 0 and self.config.features["examples"]
+        )
         context = {
             "model": self.config.model,
             "messages": self.memory.messages(),
             "documents": fingerprint() if fingerprint and self.config.features["rag"] else None,
             "guardrails": self.active_guardrails.fingerprint(),
+            "examples": [self.examples.fingerprint(), self.config.examples_k] if examples else None,
             "features": {name: self.config.features[name] for name in ("rag", "tools", "reasoning")},
         }
         return hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()

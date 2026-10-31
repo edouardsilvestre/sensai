@@ -188,3 +188,13 @@ def test_the_same_answer_cannot_be_added_twice(path):
         library.add(example("Qui dirige Orion ?"))
     library.add(example("Qui dirige Orion ?", "Marc Vidal [1]."))
     assert len(ExampleLibrary(path, embed).examples) == 3
+
+
+def test_the_fingerprint_changes_with_the_examples(path):
+    library = ExampleLibrary(path, embed)
+    empty = library.fingerprint()
+    library.add(example("Qui dirige Orion ?"))
+    one = library.fingerprint()
+    assert len({empty, one}) == 2 and ExampleLibrary(path, embed).fingerprint() == one
+    library.remove(1)
+    assert library.fingerprint() == empty
