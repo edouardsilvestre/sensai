@@ -37,6 +37,7 @@ As a journalist reading an answer as it is written, I want to stop it as soon as
 Acceptance criteria:
 - Ctrl+C during an answer stops it at once, and the CLI says what was written is kept.
 - The question and the text already shown stay in the history, marked `[answer interrupted by the user]`, so that the next message ("shorter, and only the amounts") redirects the answer.
+- When tools were called before the interruption, the text of the earlier rounds and the tool results stay too, after the guardrails, so that the model does not lose what it found.
 - An interrupted answer does not update the working document, since a cut answer establishes nothing.
-- A cut `/json` answer is not kept, and an interrupted `/review` leaves the conversation as it was.
+- A cut `/json` answer is not kept. An interrupted `/review` keeps the question and the last text written: the text being written, or the investigator's answer while the fact-checker reads it.
 - The conversation is saved after the interruption, and `/edit` can also replace the interrupted question.
