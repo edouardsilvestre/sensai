@@ -10,6 +10,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
 - 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
+- 🌿 **Branches & interruption**: `/edit` tries another question from any point of the conversation without losing the first version, and Ctrl+C stops an answer to redirect it.
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔌 **MCP servers**: the model can call the tools of any MCP server reached by its URL, like a company registry lookup, each call approved first.
@@ -43,6 +44,17 @@ Answering: the message is embedded, the closest chunks are added to the prompt a
 - `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
 
 Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
+
+### Branches & interruption
+
+A conversation is not a straight line: the journalist often wants to ask a question differently without losing what the first version gave, or to stop an answer that goes the wrong way.
+
+- `ConversationMemory` (`memory/conversation.py`) holds several `Branch`es. `/edit N` calls `fork`: the new branch gets the turns before message N, the summary, and the working document as it was before that turn, which each `Turn` records. Each branch has its own copy of its history and of its document, so that an answer, a compaction or a document edit in one branch never reaches another. The cost is some repeated text in the session file; the older turns cannot be edited, since the compaction has replaced them with the summary.
+- `SessionStore` saves the active branch as before, and the others in `other_branches`: older session files are read as a conversation with one branch.
+- An edit that gets no answer (blocked by a guardrail, or Ollama failed) removes its branch instead of leaving an empty one.
+- Ctrl+C stops the generator of `Agent.run`, which closes the connection, so Ollama stops generating too. `Agent.interrupt` then adds the question and the text already shown to the history, followed by `[answer interrupted by the user]`, so that the next message redirects the answer: the model sees where it was stopped. Only the text that passed the guardrails is kept. It stays out of the working document, a cut `/json` answer is not kept, and an interrupted `/review` changes nothing.
+
+It is the `branching` feature, on by default: off, the commands are refused and an interrupted turn is dropped, as a stopped generation has nothing to keep.
 
 ### Long-term memory
 
@@ -316,6 +328,10 @@ Sources:
 | `/sessions` | list the saved conversations, the current one marked with `*` |
 | `/resume [ID]` | continue a saved conversation, the last one without ID |
 | `/new` | start a new conversation; the current one stays saved |
+| `/history` | list the messages of this branch with their numbers |
+| `/edit N [TEXT]` | replace message N in a new branch; the original conversation stays in its branch |
+| `/branches` | list the branches of this conversation, the active one marked with `*` |
+| `/branch N` | continue branch N |
 | `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
 | `/document` | show the working document |
 | `/document undo` | undo the changes made to the document by the last answer |
@@ -453,6 +469,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
 | `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
 | `SENSAI_MEMORY_PATH` | `.sensai/memory.db` | SQLite file holding the long-term memory |
+| `SENSAI_FEATURE_BRANCHING` | `true` | edit past messages into branches, and keep an interrupted answer |
 | `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
@@ -486,6 +503,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `branching` | `/edit`, `/branches` and `/branch`, and keeping an interrupted answer; the branches stay saved |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 
 The features are on by default, except `web_search`, `code_exec` and `files`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
