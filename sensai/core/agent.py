@@ -4,6 +4,7 @@ from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approva
 from sensai.core.config import Config
 from sensai.core.document.document import DocumentError, Edit, Rejected
 from sensai.core.document.editor import DocumentEditor, model_editor
+from sensai.core.examples import ExampleLibrary, examples_message
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
@@ -14,6 +15,8 @@ from sensai.core.events import (
     DocumentFailedEvent,
     DoneEvent,
     Event,
+    ExamplesEvent,
+    ExamplesFailedEvent,
     GuardrailEvent,
     ReasoningStoppedEvent,
     SourcesEvent,
@@ -50,6 +53,7 @@ class Agent:
         persona: Persona | None = None,
         approver: Approver | None = None,
         editor: DocumentEditor | None = None,
+        examples: ExampleLibrary | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -59,6 +63,7 @@ class Agent:
         self.memory = ConversationMemory(config, self.client)
         self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
+        self.examples = examples
         self.reasoning: list[Reasoning] = []
         # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
         self.keeps_document = True
@@ -194,6 +199,15 @@ class Agent:
                 prompt = build_prompt(user_input, sources)
 
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
+        if self.examples is not None and self.config.features["examples"] and format is None:
+            try:
+                chosen = self.examples.closest(user_input, self.config.examples_k)
+            except LLMError as e:
+                yield ExamplesFailedEvent(str(e))
+                chosen = []
+            if chosen:
+                yield ExamplesEvent(chosen)
+                pending.insert(-1, {"role": "system", "content": examples_message(chosen)})
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
         # The schema constrains every token of the answer: the model could not call a tool.

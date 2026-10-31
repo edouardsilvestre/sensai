@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from sensai.core.document.document import EditReport
+from sensai.core.examples import Example
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
 from sensai.core.llm.ollama import ToolCall
@@ -52,6 +53,16 @@ class ThoughtEvent:
 @dataclass
 class ReasoningStoppedEvent:
     reason: str
+
+
+@dataclass
+class ExamplesEvent:
+    examples: list[Example]
+
+
+@dataclass
+class ExamplesFailedEvent:
+    message: str
 
 
 @dataclass
@@ -112,6 +123,8 @@ Event = (
     | GuardrailEvent
     | ThoughtEvent
     | ReasoningStoppedEvent
+    | ExamplesEvent
+    | ExamplesFailedEvent
     | DoneEvent
     | DocumentEvent
     | DocumentFailedEvent

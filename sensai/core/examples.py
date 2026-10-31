@@ -10,6 +10,14 @@ from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 
 
+_INSTRUCTIONS = """\
+Below are answers the user kept as good examples, to questions close to the next message. Answer it the same way:
+- cite the excerpts that support each claim, like the examples do;
+- say plainly what the documents do not say, instead of guessing;
+- keep the established facts apart from the hypotheses.
+The facts of the examples belong to other questions: never use them to answer the next message."""
+
+
 class ExampleError(Exception):
     pass
 
@@ -42,6 +50,29 @@ def make_example(question: str, answer: str, sources: list[SearchResult]) -> Exa
     return Example(question, answer, excerpts, datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
+def _escape(text: str) -> str:
+    return text.replace("</example", "<\\/example").replace("</excerpt", "<\\/excerpt")
+
+
+def _attribute(value: str) -> str:
+    return value.replace('"', "'")
+
+
+def _render(example: Example) -> str:
+    excerpts = []
+    for excerpt in example.excerpts:
+        attributes = f'id="{excerpt.number}" source="{_attribute(excerpt.source)}"'
+        if excerpt.location:
+            attributes += f' location="{_attribute(excerpt.location)}"'
+        excerpts.append(f"<excerpt {attributes}>\n{_escape(excerpt.text)}\n</excerpt>")
+    block = "<excerpts>\n" + "\n".join(excerpts) + "\n</excerpts>\n" if excerpts else ""
+    return f"<example>\n{block}Message: {_escape(example.question)}\nAnswer: {_escape(example.answer)}\n</example>"
+
+
+def examples_message(examples: list[Example]) -> str:
+    return _INSTRUCTIONS + "\n\n" + "\n".join(_render(example) for example in examples)
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
     return sum(x * y for x, y in zip(a, b)) / norm if norm else 0.0
@@ -72,7 +103,7 @@ def _parse(data: object) -> list[Example]:
 
 
 class ExampleLibrary:
-    def __init__(self, path: Path, embed: Callable[[str], list[float]], min_similarity: float = 0.6):
+    def __init__(self, path: Path, embed: Callable[[str], list[float]], min_similarity: float = 0.5):
         self.path = path
         self.embed = embed
         self.min_similarity = min_similarity
