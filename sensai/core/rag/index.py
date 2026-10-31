@@ -133,6 +133,9 @@ class DocumentIndex:
     def stats(self) -> IndexStats:
         return self.store.stats()
 
+    def fingerprint(self) -> str:
+        return self.store.fingerprint()
+
     def close(self) -> None:
         self.store.close()
 

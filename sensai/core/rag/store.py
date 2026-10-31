@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -238,6 +239,10 @@ class VectorStore:
             "SELECT (SELECT COUNT(*) FROM documents), (SELECT COUNT(*) FROM chunks)"
         ).fetchone()
         return IndexStats(documents, chunks, self.embed_model, self.dimensions)
+
+    def fingerprint(self) -> str:
+        documents = self._db.execute("SELECT path, sha256 FROM documents ORDER BY path").fetchall()
+        return hashlib.sha256(json.dumps(documents).encode()).hexdigest()
 
     def reset(self) -> None:
         with self._db:
