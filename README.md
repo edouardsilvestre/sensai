@@ -20,6 +20,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
 - 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
+- ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -172,6 +173,28 @@ Question 1: Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu 
 `reasoning.py` and `Agent._reason`: at each step, the model replies with a JSON object `{"thought", "action", "arguments"}` that Ollama is forced to follow (the `format` option of the chat API). The schema has one form per tool, with the arguments of that tool, plus `answer`: the model cannot invent a tool or an argument. A tool chosen by the model goes through the guardrails and the approval like any tool call, and its result is given back to the model for the next step; the thoughts go through the output guardrails before they are shown. Once the model picks `answer`, the final answer is streamed from the steps and their results, without tools. With indexed documents and the `rag` feature on, the reasoning can also call `search_documents`, which searches the documents again with the model's own words to follow a lead (the manager found in the statutes, then his transfers). The excerpts it finds are numbered after those of the first search, so that the answer can cite them, and they are listed with the sources and in `/sources`. As the actions come from the schema, the reasoning also works with models that cannot call tools, like `llama3`.
 
 The reasoning stops after `SENSAI_MAX_TOOL_ROUNDS` steps, or on a step that is not valid, and Sensai answers from what it found. Its quality depends on the model: a small model like `qwen2.5:1.5b` may write its thoughts in English, stop before following every lead, or misspell a name it copies (Nordbank became "Norbahn" in the answer above). The agents of `/review` show their thoughts but do not add them to `/reasoning`. An answer that follows a schema of its own, like `/json` or the verdict of the fact-checker, is given without reasoning.
+
+### Semantic cache
+
+A journalist often asks the same question again in other words, days later, in a new conversation. With the `cache` feature (on by default), Sensai keeps each answer with its question, and when a new question is close to one already answered, it offers the answer it kept:
+
+```
+> Quelle est la capitale de l'Australie ?
+La capitale de l'Australie est Sydney.
+
+> /new
+> Quelle ville est la capitale de l'Australie ?
+[cache] A close question was answered on 2026-10-31 at 18:07: "Quelle est la capitale de l'Australie ?" (similarity 99%)
+Use this answer? [y]es / [n]o: y
+[cache] Answer reused, the model was not called.
+La capitale de l'Australie est Sydney.
+```
+
+With `qwen2.5:1.5b`, an answer took 8.1 seconds and its reuse 0.6 seconds, the time to embed the new question. The answer above is also wrong, and the cache served it again as it was: the cache saves the model's time, it does not check what it says. `n` lets the model answer again, and `/cache clear` removes every answer kept.
+
+`cache.py`: `SemanticCache` embeds the question with `SENSAI_EMBED_MODEL` and keeps the vector, the answer, its sources and its date in a SQLite file at `SENSAI_CACHE_PATH`. A new question is compared to the questions kept in the same context by cosine similarity, and the closest one is offered when it reaches `SENSAI_CACHE_THRESHOLD` percent. The context is a hash of the model, the conversation sent to the model (the system prompt or the persona, the profile, the earlier turns), the indexed documents, the guardrail rules and the `rag`, `tools` and `reasoning` features: a follow-up question, another persona, a changed document or a new rule is another context, and is never answered from the cache. A cached answer is not checked again by the guardrails, so a rule added to protect a name never lets an answer kept before it show that name. Only the answers given from the documents alone are kept: an answer that called a tool (a web search, the memory, a search during the reasoning) depends on more than the question, and an answer stopped by a guardrail, empty or in JSON is not kept either. Like the approver, the confirmation is asked by the interface (`Agent.confirm_cache`): without it, the cache is not used.
+
+Serving the closest answer automatically above the threshold was considered and ruled out. With `qwen3-embedding:0.6b`, rephrasings of the same question scored between 0.911 and 0.974, but different questions scored up to 0.970: "Quel montant Nordbank a-t-elle viré à Marc Vidal ?" and "Quel montant Marc Vidal a-t-il viré à Nordbank ?" are 0.970 close, with opposite answers, and asking when instead of how much still scored 0.946. No threshold separates them, so the journalist decides, with the question kept and its similarity in front of them.
 
 ### Tools
 
@@ -355,6 +378,7 @@ Sources:
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/reasoning [N]` | list the questions reasoned about in this conversation, or show the steps of question N |
+| `/cache [clear]` | show how many answers the cache keeps and how often they were reused, or remove them all |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -480,11 +504,14 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
+| `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
 | `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
 | `SENSAI_MEMORY_PATH` | `.sensai/memory.db` | SQLite file holding the long-term memory |
+| `SENSAI_CACHE_PATH` | `.sensai/cache.db` | SQLite file holding the answers kept by the cache |
+| `SENSAI_CACHE_THRESHOLD` | `90` | similarity, in percent, from which a kept answer is offered (50-100) |
 | `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
@@ -520,6 +547,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
+| `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
 
 The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 

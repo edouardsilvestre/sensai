@@ -9,9 +9,12 @@ from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.approval import Approval
+from sensai.core.cache import CachedAnswer, CacheError, SemanticCache
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     AgentStartedEvent,
+    CacheFailedEvent,
+    CacheHitEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
@@ -36,6 +39,7 @@ from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
+from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
@@ -80,6 +84,7 @@ Commands:
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /reasoning [N]          list the questions reasoned about, or show the steps of question N
+  /cache [clear]          show the answers kept to reuse, or remove them all
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
@@ -209,6 +214,7 @@ class Session:
     profile: Profile | None = None
     always_allowed: set[str] = field(default_factory=set)
     personas: dict[str, Persona] = field(default_factory=dict)
+    cache: SemanticCache | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -234,6 +240,21 @@ def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
                 print()
                 why = ""
             return Approval(False, why)
+
+
+def confirm_cached(cached: CachedAnswer) -> bool:
+    when = cached.created_at.astimezone().strftime("%Y-%m-%d at %H:%M")
+    print(f'[cache] A close question was answered on {when}: "{cached.question}" (similarity {cached.similarity:.0%})')
+    while True:
+        try:
+            answer = input("Use this answer? [y]es / [n]o: ").strip().lower()
+        except EOFError:
+            print()
+            return False
+        if answer in ALLOW_ANSWERS:
+            return True
+        if answer in REFUSE_ANSWERS:
+            return False
 
 
 def prompt(session: Session) -> str:
@@ -308,6 +329,10 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                     mid_line = False
                 sources = []
                 print(f"\n── {event.persona.id} ({event.persona.name}) ──")
+            elif isinstance(event, CacheHitEvent):
+                print("[cache] Answer reused, the model was not called.")
+            elif isinstance(event, CacheFailedEvent):
+                warning(f"The cache could not be used: {event.message}")
             elif isinstance(event, ReviewDoneEvent):
                 rounds = plural(event.rounds, "check")
                 if event.approved:
@@ -666,6 +691,8 @@ def feature_command(session: Session, argument: str) -> None:
             session.agent.retriever = session.index
         else:
             print("No documents indexed yet: /ingest PATH to search your files.")
+    if name == "cache" and value == "on" and session.cache is None:
+        session.cache = session.agent.cache = load_cache(config, session.agent.client)
 
 
 def reload_tools(session: Session) -> None:
@@ -750,6 +777,29 @@ def reasoning_command(session: Session, argument: str) -> None:
             print(textwrap.indent(step.result.content, "    "))
 
 
+def cache_command(session: Session, argument: str) -> None:
+    if argument not in ("", "clear"):
+        error("Usage: /cache [clear]")
+        return
+    config, cache = session.config, session.cache
+    if cache is None:
+        if config.features["cache"]:
+            print("The cache could not be opened: /feature cache on to try again.")
+        else:
+            print("The cache feature is off: /feature cache on to reuse the answers to close questions.")
+        return
+    if argument == "clear":
+        print(f"Cache cleared: {plural(cache.clear(), 'answer')} removed.")
+        return
+    stats = cache.stats()
+    print(
+        f"Cache: {plural(stats.answers, 'answer')} kept, reused {plural(stats.uses, 'time')} "
+        f"({config.cache_path}, threshold {config.cache_threshold}%)."
+    )
+    if not config.features["cache"]:
+        print("The cache feature is off: /feature cache on to reuse them.")
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -802,6 +852,8 @@ def handle_command(session: Session, line: str) -> bool:
         approval_command(session, argument.lower())
     elif name == "/reasoning":
         reasoning_command(session, argument)
+    elif name == "/cache":
+        cache_command(session, argument.lower())
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -826,6 +878,16 @@ def load_existing_index(config: Config, client: OllamaClient) -> DocumentIndex |
         return open_index(config, client)
     except (LLMError, StoreError) as e:
         warning(f"Document search disabled: {e}")
+        return None
+
+
+def load_cache(config: Config, client: OllamaClient) -> SemanticCache | None:
+    try:
+        client.ensure_model(config.embed_model)
+        embedder = Embedder(client, config.embed_model, max_chars=config.chunk_size)
+        return SemanticCache(config.cache_path, embedder.embed_query, config.cache_threshold / 100)
+    except (LLMError, CacheError) as e:
+        warning(f"Cache disabled: {e}")
         return None
 
 
@@ -893,7 +955,10 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
+    if config.features["cache"]:
+        session.cache = agent.cache = load_cache(config, agent.client)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
+    agent.confirm_cache = confirm_cached
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
     disabled = [name for name, enabled in config.features.items() if not enabled]
     if disabled:
@@ -904,6 +969,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             print(f"Document search: {stats.documents} documents indexed ({stats.chunks} chunks).")
         else:
             print("No documents indexed yet: /ingest PATH to search your files.")
+    if session.cache is not None:
+        print(f"Cache: {plural(session.cache.stats().answers, 'answer')} kept. /cache to see them.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
@@ -927,6 +994,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     finally:
         if session.index is not None:
             session.index.close()
+        if session.cache is not None:
+            session.cache.close()
 
 
 def main(argv: list[str] | None = None) -> int:
