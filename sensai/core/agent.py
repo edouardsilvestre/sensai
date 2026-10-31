@@ -159,6 +159,7 @@ class Agent:
             "model": self.config.model,
             "messages": self.memory.messages(),
             "documents": fingerprint() if fingerprint and self.config.features["rag"] else None,
+            "guardrails": self.active_guardrails.fingerprint(),
             "features": {name: self.config.features[name] for name in ("rag", "tools", "reasoning")},
         }
         return hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()

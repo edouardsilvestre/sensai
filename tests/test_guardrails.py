@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -181,3 +184,39 @@ def test_unreadable_file_is_an_error(tmp_path):
     path.write_text("{rules: [", encoding="utf-8")
     with pytest.raises(GuardrailError, match="Cannot read the guardrails"):
         load_rules(path)
+
+
+def test_the_same_rules_have_the_same_fingerprint():
+    assert guard(SOURCE).fingerprint() == guard(dict(SOURCE)).fingerprint()
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {**SOURCE, "terms": ["Claire Benoît", "PHOENIX", "Marc Vidal"]},
+        {**SOURCE, "on": ["output"]},
+        {**SOURCE, "action": "block"},
+        {**SOURCE, "replacement": "[X]"},
+    ],
+)
+def test_a_changed_rule_changes_the_fingerprint(changed):
+    assert guard(changed).fingerprint() != guard(SOURCE).fingerprint()
+
+
+def test_an_added_rule_changes_the_fingerprint():
+    assert guard(SOURCE, *DEFAULT_RULES).fingerprint() != guard(SOURCE).fingerprint()
+
+
+def test_the_fingerprint_is_the_same_in_every_process():
+    code = (
+        "from sensai.core.guardrails.rules import DEFAULT_RULES, Guardrails, parse_rules; "
+        f"print(Guardrails(parse_rules(DEFAULT_RULES + [{SOURCE!r}])).fingerprint())"
+    )
+    prints = {
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout
+        for seed in ("1", "2", "3")
+    }
+    assert len(prints) == 1

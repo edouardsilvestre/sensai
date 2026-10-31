@@ -147,6 +147,29 @@ def test_changed_documents_are_another_context(config, client, cache):
     assert confirm.asked == []
 
 
+SOURCE_RULE = {"name": "source", "terms": ["Marc Vidal"], "on": ["output"], "replacement": "[SOURCE]"}
+
+
+def test_changed_guardrails_are_another_context(config, client, cache):
+    confirm = Confirm()
+    agent = make_agent(config, client, cache, confirm)
+    list(agent.run(QUESTION))
+    new_conversation(agent)
+    agent.guardrails = Guardrails(parse_rules([SOURCE_RULE]))
+    events = list(agent.run(QUESTION))
+    assert confirm.asked == [] and text(events) == "[SOURCE] dirige Orion [1]. "
+
+
+def test_turning_the_guardrails_off_is_another_context(config, client, cache):
+    confirm = Confirm()
+    agent = make_agent(config, client, cache, confirm, guardrails=Guardrails(parse_rules([SOURCE_RULE])))
+    list(agent.run(QUESTION))
+    new_conversation(agent)
+    config.features["guardrails"] = False
+    list(agent.run(QUESTION))
+    assert confirm.asked == []
+
+
 def test_an_answer_that_used_a_tool_is_not_kept(config, client, cache):
     def lookup(query: str) -> str:
         """
