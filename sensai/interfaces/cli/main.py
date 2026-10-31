@@ -4,7 +4,7 @@ import shlex
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 from sensai.core.agent import Agent, EmptyInputError
@@ -300,7 +300,12 @@ def chat_turn(session: Session, line: str) -> None:
     show_events(session, session.agent.run(line))
 
 
-def show_events(session: Session, events: Generator[Event, None, None], structured: bool = False) -> None:
+def show_events(
+    session: Session,
+    events: Generator[Event, None, None],
+    structured: bool = False,
+    interrupt: Callable[[], bool] | None = None,
+) -> None:
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -367,7 +372,7 @@ def show_events(session: Session, events: Generator[Event, None, None], structur
     except KeyboardInterrupt:
         # Closes the connection too: Ollama stops generating.
         events.close()
-        if session.config.features["branching"] and session.agent.interrupt():
+        if session.config.features["branching"] and (interrupt or session.agent.interrupt)():
             print("\n[interrupted] What was written is kept: tell the model how to go on, or /edit to change the question.")
         else:
             print("\n[interrupted]")
@@ -488,7 +493,7 @@ def edit_command(session: Session, argument: str) -> None:
         return
     memory = session.agent.memory
     number, _, text = argument.partition(" ")
-    if not number.isdigit():
+    if not number.isdecimal():
         error("Usage: /edit N [TEXT], /history gives the numbers")
         return
     if not 1 <= int(number) <= len(memory.turns):
@@ -505,7 +510,7 @@ def edit_command(session: Session, argument: str) -> None:
         if not text.strip():
             return
     previous = memory.branch.number
-    memory.fork(number, " ".join(text.split()))
+    memory.fork(number)
     print(f"[branch] Branch {memory.branch.number}, from message {number} of branch {previous}, which stays as it was.")
     forked = memory.turns
     chat_turn(session, text)
@@ -534,7 +539,7 @@ def branch_command(session: Session, argument: str) -> None:
     memory = session.agent.memory
     if not argument:
         print(f"On branch {memory.branch.number}. /branches lists them.")
-    elif not argument.isdigit():
+    elif not argument.isdecimal():
         error("Usage: /branch N, /branches gives the numbers")
     elif int(argument) == memory.branch.number:
         print(f"Already on branch {argument}.")
@@ -808,7 +813,7 @@ def review_command(session: Session, argument: str) -> None:
         error(f"{e} (in {session.config.personas_dir}).")
         return
     session.last_sources = []
-    show_events(session, review.run(argument))
+    show_events(session, review.run(argument), interrupt=review.interrupt)
 
 
 def print_structured(answer: str, sources: list[SearchResult]) -> None:

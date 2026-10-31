@@ -89,6 +89,9 @@ class ConversationMemory:
     ) -> None:
         self.turns = self.turns + [Turn(user, assistant, list(citations or []), self.document.markdown())]
         self.last_usage = usage
+        # The first message of a branch names it, as it was kept: the guardrails went through it.
+        if self.branch.parent is not None and not self.branch.label:
+            self.branch.label = " ".join(user.split())
 
     def clear(self) -> None:
         self.summary, self.turns, self.last_usage = "", [], None
@@ -105,14 +108,14 @@ class ConversationMemory:
     def branches(self) -> list[Branch]:
         return sorted([*self.other_branches, self._active()], key=lambda branch: branch.number)
 
-    def fork(self, number: int, label: str) -> None:
+    def fork(self, number: int) -> None:
         """Starts a branch just before the turn `number` (from 1), which the active branch keeps, like all its turns."""
         turn = self.turns[number - 1]
         # Sessions saved before the branches do not have the document of each turn.
         document = Document(turn.document) if turn.document else Document()
         branch = Branch(
-            max(branch.number for branch in self.branches()) + 1, self.branch.number, number, label,
-            self.summary, self.turns[: number - 1], document,
+            max(branch.number for branch in self.branches()) + 1, self.branch.number, number,
+            summary=self.summary, turns=self.turns[: number - 1], document=document,
         )
         self.other_branches.append(self._active())
         self._activate(branch)

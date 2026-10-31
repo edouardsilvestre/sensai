@@ -34,6 +34,11 @@ STOPPED = "[answer stopped by a guardrail]"
 INTERRUPTED = "[answer interrupted by the user]"
 
 
+def cut_answer(text: str) -> str:
+    """What the history keeps of an answer the user interrupted."""
+    return "\n".join(filter(None, [text, INTERRUPTED]))
+
+
 class EmptyInputError(ValueError):
     pass
 
@@ -67,6 +72,8 @@ class Agent:
         # The turn being answered and the text shown so far, for `interrupt`.
         self.answering: tuple[str, list[str]] | None = None
         self.shown: list[str] = []
+        # The last question sent to the model, as the guardrails let it through.
+        self.asked = ""
         self.persona: Persona | None = None
         if persona is not None:
             self.set_persona(persona)
@@ -91,7 +98,7 @@ class Agent:
         if self.answering is None:
             return False
         (user_input, citations), self.answering = self.answering, None
-        self.memory.commit(user_input, "\n".join(filter(None, ["".join(self.shown), INTERRUPTED])), citations)
+        self.memory.commit(user_input, cut_answer("".join(self.shown).lstrip()), citations)
         return True
 
     def _approve(self, call: ToolCall) -> Approval | None:
@@ -128,7 +135,24 @@ class Agent:
         if report:
             yield DocumentEvent(report)
 
+    def _kept_result(self, call: ToolCall, result: ToolResult, guardrails: Guardrails) -> str:
+        """
+        A tool result as an interrupted turn keeps it, for the model to go on from it: unlike an answer, this one reaches
+        the history and the saved session, so it goes through the same rules as an answer.
+        """
+        output = guardrails.output_filter()
+        content = output.feed(result.content) + output.close()
+        return f"\n[{call.name}] {'result withheld by a guardrail' if output.blocked else content}\n"
+
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
+        try:
+            yield from self._answer(user_input, format)
+        except Exception:
+            # Unlike an interruption, a failure leaves nothing to keep.
+            self.answering, self.shown = None, []
+            raise
+
+    def _answer(self, user_input: str, format: dict | None) -> Iterator[Event]:
         self.answering, self.shown = None, []
         user_input = user_input.strip()
         if not user_input:
@@ -153,6 +177,7 @@ class Agent:
                 prompt = build_prompt(user_input, sources)
 
         # A JSON answer cut halfway is of no use to anyone: only a prose answer is kept.
+        self.asked = user_input
         self.answering = None if format else (user_input, [source.citation for source in sources])
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         usage = Usage()
@@ -162,7 +187,7 @@ class Agent:
         # After `max_tool_rounds` calls that requested tools, the next call has to answer.
         max_rounds = self.config.max_tool_rounds
         for round_number in range(max_rounds + 1):
-            answer = self.shown = []
+            answer: list[str] = []
             calls: list[ToolCall] = []
             tools = functions if round_number < max_rounds else []
             output = guardrails.output_filter()
@@ -173,12 +198,14 @@ class Agent:
                 shown = output.feed(chunk)
                 if shown:
                     answer.append(shown)
+                    self.shown.append(shown)
                     yield TokenEvent(shown)
                 if output.blocked:
                     break
             shown = output.close()
             if shown:
                 answer.append(shown)
+                self.shown.append(shown)
                 yield TokenEvent(shown)
             for hit in output.hits.values():
                 yield GuardrailEvent(hit)
@@ -208,6 +235,7 @@ class Agent:
                     result = self.tools.execute(call) if approval is None or approval.approved else refusal(approval)
                 yield ToolResultEvent(call, result)
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
+                self.shown.append(self._kept_result(call, result, guardrails))
 
         content = "".join(answer)
         self.answering = None

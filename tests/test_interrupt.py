@@ -5,14 +5,19 @@ from sensai.core.agent import INTERRUPTED, Agent
 from sensai.core.config import DEFAULT_PERSONAS_DIR
 from sensai.core.events import TokenEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
+from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.memory.sessions import SessionStore
+from sensai.core.orchestrator import Review
 from sensai.core.persona import load_personas
 from sensai.core.structured import ANSWER_SCHEMA
+from sensai.core.tools.registry import ToolRegistry
 from sensai.interfaces.cli.main import Session, chat_turn, handle_command, json_command
 
 
 # Long enough for the guardrails filter, which holds back the last 80 characters, to show the beginning.
 LONG_ANSWER = " ".join(f"word{number}" for number in range(60))
+PERSONAS = load_personas(DEFAULT_PERSONAS_DIR)
+APPROVED = '{"claims": [{"claim": "Orion paid Delta", "verdict": "supported", "reason": "the mail says so"}]}'
 
 
 class InterruptedClient(FakeClient):
@@ -29,6 +34,55 @@ class InterruptedClient(FakeClient):
                 self.words = None
                 raise KeyboardInterrupt
             yield chunk
+
+
+class SecondRoundClient(FakeClient):
+    """Writes a text and calls a tool, then the user presses Ctrl+C in the middle of the next answer."""
+
+    def __init__(self):
+        super().__init__()
+        self.rounds = 0
+
+    def chat_stream(self, *args, tool_calls=None, **kwargs):
+        self.rounds += 1
+        if self.rounds == 1:
+            tool_calls.append(ToolCall("lookup", {"query": "Alvor"}))
+            yield "Let me check."
+        elif self.rounds == 2:
+            yield "second " * 30
+            raise KeyboardInterrupt
+        else:
+            yield from super().chat_stream(*args, tool_calls=tool_calls, **kwargs)
+
+
+class ReviewClient(FakeClient):
+    """Each chat gets the next answer. The user presses Ctrl+C in the middle of the last one."""
+
+    def __init__(self, answers: list[str]):
+        super().__init__()
+        self.answers = list(answers)
+
+    def chat_stream(self, *args, **kwargs):
+        self.answer = self.answers.pop(0)
+        yield from super().chat_stream(*args, **kwargs)
+        if not self.answers:
+            raise KeyboardInterrupt
+
+
+class FailingClient(FakeClient):
+    def chat_stream(self, *args, **kwargs):
+        yield from super().chat_stream(*args, **kwargs)
+        raise LLMError("Lost connection")
+
+
+def lookup(query: str) -> str:
+    """
+    Look something up.
+
+    Args:
+      query: What to look up
+    """
+    return f"{query} is registered in Lisbon."
 
 
 def run_until_interrupted(agent: Agent, question: str, schema: dict | None = None) -> list:
@@ -88,6 +142,52 @@ def test_only_what_the_guardrails_let_through_is_kept(config):
     agent.interrupt()
     assert agent.memory.turns[0].assistant == f"{shown(events)}\n{INTERRUPTED}"
     assert "[SOURCE]" in shown(events) and "Claire" not in agent.memory.turns[0].assistant
+
+
+def test_the_turn_keeps_what_came_before_the_tool_call(config):
+    agent = Agent(config, SecondRoundClient(), tools=ToolRegistry([lookup]))
+    run_until_interrupted(agent, "Where is Alvor?")
+    agent.interrupt()
+    kept = agent.memory.turns[0].assistant
+    assert kept.startswith("Let me check.\n[lookup] Alvor is registered in Lisbon.\n")
+    assert "second second" in kept and kept.endswith(INTERRUPTED)
+
+
+def test_the_next_message_can_use_the_tool_result(config):
+    client = SecondRoundClient()
+    agent = Agent(config, client, tools=ToolRegistry([lookup]))
+    run_until_interrupted(agent, "Where is Alvor?")
+    agent.interrupt()
+    list(agent.run("Go on"))
+    assert "Alvor is registered in Lisbon." in client.chats[-1][0][-2]["content"]
+
+
+def test_a_kept_tool_result_goes_through_the_guardrails(config):
+    rule = {"name": "city", "terms": ["Lisbon"], "on": ["output"], "replacement": "[CITY]"}
+    guardrails = Guardrails(parse_rules([rule]))
+    agent = Agent(config, SecondRoundClient(), tools=ToolRegistry([lookup]), guardrails=guardrails)
+    run_until_interrupted(agent, "Where is Alvor?")
+    agent.interrupt()
+    kept = agent.memory.turns[0].assistant
+    assert "Alvor is registered in [CITY]." in kept and "Lisbon" not in kept
+
+
+def test_a_tool_result_a_guardrail_blocks_is_not_kept(config):
+    rule = {"name": "city", "terms": ["Lisbon"], "on": ["output"], "action": "block"}
+    guardrails = Guardrails(parse_rules([rule]))
+    agent = Agent(config, SecondRoundClient(), tools=ToolRegistry([lookup]), guardrails=guardrails)
+    run_until_interrupted(agent, "Where is Alvor?")
+    agent.interrupt()
+    kept = agent.memory.turns[0].assistant
+    assert "[lookup] result withheld by a guardrail" in kept and "registered" not in kept
+
+
+def test_a_failed_answer_leaves_nothing_to_interrupt(config):
+    agent = Agent(config, FailingClient())
+    with pytest.raises(LLMError):
+        list(agent.run("Who approved?"))
+    assert agent.answering is None and agent.shown == []
+    assert not agent.interrupt() and agent.memory.turns == []
 
 
 def test_an_interrupted_answer_does_not_update_the_document(config):
@@ -151,11 +251,62 @@ def test_the_interrupted_turn_is_saved(config, tmp_path):
     assert store.list()[0].turns == 1
 
 
-def test_an_interrupted_review_leaves_the_conversation_as_it_was(config, capsys):
-    session = Session(config, Agent(config, InterruptedClient(1)), personas=load_personas(DEFAULT_PERSONAS_DIR))
+def test_an_interrupted_review_keeps_what_the_investigator_wrote(config, capsys):
+    session = Session(config, Agent(config, InterruptedClient(30)), personas=PERSONAS)
+    handle_command(session, "/review Who approved?")
+    turn = session.agent.memory.turns[0]
+    assert turn.user == "Who approved?"
+    assert turn.assistant.startswith("word0 word1 ") and turn.assistant.endswith(INTERRUPTED)
+    assert "[interrupted] What was written is kept" in capsys.readouterr().out
+
+
+def test_a_review_interrupted_during_the_check_keeps_the_answer_of_the_investigator(config):
+    client = ReviewClient(["Orion paid Delta.", APPROVED])
+    session = Session(config, Agent(config, client), personas=PERSONAS)
+    handle_command(session, "/review Who paid?")
+    assert session.agent.memory.turns[0].assistant == f"Orion paid Delta. \n{INTERRUPTED}"
+
+
+def test_a_review_interrupted_during_the_edit_keeps_the_text_of_the_editor(config):
+    client = ReviewClient(["Orion paid Delta.", APPROVED, LONG_ANSWER])
+    session = Session(config, Agent(config, client), personas=PERSONAS)
+    handle_command(session, "/review Who paid?")
+    assistant = session.agent.memory.turns[0].assistant
+    assert assistant.startswith("word0 word1 ") and assistant.endswith(INTERRUPTED)
+    assert len(session.agent.memory.turns) == 1 and client.edit_requests == []
+
+
+def test_an_interrupted_review_keeps_the_question_as_the_guardrails_left_it(config):
+    rule = {"name": "source", "terms": ["Claire"], "on": ["input"], "replacement": "[SOURCE]"}
+    agent = Agent(config, InterruptedClient(30), guardrails=Guardrails(parse_rules([rule])))
+    session = Session(config, agent, personas=PERSONAS)
+    handle_command(session, "/review Who is Claire?")
+    assert agent.memory.turns[0].user == "Who is [SOURCE]?"
+
+
+def test_a_finished_review_leaves_nothing_to_interrupt(config):
+    agent = Agent(config, FakeClient(APPROVED))
+    review = Review(agent, PERSONAS)
+    list(review.run("Who paid?"))
+    assert not review.interrupt() and len(agent.memory.turns) == 1
+
+
+def test_with_the_feature_off_an_interrupted_review_keeps_nothing(config, capsys):
+    config.features["branching"] = False
+    session = Session(config, Agent(config, InterruptedClient(30)), personas=PERSONAS)
     handle_command(session, "/review Who approved?")
     assert session.agent.memory.turns == []
-    assert "[interrupted]" in capsys.readouterr().out
+    assert "kept" not in capsys.readouterr().out
+
+
+def test_a_failed_turn_is_not_kept_by_a_review_interrupted_later(config):
+    client = InterruptedClient(30)
+    session = Session(config, Agent(config, client), personas=PERSONAS)
+    session.agent.client = FailingClient()
+    chat_turn(session, "First question")
+    session.agent.client = client
+    handle_command(session, "/review Second question")
+    assert [turn.user for turn in session.agent.memory.turns] == ["Second question"]
 
 
 def test_an_interrupted_json_command_keeps_nothing(config, capsys):

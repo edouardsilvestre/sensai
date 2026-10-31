@@ -66,7 +66,13 @@ def test_edit_can_be_cancelled(session, monkeypatch, answer):
 
 @pytest.mark.parametrize(
     ("argument", "message"),
-    [("", "Usage: /edit N"), ("two text", "Usage: /edit N"), ("0 text", "No message 0"), ("9 text", "No message 9")],
+    [
+        ("", "Usage: /edit N"),
+        ("two text", "Usage: /edit N"),
+        ("\u00b2 text", "Usage: /edit N"),
+        ("0 text", "No message 0"),
+        ("9 text", "No message 9"),
+    ],
 )
 def test_invalid_edit(session, capsys, argument, message):
     handle_command(session, f"/edit {argument}")
@@ -90,6 +96,17 @@ def test_an_edit_the_guardrails_redact_keeps_its_branch(config, client):
     chat_turn(session, "First question")
     handle_command(session, "/edit 1 Who is Claire?")
     assert session.agent.memory.branch.number == 2 and questions(session) == ["Who is [SOURCE]?"]
+
+
+def test_the_guardrails_also_apply_to_the_name_of_the_branch(config, client, tmp_path, capsys):
+    rule = {"name": "source", "terms": ["Claire"], "on": ["input"], "replacement": "[SOURCE]"}
+    store = SessionStore(tmp_path)
+    session = Session(config, Agent(config, client, guardrails=Guardrails(parse_rules([rule]))), store=store)
+    chat_turn(session, "First question")
+    handle_command(session, "/edit 1 Who is Claire?")
+    handle_command(session, "/branches")
+    assert "Who is [SOURCE]?" in capsys.readouterr().out
+    assert "Claire" not in (tmp_path / f"{session.session_id}.json").read_text(encoding="utf-8")
 
 
 def test_a_failed_edit_makes_no_branch(session, client, monkeypatch, capsys):
@@ -119,7 +136,9 @@ def test_branch_shows_the_active_branch(session, capsys):
     assert "Already on branch 1." in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(("argument", "message"), [("7", "No branch 7"), ("x", "Usage: /branch N")])
+@pytest.mark.parametrize(
+    ("argument", "message"), [("7", "No branch 7"), ("x", "Usage: /branch N"), ("\u00b2", "Usage: /branch N")]
+)
 def test_invalid_branch(session, capsys, argument, message):
     handle_command(session, f"/branch {argument}")
     assert message in capsys.readouterr().err
