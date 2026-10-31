@@ -40,9 +40,22 @@ def step(**fields) -> str:
 
 
 def test_the_schema_only_allows_the_tools_and_the_answer():
-    schema = step_schema(ACTIONS)
-    assert schema["properties"]["action"]["enum"] == ["search_documents", "web_search", ANSWER]
-    assert schema["required"] == ["thought", "action", "arguments"]
+    forms = step_schema(ToolRegistry([search_documents, COMPANY]))["anyOf"]
+    assert [form["properties"]["action"] for form in forms] == [
+        {"const": "search_documents"}, {"const": "lookup_company"}, {"const": ANSWER}
+    ]
+    assert all(form["required"] == ["thought", "action", "arguments"] for form in forms)
+
+
+def test_each_tool_only_takes_its_own_arguments():
+    search, company, answer = (form["properties"]["arguments"] for form in step_schema(
+        ToolRegistry([search_documents, COMPANY]))["anyOf"])
+    assert search == {
+        "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
+        "additionalProperties": False,
+    }
+    assert company == {**COMPANY.parameters, "additionalProperties": False}
+    assert answer == {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 def test_a_step_is_read_from_the_reply():

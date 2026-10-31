@@ -104,7 +104,7 @@ class Agent:
         if self.retriever is not None and self.config.features["rag"]:
             tools = tools.extended([DocumentSearch(self.retriever, self.config.rag_top_k).search_documents])
         actions = tools.names()
-        schema = step_schema(actions)
+        schema = step_schema(tools)
         messages = pending[:-1] + [{"role": "system", "content": instructions(tools)}] + pending[-1:]
         for number in range(1, self.config.max_tool_rounds + 1):
             reply = self.client.chat(self.config.model, messages, options, think=self.config.think, format=schema)

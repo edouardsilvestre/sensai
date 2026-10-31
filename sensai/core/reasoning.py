@@ -68,16 +68,21 @@ class Reasoning:
         return _ANSWER.format(steps="\n".join(lines) or "none")
 
 
-def step_schema(actions: list[str]) -> dict:
+def _form(action: str, arguments: dict) -> dict:
     return {
         "type": "object",
         "properties": {
             "thought": {"type": "string"},
-            "action": {"type": "string", "enum": [*actions, ANSWER]},
-            "arguments": {"type": "object"},
+            "action": {"const": action},
+            "arguments": {**arguments, "additionalProperties": False},
         },
         "required": ["thought", "action", "arguments"],
     }
+
+
+def step_schema(tools: ToolRegistry) -> dict:
+    forms = [_form(name, arguments) for name, arguments in tools.arguments_schemas().items()]
+    return {"anyOf": [*forms, _form(ANSWER, {"type": "object", "properties": {}})]}
 
 
 def instructions(tools: ToolRegistry) -> str:

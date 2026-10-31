@@ -48,6 +48,19 @@ def _name(tool: Tool) -> str:
     return tool.name if isinstance(tool, SchemaTool) else tool.__name__
 
 
+_JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
+
+
+def _arguments_schema(function: Callable) -> dict:
+    parameters = inspect.signature(function).parameters.values()
+    properties = {}
+    for parameter in parameters:
+        json_type = _JSON_TYPES.get(parameter.annotation)
+        properties[parameter.name] = {"type": json_type} if json_type else {}
+    required = [parameter.name for parameter in parameters if parameter.default is inspect.Parameter.empty]
+    return {"type": "object", "properties": properties, "required": required}
+
+
 def requires_approval(reason: str) -> Callable[[Tool], Tool]:
     def mark(tool: Tool) -> Tool:
         tool.approval_reason = reason
@@ -91,6 +104,12 @@ class ToolRegistry:
             else:
                 parameters[name] = list(inspect.signature(tool).parameters)
         return parameters
+
+    def arguments_schemas(self) -> dict[str, dict]:
+        return {
+            name: tool.parameters if isinstance(tool, SchemaTool) else _arguments_schema(tool)
+            for name, tool in self._tools.items()
+        }
 
     def approval_reason(self, name: str) -> str | None:
         return getattr(self._tools.get(name), "approval_reason", None)

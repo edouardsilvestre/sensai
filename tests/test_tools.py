@@ -210,5 +210,21 @@ def test_extended_adds_tools_and_keeps_the_registry_as_it_is():
     assert registry.names() == ["echo"]
 
 
+def untyped(note, pages: list, ratio: float = 0.5, strict: bool = False) -> str:
+    return note
+
+
+def test_the_arguments_schema_comes_from_the_signature_or_the_schema_tool():
+    schemas = ToolRegistry([echo, untyped, schema_add()]).arguments_schemas()
+    assert schemas["echo"] == {
+        "type": "object", "properties": {"text": {"type": "string"}, "times": {"type": "integer"}}, "required": ["text"]
+    }
+    assert schemas["untyped"]["properties"] == {
+        "note": {}, "pages": {"type": "array"}, "ratio": {"type": "number"}, "strict": {"type": "boolean"}
+    }
+    assert schemas["untyped"]["required"] == ["note", "pages"]
+    assert schemas["add"] == PARAMETERS
+
+
 def test_parameters_lists_the_arguments_of_each_tool():
     assert ToolRegistry([echo, schema_add()]).parameters() == {"echo": ["text", "times"], "add": ["a", "b"]}

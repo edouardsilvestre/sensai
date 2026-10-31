@@ -119,8 +119,7 @@ def test_the_steps_only_offer_the_enabled_tools(reasoning_config, client):
     list(agent.run("Qui dirige Orion ?"))
     reasoning_config.features["tools"] = False
     list(agent.run("Et Nordbank ?"))
-    enums = [schema["properties"]["action"]["enum"] for _, schema in client.steps_seen]
-    assert enums == [["search_documents", ANSWER], [ANSWER]]
+    assert offered(client) == [["search_documents", ANSWER], [ANSWER]]
 
 
 def test_a_critical_tool_waits_for_the_users_approval(reasoning_config, client):
@@ -220,7 +219,7 @@ class KeywordRetriever:
 
 
 def offered(client) -> list[list[str]]:
-    return [schema["properties"]["action"]["enum"] for _, schema in client.steps_seen]
+    return [[form["properties"]["action"]["const"] for form in schema["anyOf"]] for _, schema in client.steps_seen]
 
 
 def test_the_reasoning_follows_a_lead_through_the_documents(reasoning_config, client):
