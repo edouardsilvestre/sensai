@@ -38,6 +38,7 @@ FEATURES = {
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
     "branching": Feature("edit a past message into a new branch, and keep an interrupted answer to redirect it"),
+    "reasoning": Feature("reason step by step and show each step before answering", default=False),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 

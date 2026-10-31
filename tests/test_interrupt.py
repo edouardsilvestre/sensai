@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from conftest import FakeClient
@@ -9,6 +11,7 @@ from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.memory.sessions import SessionStore
 from sensai.core.orchestrator import Review
 from sensai.core.persona import load_personas
+from sensai.core.rag.models import SearchResult
 from sensai.core.structured import ANSWER_SCHEMA
 from sensai.core.tools.registry import ToolRegistry
 from sensai.interfaces.cli.main import Session, chat_turn, handle_command, json_command
@@ -83,6 +86,20 @@ def lookup(query: str) -> str:
       query: What to look up
     """
     return f"{query} is registered in Lisbon."
+
+
+class Excerpts:
+    """The first search finds the statutes, the reasoning finds the statement."""
+
+    STATUTES = SearchResult(chunk_id=1, text="Orion statutes", location="p. 1", source="statutes.pdf", description="", score=0.9)
+    STATEMENT = SearchResult(chunk_id=2, text="Vidal statement", location="p. 2", source="statement.pdf", description="", score=0.9)
+
+    def search(self, query: str, k: int) -> list[SearchResult]:
+        return [self.STATEMENT if "Vidal" in query else self.STATUTES]
+
+
+def step(thought: str, action: str = "answer", **arguments) -> str:
+    return json.dumps({"thought": thought, "action": action, "arguments": arguments})
 
 
 def run_until_interrupted(agent: Agent, question: str, schema: dict | None = None) -> list:
@@ -180,6 +197,45 @@ def test_a_tool_result_a_guardrail_blocks_is_not_kept(config):
     agent.interrupt()
     kept = agent.memory.turns[0].assistant
     assert "[lookup] result withheld by a guardrail" in kept and "registered" not in kept
+
+
+def test_the_tool_results_of_the_reasoning_are_kept(config):
+    config.features["reasoning"] = True
+    client = InterruptedClient(30)
+    client.steps = [step("I need the address.", "lookup", query="Alvor"), step("I have it.")]
+    agent = Agent(config, client, tools=ToolRegistry([lookup]))
+    run_until_interrupted(agent, "Where is Alvor?")
+    agent.interrupt()
+    kept = agent.memory.turns[0].assistant
+    assert "[lookup] Alvor is registered in Lisbon." in kept and "word0 word1 " in kept and kept.endswith(INTERRUPTED)
+
+
+def test_ctrl_c_between_two_steps_of_the_reasoning_keeps_what_was_found(config):
+    config.features["reasoning"] = True
+    client = FakeClient()
+    client.steps = [step("I need the address.", "lookup", query="Alvor")]
+    original = client.chat
+
+    def chat(*args, **kwargs):
+        if not client.steps:
+            raise KeyboardInterrupt
+        return original(*args, **kwargs)
+
+    client.chat = chat
+    agent = Agent(config, client, tools=ToolRegistry([lookup]))
+    run_until_interrupted(agent, "Where is Alvor?")
+    agent.interrupt()
+    assert agent.memory.turns[0].assistant.startswith("[lookup] Alvor is registered in Lisbon.")
+
+
+def test_an_interrupted_turn_cites_the_excerpts_of_the_reasoning(config):
+    config.features["reasoning"] = True
+    client = InterruptedClient(30)
+    client.steps = [step("Who is he?", "search_documents", query="Vidal"), step("I have it.")]
+    agent = Agent(config, client, retriever=Excerpts())
+    run_until_interrupted(agent, "Who manages Orion?")
+    agent.interrupt()
+    assert agent.memory.turns[0].citations == [Excerpts.STATUTES.citation, Excerpts.STATEMENT.citation]
 
 
 def test_a_failed_answer_leaves_nothing_to_interrupt(config):

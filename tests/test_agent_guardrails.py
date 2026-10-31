@@ -1,6 +1,6 @@
 from sensai.core.agent import STOPPED, Agent
 from sensai.core.approval import Approval
-from sensai.core.events import ApprovalEvent, DoneEvent, GuardrailEvent, TokenEvent, ToolResultEvent
+from sensai.core.events import ApprovalEvent, DoneEvent, GuardrailEvent, TokenEvent, ToolCallEvent, ToolResultEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.tools.registry import ToolRegistry
@@ -72,6 +72,14 @@ def test_tool_call_with_personal_data_is_blocked_and_the_model_is_told(config, c
     assert queries == []
     assert result.error and "blocked by the guardrail 'personal-data' (IBAN)" in result.content
     assert "blocked by the guardrail" in client.chats[1][0][-1]["content"]
+
+
+def test_the_tool_call_is_shown_once_redacted(config, client):
+    agent, _ = search_agent(config, client, SOURCE)
+    client.tool_rounds = [[ToolCall("web_search", {"query": "Claire Benoit Alvor Consulting"})]]
+    events = list(agent.run("Cherche"))
+    shown = [event.call for event in events if isinstance(event, ToolCallEvent)]
+    assert shown == [ToolCall("web_search", {"query": "[SOURCE] Alvor Consulting"})]
 
 
 def test_tool_call_is_redacted_before_it_runs(config, client):

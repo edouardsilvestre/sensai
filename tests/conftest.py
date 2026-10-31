@@ -22,6 +22,8 @@ class FakeClient:
         # Tool calls returned by the next calls made with tools, one list per call.
         self.tool_rounds: list[list] = []
         self.tools_seen: list[list[dict] | None] = []
+        self.steps: list[str] = []
+        self.steps_seen: list[tuple[list[dict], dict]] = []
         self.formats_seen: list[dict | None] = []
         self.capable = True
 
@@ -65,6 +67,9 @@ class FakeClient:
         self, model: str, messages: list[dict], options: dict | None = None, think: bool | None = None, usage=None,
         format: dict | None = None,
     ) -> str:
+        if format is not None and "anyOf" in format:
+            self.steps_seen.append((list(messages), format))
+            return self.steps.pop(0) if self.steps else '{"thought": "I can answer.", "action": "answer"}'
         if format is not None:
             self.edit_requests.append(messages)
             return self.edits

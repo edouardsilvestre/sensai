@@ -37,6 +37,7 @@ def test_features_lists_every_feature(session, capsys):
         ["guardrails", "on", "check the messages, the answers and the tool calls against the guardrail rules"],
         ["orchestration", "on", "let /review have the answer checked by the fact-checker and written by the editor"],
         ["branching", "on", "edit a past message into a new branch, and keep an interrupted answer to redirect it"],
+        ["reasoning", "off", "reason step by step and show each step before answering"],
     ]
 
 

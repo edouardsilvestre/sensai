@@ -201,3 +201,30 @@ def test_a_schema_tool_can_require_the_users_approval():
 
 def test_descriptions_keep_the_first_paragraph():
     assert ToolRegistry([echo, schema_add()]).descriptions() == {"echo": "Repeat the text.", "add": "Add two numbers."}
+
+
+def test_extended_adds_tools_and_keeps_the_registry_as_it_is():
+    registry = ToolRegistry([echo], warnings=["calculator is down"])
+    extended = registry.extended([schema_add()])
+    assert extended.names() == ["echo", "add"] and extended.warnings == ["calculator is down"]
+    assert registry.names() == ["echo"]
+
+
+def untyped(note, pages: list, ratio: float = 0.5, strict: bool = False) -> str:
+    return note
+
+
+def test_the_arguments_schema_comes_from_the_signature_or_the_schema_tool():
+    schemas = ToolRegistry([echo, untyped, schema_add()]).arguments_schemas()
+    assert schemas["echo"] == {
+        "type": "object", "properties": {"text": {"type": "string"}, "times": {"type": "integer"}}, "required": ["text"]
+    }
+    assert schemas["untyped"]["properties"] == {
+        "note": {}, "pages": {"type": "array"}, "ratio": {"type": "number"}, "strict": {"type": "boolean"}
+    }
+    assert schemas["untyped"]["required"] == ["note", "pages"]
+    assert schemas["add"] == PARAMETERS
+
+
+def test_parameters_lists_the_arguments_of_each_tool():
+    assert ToolRegistry([echo, schema_add()]).parameters() == {"echo": ["text", "times"], "add": ["a", "b"]}

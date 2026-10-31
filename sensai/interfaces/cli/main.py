@@ -20,8 +20,10 @@ from sensai.core.events import (
     DoneEvent,
     Event,
     GuardrailEvent,
+    ReasoningStoppedEvent,
     ReviewDoneEvent,
     SourcesEvent,
+    ThoughtEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -82,6 +84,7 @@ Commands:
   /json QUESTION          answer in JSON: the answer, its claims with their excerpts, the entities and the events
   /guardrails             list the rules checking your messages, the answers and the tool calls
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
+  /reasoning [N]          list the questions reasoned about, or show the steps of question N
   /exit, /quit            leave (or press Ctrl+D)
 Ctrl+C during an answer stops it: what was written is kept, and your next message redirects it."""
 
@@ -347,6 +350,13 @@ def show_events(
                     print()
                     mid_line = False
                 print_guardrail(event.hit)
+            elif isinstance(event, ThoughtEvent):
+                if mid_line:
+                    print()
+                    mid_line = False
+                print(f"[thought {event.number}] {event.thought}")
+            elif isinstance(event, ReasoningStoppedEvent):
+                warning(f"Reasoning stopped: {event.reason}. Sensai answers from what it found.")
             elif isinstance(event, DoneEvent):
                 if structured:
                     print_structured(event.content, sources)
@@ -443,6 +453,7 @@ def resume(session: Session, session_id: str) -> bool:
         return False
     session.session_id = session_id
     session.last_sources = []
+    session.agent.reasoning.clear()
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
     print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
     branches = session.agent.memory.branches()
@@ -462,6 +473,7 @@ def new_command(session: Session) -> None:
     session.agent.memory.clear()
     session.session_id = None
     session.last_sources = []
+    session.agent.reasoning.clear()
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
     print(f"New conversation.{saved}")
 
@@ -816,6 +828,31 @@ def review_command(session: Session, argument: str) -> None:
     show_events(session, review.run(argument), interrupt=review.interrupt)
 
 
+def reasoning_command(session: Session, argument: str) -> None:
+    history = session.agent.reasoning
+    if not history:
+        hint = "ask a question" if session.config.features["reasoning"] else "/feature reasoning on, then ask one"
+        print(f"No reasoning yet in this conversation: {hint}.")
+        return
+    if not argument:
+        print("Reasoning of this conversation:")
+        for number, reasoning in enumerate(history, start=1):
+            print(f"  {number}. {reasoning.question} ({plural(len(reasoning.steps), 'step')})")
+        print("/reasoning N to read the steps of question N.")
+        return
+    if not argument.isdigit() or not 1 <= int(argument) <= len(history):
+        error(f"Usage: /reasoning [N], with N between 1 and {len(history)}")
+        return
+    reasoning = history[int(argument) - 1]
+    print(f"Question {argument}: {reasoning.question}")
+    for number, step in enumerate(reasoning.steps, start=1):
+        print(f"[thought {number}] {step.thought}")
+        if not step.final:
+            print(textwrap.indent(describe_call(step.call()), "  "))
+        if step.result is not None:
+            print(textwrap.indent(step.result.content, "    "))
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -874,6 +911,8 @@ def handle_command(session: Session, line: str) -> bool:
         guardrails_command(session)
     elif name == "/approval":
         approval_command(session, argument.lower())
+    elif name == "/reasoning":
+        reasoning_command(session, argument)
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
