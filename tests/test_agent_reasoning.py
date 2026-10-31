@@ -167,6 +167,13 @@ def test_a_thought_is_redacted_before_it_is_shown(reasoning_config, client):
     assert agent.reasoning[0].steps[0].thought == "[SOURCE] wrote the email."
 
 
+def test_an_answer_that_follows_a_schema_is_given_without_reasoning(reasoning_config, client):
+    agent = make_agent(reasoning_config, client, [])
+    events = list(agent.run("Qui dirige Orion ?", format={"type": "object"}))
+    assert client.steps_seen == [] and thoughts(events) == [] and agent.reasoning == []
+    assert client.formats_seen[-1] == {"type": "object"}
+
+
 def test_an_invalid_step_stops_the_reasoning_but_the_agent_answers(reasoning_config, client):
     agent = make_agent(reasoning_config, client, [])
     client.steps = ['{"thought": "I need']
