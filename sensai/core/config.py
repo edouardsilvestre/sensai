@@ -37,6 +37,7 @@ FEATURES = {
     "document": Feature("keep a working document of the established facts, updated after every answer"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
+    "branching": Feature("edit a past message into a new branch, and keep an interrupted answer to redirect it"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
