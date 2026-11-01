@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import unicodedata
@@ -190,6 +191,23 @@ class Guardrails:
     def __init__(self, rules: list[Rule] | None = None, judge: Judge | None = None):
         self.rules = rules or []
         self.judge = judge
+
+    def fingerprint(self) -> str:
+        rules = [
+            {
+                "name": rule.name,
+                "stages": sorted(rule.stages),
+                "action": rule.action,
+                "pattern": [rule.regex.pattern, rule.regex.flags] if rule.regex else None,
+                "detectors": list(rule.detectors),
+                "judge": rule.judge,
+                "tools": sorted(rule.tools),
+                "replacement": rule.replacement,
+                "message": rule.message,
+            }
+            for rule in self.rules
+        ]
+        return hashlib.sha256(json.dumps(rules, ensure_ascii=False).encode()).hexdigest()
 
     def _rules(self, stage: str, tool: str = "") -> list[Rule]:
         return [r for r in self.rules if stage in r.stages and (not tool or not r.tools or tool in r.tools)]

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
+from sensai.core.cache import CachedAnswer
 from sensai.core.document.document import EditReport
+from sensai.core.examples import Example
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
 from sensai.core.llm.ollama import ToolCall
@@ -55,6 +57,16 @@ class ReasoningStoppedEvent:
 
 
 @dataclass
+class ExamplesEvent:
+    examples: list[Example]
+
+
+@dataclass
+class ExamplesFailedEvent:
+    message: str
+
+
+@dataclass
 class DoneEvent:
     content: str
 
@@ -103,6 +115,16 @@ class CompactionFailedEvent:
     message: str
 
 
+@dataclass
+class CacheHitEvent:
+    cached: CachedAnswer
+
+
+@dataclass
+class CacheFailedEvent:
+    message: str
+
+
 Event = (
     SourcesEvent
     | TokenEvent
@@ -112,6 +134,8 @@ Event = (
     | GuardrailEvent
     | ThoughtEvent
     | ReasoningStoppedEvent
+    | ExamplesEvent
+    | ExamplesFailedEvent
     | DoneEvent
     | DocumentEvent
     | DocumentFailedEvent
@@ -120,4 +144,6 @@ Event = (
     | CompactionStartedEvent
     | CompactionEvent
     | CompactionFailedEvent
+    | CacheHitEvent
+    | CacheFailedEvent
 )

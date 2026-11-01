@@ -39,6 +39,8 @@ FEATURES = {
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
     "branching": Feature("edit a past message into a new branch, and keep an interrupted answer to redirect it"),
     "reasoning": Feature("reason step by step and show each step before answering", default=False),
+    "cache": Feature("reuse the answer to a close question already asked, once you confirm it"),
+    "examples": Feature("show the model your answers kept as examples, for similar questions"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -70,12 +72,16 @@ class Config:
     memory_path: Path = Path(".sensai/memory.db")
     guardrails_path: Path = Path(".sensai/guardrails.json")
     mcp_path: Path = Path(".sensai/mcp.json")
+    examples_path: Path = Path(".sensai/examples.json")
+    examples_k: int = 2
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
     rag_top_k: int = 5
     chunk_size: int = 1200
     chunk_overlap: int = 200
+    cache_path: Path = Path(".sensai/cache.db")
+    cache_threshold: int = 90
 
     ollama_api_key: str = field(default="", repr=False)
     web_search_results: int = 5
@@ -171,11 +177,15 @@ def load_config(path: Path | None = None) -> Config:
         memory_path=Path(os.getenv("SENSAI_MEMORY_PATH", str(Config.memory_path))),
         guardrails_path=Path(os.getenv("SENSAI_GUARDRAILS_PATH", str(Config.guardrails_path))),
         mcp_path=Path(os.getenv("SENSAI_MCP_PATH", str(Config.mcp_path))),
+        examples_path=Path(os.getenv("SENSAI_EXAMPLES_PATH", str(Config.examples_path))),
+        examples_k=_int_env("SENSAI_EXAMPLES_K", Config.examples_k, minimum=0, maximum=5),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
+        cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),
+        cache_threshold=_int_env("SENSAI_CACHE_THRESHOLD", Config.cache_threshold, minimum=50, maximum=100),
         ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
         code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),
