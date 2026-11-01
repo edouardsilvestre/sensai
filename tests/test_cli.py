@@ -31,6 +31,7 @@ def test_features_lists_every_feature(session, capsys):
         ["files", "off", "let the model read and write files in the folders you allow"],
         ["memory", "on", "let the model save and look up facts about people, companies and places"],
         ["mcp", "on", "let the model call the tools of the MCP servers listed in the MCP file"],
+        ["questions", "on", "let the model ask you a question when your request is ambiguous"],
         ["sessions", "on", "save every conversation so that it can be resumed"],
         ["profile", "on", "send your profile to the model at the start of every conversation"],
         ["document", "on", "keep a working document of the established facts, updated after every answer"],
@@ -40,7 +41,10 @@ def test_features_lists_every_feature(session, capsys):
         ["reasoning", "off", "reason step by step and show each step before answering"],
         ["cache", "on", "reuse the answer to a close question already asked, once you confirm it"],
         ["examples", "on", "show the model your answers kept as examples, for similar questions"],
+        ["prompt_versions", "on", "keep every version of the system prompt, to compare them and roll back"],
         ["schedule", "on", "run the scheduled tasks and write their reports"],
+        ["logging", "on", "log every message with its prompt, answer, tools, time and tokens"],
+        ["fact_check", "off", "check each answer against its excerpts and flag what they do not support"],
     ]
 
 
@@ -70,6 +74,7 @@ def test_turning_tools_on_builds_them(config, client, capsys):
     config.features["tools"] = False
     config.features["web_search"] = True
     config.features["memory"] = False
+    config.features["questions"] = False
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature tools on")
     assert session.agent.tools.names() == ["web_search"]
@@ -79,6 +84,7 @@ def test_turning_tools_on_builds_them(config, client, capsys):
 def test_web_search_can_be_turned_on_and_off_during_a_chat(config, client, capsys):
     config.ollama_api_key = "secret"
     config.features["memory"] = False
+    config.features["questions"] = False
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature web_search on")
     assert session.agent.tools.names() == ["web_search"]
@@ -92,6 +98,7 @@ def test_web_search_can_be_turned_on_and_off_during_a_chat(config, client, capsy
 
 
 def test_memory_can_be_turned_off_and_on_during_a_chat(config, client, capsys):
+    config.features["questions"] = False
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature memory on")
     assert session.agent.tools.names()[0] == "memory_search"
@@ -124,7 +131,7 @@ def test_status_shows_the_features(config, capsys):
     run_status(config)
     out = capsys.readouterr().out
     features = (
-        "rag off, tools on, web_search off, code_exec off, files off, memory on, mcp on, sessions on, profile on, "
-        "document on"
+        "rag off, tools on, web_search off, code_exec off, files off, memory on, mcp on, questions on, sessions on, "
+        "profile on, document on"
     )
     assert f"Features: {features}, guardrails on" in out

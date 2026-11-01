@@ -6,11 +6,12 @@ from sensai.core.tools.files import FileTools
 from sensai.core.tools.mcp import load_servers, load_tools
 from sensai.core.tools.memory import MemoryTools
 from sensai.core.tools.permissions import Permissions
+from sensai.core.tools.questions import Asker, Questions
 from sensai.core.tools.registry import ToolRegistry
 from sensai.core.tools.web_search import OllamaSearchBackend, WebSearch
 
 
-def build_registry(config: Config, client: OllamaClient) -> ToolRegistry:
+def build_registry(config: Config, client: OllamaClient, asker: Asker | None = None) -> ToolRegistry:
     """The tools enabled in the configuration. A new tool is a documented function in this package plus one line here."""
     tools = []
     if not config.features["tools"]:
@@ -23,6 +24,8 @@ def build_registry(config: Config, client: OllamaClient) -> ToolRegistry:
         tools += MemoryTools(MemoryStore(config.memory_path)).tools()
     if config.features["files"]:
         tools += FileTools(Permissions(config.files_read, config.files_write, config.files_deny)).tools()
+    if config.features["questions"] and asker is not None:
+        tools.append(Questions(asker).ask_user)
     warnings: list[str] = []
     if config.features["mcp"]:
         local = ToolRegistry(tools).names()

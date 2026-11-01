@@ -6,8 +6,8 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from collections.abc import Callable, Generator
+from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 
 from sensai.core.agent import INTERRUPTED, STOPPED, Agent, EmptyInputError
@@ -16,6 +16,9 @@ from sensai.core.cache import CachedAnswer, CacheError, SemanticCache
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     AgentStartedEvent,
+    CheckEvent,
+    CheckFailedEvent,
+    CheckStartedEvent,
     CacheFailedEvent,
     CacheHitEvent,
     CompactionEvent,
@@ -28,6 +31,7 @@ from sensai.core.events import (
     ExamplesEvent,
     ExamplesFailedEvent,
     GuardrailEvent,
+    LogFailedEvent,
     ReasoningStoppedEvent,
     ReviewDoneEvent,
     SourcesEvent,
@@ -36,7 +40,19 @@ from sensai.core.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from sensai.core.document.document import Edit, EditReport
+from sensai.core.document.document import Document, Edit, EditReport
+from sensai.core.evaluation.judge import UNCHECKED, Claim, Judgement
+from sensai.core.evaluation.runner import (
+    CaseResult,
+    EvalError,
+    Summary,
+    eval_config,
+    load_cases,
+    load_results,
+    run_eval,
+    save_results,
+    summarize as summarize_eval,
+)
 from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
@@ -44,8 +60,11 @@ from sensai.core.memory.conversation import Turn
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
+from sensai.core.monitoring.log import InteractionLog, LogError
+from sensai.core.monitoring.metrics import Group, Report, Timing, summarize
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
+from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, compare, comparison, diff
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -59,6 +78,7 @@ from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+ASK_USER = "ask_user"
 POLL_SECONDS = 15
 DEFAULT_WEB_PORT = 8000
 SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
@@ -104,6 +124,11 @@ Commands:
   /cache [clear]          show the answers kept to reuse, or remove them all
   /examples               list the answers kept as examples, * marks those shown for the last answer
   /example add|remove N   keep the last answer as an example for similar questions, or remove example N
+  /stats [DAYS|clear]     show the metrics of the last DAYS days (7 by default), or clear the log
+  /prompts                list the versions of the system prompt, * marks the one in use
+  /prompt show|use N      read version N of the system prompt, or use it from now on (roll back)
+  /prompt diff N M        show what changed between versions N and M
+  /prompt compare N M     ask the test cases with versions N and M, and compare the answers, time and tokens
   /schedule               list the tasks run on their own by python -m sensai schedule
   /schedule add WHEN TASK add a task: every 6h, daily 08:00 or weekly mon 08:00, --allow TOOL for a critical tool
   /schedule remove N      remove task N, its reports stay
@@ -128,6 +153,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model)"
     )
     commands.add_parser("status", help="show what the document index contains")
+    stats_parser = commands.add_parser("stats", help="show the metrics of the messages logged")
+    stats_parser.add_argument("--days", type=int, default=7, metavar="N", help="the last N days (default: 7)")
+    eval_parser = commands.add_parser("eval", help="answer a set of questions and score the answers")
+    eval_parser.add_argument("cases", type=Path, metavar="FILE", help='the questions: {"cases": [{"question": ...}]}')
+    eval_parser.add_argument("--out", type=Path, metavar="FILE", help="write the answers and their scores there")
+    eval_parser.add_argument("--compare", type=Path, metavar="FILE", help="compare with results written before")
     schedule_parser = commands.add_parser("schedule", help="run the scheduled tasks when they are due")
     schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
     web_parser = commands.add_parser("web", help="chat in a browser page")
@@ -230,6 +261,87 @@ def run_status(config: Config) -> int:
     return 0
 
 
+OUTCOME_LABELS = {
+    "answered": "answered", "cached": "from the cache", "blocked": "blocked", "stopped": "stopped", "error": "errors",
+}
+
+
+def seconds(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f} s"
+
+
+def describe_timing(timing: Timing | None) -> str:
+    if timing is None:
+        return "no answer"
+    return f"{plural(timing.answers, 'answer')}, {seconds(timing.average)}, p95 {seconds(timing.p95)}"
+
+
+def print_groups(title: str, groups: list[Group], label=lambda group: group.name) -> None:
+    print(f"\n{title}:")
+    width = max(len(label(group)) for group in groups)
+    for group in groups:
+        errors = f", {plural(group.errors, 'error')}" if group.errors else ""
+        messages = plural(group.messages, "message")
+        print(f"  {label(group):<{width}}  {messages}{errors}: {describe_timing(group.timing)}")
+
+
+def print_stats(report: Report, days: int) -> None:
+    if not report.messages:
+        print(f"No messages logged in the last {plural(days, 'day')}.")
+        return
+    print(
+        f"Last {plural(days, 'day')}: {plural(report.messages, 'message')} in "
+        f"{plural(report.conversations, 'conversation')}, {plural(report.errors, 'error')} ({report.error_rate:.0%})."
+    )
+    timing = report.timing
+    if timing is not None:
+        first = f", first word after {seconds(timing.first_word)}" if timing.first_word is not None else ""
+        print(
+            f"Answers: {seconds(timing.average)} on average, {seconds(timing.p95)} for the slowest 5% (p95){first}."
+        )
+        print(f"Tokens: {report.prompt_tokens} sent and {report.completion_tokens} received per answer.")
+    outcomes = [f"{count} {OUTCOME_LABELS[outcome]}" for outcome, count in report.outcomes.items() if count]
+    print(f"Outcomes: {', '.join(outcomes)}.")
+    print_groups("By day", report.days)
+    drifts = {drift.version: drift for drift in report.drifts}
+    print("\nBy prompt version:")
+    for group in report.versions:
+        drift = drifts.get(group.name)
+        alert = f"  [drift] {drift.change:+.0%} slower than {drift.previous} on {drift.model}" if drift else ""
+        since = f"{group.since.astimezone():%Y-%m-%d %H:%M}"
+        print(f"  {group.name or '-'}  since {since}: {describe_timing(group.timing)}{alert}")
+    print_groups("By model", report.models)
+    print_groups("By persona", report.personas, lambda group: group.name or "no persona")
+    if report.tools:
+        print(f"\nTools: {', '.join(f'{name} {count}' for name, count in report.tools)}.")
+
+
+def logged_since(log: InteractionLog, days: int) -> Report:
+    return summarize(log.since(datetime.now(timezone.utc) - timedelta(days=days)))
+
+
+def run_stats(config: Config, days: int) -> int:
+    if days < 1:
+        error("--days must be at least 1")
+        return 1
+    if not config.log_path.exists():
+        print(f"No log at {config.log_path} yet: chat with Sensai, every message is logged.")
+        return 0
+    try:
+        log = InteractionLog(config.log_path)
+    except LogError as e:
+        error(str(e))
+        return 1
+    try:
+        print_stats(logged_since(log, days), days)
+    except LogError as e:
+        error(str(e))
+        return 1
+    finally:
+        log.close()
+    return 0
+
+
 @dataclass
 class Session:
     config: Config
@@ -246,7 +358,9 @@ class Session:
     examples: ExampleLibrary | None = None
     examples_used: list[Example] = field(default_factory=list)
     answered: tuple[Turn, list[SearchResult]] | None = None
+    prompts: PromptStore | None = None
     schedule: Schedule | None = None
+    log: InteractionLog | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -287,6 +401,23 @@ def confirm_cached(cached: CachedAnswer) -> bool:
             return True
         if answer in REFUSE_ANSWERS:
             return False
+
+
+def ask_question(question: str, options: list[str]) -> str | None:
+    print(f"[{ASK_USER}] {question}")
+    for number, option in enumerate(options, start=1):
+        print(f"  {number}. {option}")
+    label = "Your answer (a number or your own words): " if options else "Your answer: "
+    while True:
+        try:
+            answer = input(label).strip()
+        except EOFError:
+            print()
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        if answer:
+            return answer
 
 
 def prompt(session: Session) -> str:
@@ -355,6 +486,30 @@ def print_guardrail(hit: Hit) -> None:
         warning(message)
 
 
+def claim_label(claim: Claim) -> str:
+    if claim.verdict == UNCHECKED:
+        return "unchecked"
+    if claim.by == "code":
+        return "not in the excerpts"
+    return "contradicted" if claim.verdict == "contradicted" else "to verify"
+
+
+def print_judgement(judgement: Judgement) -> None:
+    supported = sum(claim.verdict == "supported" for claim in judgement.claims)
+    faithfulness = "-" if judgement.faithfulness is None else f"{judgement.faithfulness:.0%}"
+    scores = ", ".join(
+        f"{name} {'-' if score is None else score}/5"
+        for name, score in (("relevance", judgement.relevance), ("coherence", judgement.coherence))
+    )
+    print(
+        f"[check] {plural(len(judgement.claims), 'sentence')}: {supported} supported, "
+        f"faithfulness {faithfulness}, {scores}"
+    )
+    for claim in judgement.claims:
+        if claim.verdict != "supported":
+            print(f'  {claim_label(claim)}: "{claim.text}"' + (f" ({claim.reason})" if claim.reason else ""))
+
+
 def chat_turn(session: Session, line: str) -> None:
     if line.strip():
         session.last_sources = []
@@ -367,12 +522,21 @@ def chat_turn(session: Session, line: str) -> None:
         session.answered = (turns[-1], list(session.last_sources))
 
 
+def name_conversation(session: Session) -> None:
+    agent = session.agent
+    if session.session_id is not None:
+        agent.session_id = session.session_id
+    elif not agent.session_id and session.store is not None:
+        agent.session_id = session.store.new_id()
+
+
 def show_events(
     session: Session,
-    events: Generator[Event, None, None],
+    events: Generator[Event, None, None] | Iterator[Event],
     structured: bool = False,
     interrupt: Callable[[], bool] | None = None,
 ) -> None:
+    name_conversation(session)
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -393,6 +557,17 @@ def show_events(
                 print(f"[examples] {plural(len(event.examples), 'example')}: {questions}")
             elif isinstance(event, ExamplesFailedEvent):
                 warning(f"No examples were shown to the model: {event.message}")
+            elif isinstance(event, LogFailedEvent):
+                warning(f"This message was not logged: {event.message}")
+            elif isinstance(event, CheckStartedEvent):
+                print(
+                    f"[check] Checking {plural(event.sentences, 'sentence')} with {event.model}, "
+                    "this can take a few minutes (Ctrl+C to skip)..."
+                )
+            elif isinstance(event, CheckEvent):
+                print_judgement(event.judgement)
+            elif isinstance(event, CheckFailedEvent):
+                warning(f"The answer could not be checked: {event.message}")
             elif isinstance(event, ReviewDoneEvent):
                 rounds = plural(event.rounds, "check")
                 if event.approved:
@@ -413,7 +588,8 @@ def show_events(
                 if mid_line:
                     print()
                     mid_line = False
-                print(describe_call(event.call))
+                if event.call.name != ASK_USER:
+                    print(describe_call(event.call))
             elif isinstance(event, ToolResultEvent):
                 if event.result.error:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
@@ -487,9 +663,14 @@ def save_session(session: Session) -> None:
     if session.store is None or not session.config.features["sessions"] or not (memory.turns or memory.summary):
         return
     if session.session_id is None:
-        session.session_id = session.store.new_id()
+        session.session_id = session.agent.session_id or session.store.new_id()
     try:
-        session.store.save(session.session_id, memory, session.config.model)
+        persona = session.agent.persona
+        prompt_ver = session.agent.prompt_version if isinstance(session.agent.prompt_version, int) else None
+        session.store.save(
+            session.session_id, memory, session.config.model,
+            persona.id if persona else None, prompt_ver,
+        )
     except SessionError as e:
         warning(f"The conversation is not saved: {e}")
 
@@ -548,6 +729,7 @@ def new_command(session: Session) -> None:
     previous = session.session_id
     session.agent.memory.clear()
     session.session_id = None
+    session.agent.session_id = ""
     session.last_sources = []
     session.agent.reasoning.clear()
     session.answered = None
@@ -857,6 +1039,19 @@ def feature_command(session: Session, argument: str) -> None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
     if name == "examples" and value == "on" and session.examples is None:
         session.examples = session.agent.examples = load_examples(config, session.agent.client)
+    if name == "logging" and value == "on" and session.log is None:
+        session.log = session.agent.log = load_log(config)
+    if name == "prompt_versions":
+        if value == "on" and session.prompts is None:
+            session.prompts = session.agent.prompts = load_prompts(config)
+        if value == "on" and session.prompts is not None and session.agent.persona is None:
+            active = session.prompts.active()
+            if active:
+                session.agent.prompt_version = active.number
+                session.agent.memory.system_prompt = active.prompt
+        elif value == "off" and session.agent.persona is None:
+            session.agent.prompt_version = None
+            session.agent.memory.system_prompt = config.system_prompt
     if name == "schedule" and value == "on" and session.schedule is None:
         session.schedule = load_schedule(config)
 
@@ -909,6 +1104,7 @@ def review_command(session: Session, argument: str) -> None:
     if not argument:
         error("Usage: /review QUESTION")
         return
+    name_conversation(session)
     try:
         review = Review(session.agent, session.personas)
     except ReviewError as e:
@@ -1032,6 +1228,131 @@ def example_command(session: Session, argument: str) -> None:
         error(str(e))
         return
     print(f'Example {number} removed: "{removed.question}"')
+
+
+def stats_command(session: Session, argument: str) -> None:
+    if argument and argument != "clear" and not (argument.isdecimal() and int(argument) >= 1):
+        error("Usage: /stats [DAYS|clear], with DAYS at least 1")
+        return
+    log = session.log
+    if log is None:
+        if session.config.features["logging"]:
+            print("The log could not be opened: /feature logging on to try again.")
+        else:
+            print("The logging feature is off: /feature logging on to log the messages and see their metrics.")
+        return
+    try:
+        if argument == "clear":
+            print(f"Log cleared: {plural(log.clear(), 'message')} removed.")
+            return
+        days = int(argument or 7)
+        print_stats(logged_since(log, days), days)
+    except LogError as e:
+        error(str(e))
+
+
+def created_on(version: PromptVersion) -> str:
+    if not version.created_at:
+        return "-"
+    return f"{datetime.fromisoformat(version.created_at).astimezone():%Y-%m-%d %H:%M}"
+
+
+def list_prompts(session: Session) -> None:
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the system prompt.")
+        return
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return
+    try:
+        history = session.prompts.history()
+    except PromptError as e:
+        error(str(e))
+        return
+    if not history.versions:
+        print("No version of the system prompt yet: it is kept at the next start.")
+        return
+    print("Versions of the system prompt (* in use):")
+    for version in reversed(history.versions):
+        mark = "*" if version.number == history.active else " "
+        size = plural(len(version.prompt), "char")
+        print(f"  {mark} {version.number}. {created_on(version)}  {version.hash}  {size}")
+    if history.comparisons:
+        last = history.comparisons[-1]
+        scores = ", ".join(f"version {s['version']} {s['passed']}/{s['cases']}" for s in last["scores"])
+        print(f"Last comparison ({last['model']}): {scores}.")
+    print("/prompt show N to read one, /prompt use N to roll back to it.")
+
+
+def print_scores(scores: list[VersionScore]) -> None:
+    print(f"\n{'Version':<9}{'Passed':<9}{'Avg time':<10}Avg tokens")
+    for version in scores:
+        passed = f"{version.passed}/{len(version.results)}"
+        print(f"{version.version:<9}{passed:<9}{version.seconds:<10.2f}{version.tokens:.0f}")
+    for version in scores:
+        for number, result in enumerate(version.results, start=1):
+            if result.failed:
+                failed = ", ".join(result.failed)
+                print(f"  version {version.version}, case {number} ({result.case.question}): {failed}")
+
+
+def compare_prompts(session: Session, versions: list[PromptVersion]) -> None:
+    config = session.config
+    numbers = " and ".join(str(version.number) for version in versions)
+    print(f"Comparing versions {numbers} on the test cases with {config.model}...")
+    try:
+        scores = compare(session.agent.client, config, versions)
+    except (PromptError, LLMError) as e:
+        error(str(e))
+        return
+    except KeyboardInterrupt:
+        print("\n[interrupted] The comparison is not kept.")
+        return
+    print_scores(scores)
+    try:
+        session.prompts.record(comparison(config.model, scores))
+    except PromptError as e:
+        warning(f"The comparison is not kept: {e}")
+
+
+PROMPT_USAGE = "Usage: /prompt show|use N, or /prompt diff|compare N M"
+
+
+def prompt_command(session: Session, argument: str) -> None:
+    words = argument.split()
+    action, numbers = (words[0], words[1:]) if words else ("", [])
+    count = {"show": 1, "use": 1, "diff": 2, "compare": 2}.get(action)
+    if count is None or len(numbers) != count or not all(n.isdecimal() for n in numbers):
+        error(PROMPT_USAGE)
+        return
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the system prompt.")
+        return
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return
+    try:
+        versions = [session.prompts.version(int(number)) for number in numbers]
+    except PromptError as e:
+        error(str(e))
+        return
+    if action == "show":
+        print(f"Version {versions[0].number} of the system prompt ({created_on(versions[0])}):")
+        print(textwrap.indent(versions[0].prompt, "  "))
+    elif action == "diff":
+        print(diff(*versions) or f"Versions {versions[0].number} and {versions[1].number} are identical.")
+    elif action == "compare":
+        compare_prompts(session, versions)
+    else:
+        try:
+            session.prompts.activate(versions[0].number)
+        except PromptError as e:
+            error(str(e))
+            return
+        agent = session.agent
+        agent.prompt_version = versions[0].number
+        agent.memory.system_prompt = versions[0].prompt
+        print(f"Sensai uses version {versions[0].number} of its system prompt from now on.")
 
 
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
@@ -1196,6 +1517,12 @@ def handle_command(session: Session, line: str) -> bool:
         list_examples(session)
     elif name == "/example":
         example_command(session, argument.lower())
+    elif name == "/stats":
+        stats_command(session, argument.lower())
+    elif name == "/prompts":
+        list_prompts(session)
+    elif name == "/prompt":
+        prompt_command(session, argument)
     elif name == "/schedule":
         schedule_command(session, argument)
     elif name == "/reports":
@@ -1249,6 +1576,27 @@ def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None
     return examples
 
 
+def load_log(config: Config) -> InteractionLog | None:
+    try:
+        return InteractionLog(config.log_path)
+    except LogError as e:
+        warning(f"Logging disabled: {e}")
+        return None
+
+
+def load_prompts(config: Config) -> PromptStore | None:
+    prompts = PromptStore(config.prompts_dir)
+    try:
+        if config.system_prompt:
+            version = prompts.snapshot(config.system_prompt)
+            if version is not None and version.number > 1:
+                print(f"System prompt changed: kept as version {version.number}. /prompts to list them.")
+    except PromptError as e:
+        warning(f"Prompt versions disabled: {e}")
+        return None
+    return prompts
+
+
 def load_schedule(config: Config) -> Schedule | None:
     try:
         return Schedule(config.schedule_path, config.reports_dir)
@@ -1258,7 +1606,7 @@ def load_schedule(config: Config) -> Schedule | None:
 
 
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
-    tools = build_registry(config, client)
+    tools = build_registry(config, client, ask_question)
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
@@ -1309,7 +1657,8 @@ def start_session(config: Config) -> Session | None:
     except PersonaError as e:
         error(str(e))
         return None
-    agent = Agent(config, persona=persona)
+    prompts = load_prompts(config) if config.features["prompt_versions"] else None
+    agent = Agent(config, persona=persona, prompts=prompts)
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
@@ -1318,7 +1667,7 @@ def start_session(config: Config) -> Session | None:
         error(str(e))
         return None
 
-    session = Session(config, agent, personas=personas)
+    session = Session(config, agent, personas=personas, prompts=prompts)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
@@ -1333,6 +1682,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     agent = session.agent
     if config.features["cache"]:
         session.cache = agent.cache = load_cache(config, agent.client)
+    if config.features["logging"]:
+        session.log = agent.log = load_log(config)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     agent.confirm_cache = confirm_cached
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
@@ -1353,7 +1704,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
-        print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
+        version = f" (prompt version {agent.prompt_version})" if isinstance(agent.prompt_version, int) else ""
+        print(f"Persona: {agent.persona.name}{version}. /personas to list them, /persona ID to switch.")
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
     load_memory(session, resume_id)
@@ -1378,6 +1730,109 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             session.index.close()
         if session.cache is not None:
             session.cache.close()
+        if session.log is not None:
+            session.log.close()
+
+
+def percent(value: float | None) -> str:
+    return "-" if value is None else f"{value:.0%}"
+
+
+def score(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f}/5"
+
+
+def print_case(number: int, total: int, result: CaseResult) -> None:
+    print(f"[{number}/{total}] {result.question}")
+    if result.error:
+        warning(result.error)
+    if not result.answer:
+        return
+    expected = f"expected {len(result.found)}/{len(result.expected)}, " if result.expected else ""
+    print(
+        f"  {result.seconds:.1f} s, {expected}faithfulness {percent(result.faithfulness)}, "
+        f"relevance {score(result.relevance)}, coherence {score(result.coherence)}"
+    )
+    for claim in result.flagged:
+        print(f'  {claim_label(Claim(**claim))}: "{claim["text"]}"')
+    missed = [fact for fact in result.expected if fact not in result.found]
+    if missed:
+        print(f"  missing from the answer: {', '.join(missed)}")
+
+
+def print_summary(summary: Summary) -> None:
+    seconds = "-" if summary.seconds is None else f"{summary.seconds:.1f} s"
+    print(
+        f"\n{plural(summary.cases, 'question')}: expected facts {percent(summary.expected)}, "
+        f"faithfulness {percent(summary.faithfulness)}, relevance {score(summary.relevance)}, "
+        f"coherence {score(summary.coherence)}, {plural(summary.flagged, 'sentence')} flagged, "
+        f"{seconds} per answer, {plural(summary.errors, 'error')}."
+    )
+
+
+def change(name: str, before: float | None, after: float | None, unit: str) -> str:
+    if before is None or after is None:
+        return f"  {name}: {'-' if before is None else before} → {'-' if after is None else after}"
+    if unit == "%":
+        return f"  {name}: {before:.0%} → {after:.0%} ({(after - before) * 100:+.0f})"
+    return f"  {name}: {before:.1f}{unit} → {after:.1f}{unit} ({after - before:+.1f})"
+
+
+def print_comparison(path: Path, before: dict, old: list[CaseResult], results: list[CaseResult]) -> None:
+    previous, current = summarize_eval(old), summarize_eval(results)
+    print(f"\nCompared with {path} ({before.get('date', '?')[:10]}, {before.get('model', '?')}):")
+    for name, unit in (("expected", "%"), ("faithfulness", "%"), ("relevance", "/5"), ("coherence", "/5")):
+        print(change(name, getattr(previous, name), getattr(current, name), unit))
+    print(change("seconds", previous.seconds, current.seconds, " s"))
+    by_question = {result.question: result for result in old}
+    for result in results:
+        earlier = by_question.get(result.question)
+        if earlier is not None and earlier.faithfulness != result.faithfulness:
+            faithfulness = f"{percent(earlier.faithfulness)} → {percent(result.faithfulness)}"
+            print(f"  {result.question}: faithfulness {faithfulness}")
+
+
+def run_eval_command(config: Config, path: Path, out: Path | None, compare: Path | None) -> int:
+    try:
+        cases = load_cases(path)
+        before, old = load_results(compare) if compare else ({}, [])
+        _, persona = load_persona(config)
+        client = OllamaClient(config.host, config.ollama_api_key)
+        client.ensure_model(config.model)
+        client.ensure_model(config.judge_model or config.model)
+        tools = load_tools(config, client)
+        guardrails = load_guardrails(config, client)
+    except (EvalError, PersonaError, LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
+        error(str(e))
+        return 1
+    index = load_existing_index(config, client) if config.features["rag"] else None
+    checked = eval_config(config)
+
+    def make_agent() -> Agent:
+        return Agent(checked, client, retriever=index, tools=tools, guardrails=guardrails, persona=persona)
+
+    judge = config.judge_model or config.model
+    print(f"Sensai eval: {plural(len(cases), 'question')} answered by {config.model}, judged by {judge}.")
+    print("Each answer is judged sentence by sentence: this can take a few minutes per question.\n")
+    try:
+        results = run_eval(make_agent, checked, cases, lambda number, result: print_case(number, len(cases), result))
+    except KeyboardInterrupt:
+        print("\n[interrupted]")
+        return 1
+    finally:
+        if index is not None:
+            index.close()
+    print_summary(summarize_eval(results))
+    if compare:
+        print_comparison(compare, before, old, results)
+    if out:
+        try:
+            save_results(out, checked, results)
+        except EvalError as e:
+            error(str(e))
+            return 1
+        print(f"Results written to {out}: --compare {out} to compare a next run with them.")
+    return 0
 
 
 def print_schedule_news(session: Session) -> None:
@@ -1474,6 +1929,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
+    if args.command == "stats":
+        return run_stats(config, args.days)
+    if args.command == "eval":
+        return run_eval_command(config, args.cases, args.out, args.compare)
     if args.command == "schedule":
         return run_schedule(config, args.once)
     if args.command == "web":

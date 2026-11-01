@@ -24,7 +24,10 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
 - 💡 **Answer examples**: keep your best answers with `/example add`, and Sensai shows the closest ones to the model for each new question, so that even a small model cites its excerpts and says what the documents do not say.
+- ❓ **Questions to the user**: when a request is ambiguous, the model can ask the journalist a question, with a few options to pick from, and goes on with the answer instead of guessing.
 - ⏰ **Scheduled tasks**: a question Sensai goes through on its own every morning or every hour, comparing with its last run, and writing a sourced report only when it finds something else, with no tool used unless the journalist allowed it in advance.
+- 🗂️ **Prompt versioning**: each change to the system prompt is kept as a dated version that can be compared, measured on your own test questions, and rolled back with `/prompt use N`.
+- 📈 **Logs & metrics**: every message is logged on the machine with the prompt sent, the answer, the tools, the time and the tokens, and `/stats` shows the volume, the response time, the error rate and the prompt changes that slowed Sensai down.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -123,6 +126,34 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 `name`, `role`, `tone` and `scope` are required; a file with a missing field or invalid JSON stops the startup with an error naming the file. Switching persona (`/persona ID`) only replaces the system message: the turns and the summary of older turns are kept, so the fact-checker knows what the investigator established.
 
 The scope is sent as work that can be asked for (`When the user asks for it, you can help with this work: ...`), after `Answer the user's message and nothing else.`, and not as a `Scope:` line. With `Scope:`, `granite3.1-moe` took it for a task and started by itself: asked to just say OK, the investigator went on to analyse leaked documents it had never seen. Measured on six tries for each case, the answers to that message at the start of a conversation became about twice as short, and an ordinary question went from 853 to 172 characters, while the answers on a real excerpt still named the right person six times out of six. It is not enough for this model: it still does not stop at OK, and after a change of persona it imitates the form of its earlier answers, since the history is kept. A rule in the prompt, a reminder just before the message and turning the history into a note changed nothing. The model matters more than the prompt: in the same conversation, `qwen2.5:1.5b`, half the size on disk (1 GB against 2 GB), said OK six times out of six without borrowing anything from the earlier answers, and it really calls tools, where `granite3.1-moe` writes its calls as text.
+
+### Prompt versions
+
+With the `prompt_versions` feature (on by default), the system prompt is kept at every start in `SENSAI_PROMPTS_DIR/system.json`: a system prompt changed in configuration becomes a new dated version, and the version the agent uses from then on.
+
+```
+System prompt changed: kept as version 2. /prompts to list them.
+> /prompts
+Versions of the system prompt (* in use):
+  * 2. 2026-11-01 14:30  9c1e04ab  262 chars
+    1. 2026-10-12 09:12  60f1efc2  248 chars
+> /prompt diff 1 2
+> /prompt use 1
+Sensai uses version 1 of its system prompt from now on.
+```
+
+`/prompt show N` prints a version, `/prompt diff N M` what changed between two, and `/prompt use N` rolls back to version N: the agent uses it from then on, and after a restart too, until the configured prompt changes again. Each saved conversation records the version of its prompt (`prompt_version` in the session file), so an answer can be traced back to the prompt that wrote it.
+
+`/prompt compare N M` asks the questions of `SENSAI_PROMPT_CASES_PATH` (see `prompt_cases.example.json`) with each version, and prints how many answers pass their checks, the average time and the average tokens per answer:
+
+```
+Version  Passed   Avg time  Avg tokens
+1        2/3      4.12      412
+2        3/3      3.05      298
+  version 1, case 1 (Écris un titre : Marc Vidal a signé...): missing "480 000"
+```
+
+A case is a `question`, and optionally the texts its answer must contain (`must_contain`) and must not contain (`must_not_contain`), ignoring the case. To compare only the prompts, each question is asked alone with the system prompt, without the history, the documents nor the tools, at temperature 0 with a fixed seed. The result of each comparison is kept with the versions, and `/prompts` shows the last one. Turning the feature off goes back to the configured system prompt, and keeps the versions.
 
 ### Multi-agent review
 
@@ -249,6 +280,35 @@ Without examples, the model made up four answers: the company's address as Marc 
 
 The other ways to optimize a prompt were considered and ruled out. Rewriting the question before answering it costs one more call to the model per message, and optimizing the prompt against a score, like [DSPy](https://dspy.ai), tries dozens of prompts, hundreds of calls that a CPU cannot afford. Shipping examples with Sensai and keeping the answers approved by the fact-checker of `/review` automatically were ruled out too: an approved answer is not always well written, and the journalist should decide what the model imitates.
 
+### Logs & metrics
+
+With the `logging` feature (on by default), every message is logged in `SENSAI_LOG_PATH`, a SQLite file that stays on the machine: the date, the conversation, the model, the persona, the version of the prompt, the question, the prompt sent (the exact messages given to the model: the system prompt, the history, the excerpts, the tool results), the answer, the outcome (answered, from the cache, blocked, stopped or error, with its message), the time of the answer and of its first word, the tokens sent and received, the tools called, the excerpts found, the guardrails hit and the steps of the reasoning. `/stats` and `python -m sensai stats` turn it into metrics:
+
+```
+$ python -m sensai stats --days 1
+Last 1 day: 9 messages in 9 conversations, 0 errors (0%).
+Answers: 8.6 s on average, 28.6 s for the slowest 5% (p95), first word after 5.3 s.
+Tokens: 400 sent and 66 received per answer.
+Outcomes: 9 answered.
+
+By day:
+  2026-11-01  9 messages: 9 answers, 8.6 s, p95 28.6 s
+
+By prompt version:
+  fa5fa4cc  since 2026-11-01 01:29: 3 answers, 6.7 s, p95 8.7 s
+  e5ea938d  since 2026-11-01 01:29: 3 answers, 5.9 s, p95 9.3 s
+  44fd7587  since 2026-11-01 01:30: 3 answers, 13.1 s, p95 28.6 s  [drift] +124% slower than e5ea938d on qwen2.5:1.5b
+[...]
+```
+
+These are real runs with `qwen2.5:1.5b`: the same three questions asked with the default prompt, then with a system prompt asking for detailed answers, which the small model ignored (the answers did not get longer, nor slower), then with one asking to copy each excerpt and explain it before answering. That last one doubled the time of the answers: one of them took 28.6 seconds for 316 tokens.
+
+`monitoring/log.py`: `Agent.run` watches the events of each message and logs it once it is over, even when it fails (Ollama not running, Ctrl+C): the error is logged, then raised as before. A log that cannot be written is a warning, never a reason to stop an answer. The agents of `/review` are logged too, each with its persona, so that the slowest step of a review shows up. The question, the prompt and the answer are logged as they are after the guardrails: a rule that redacts the name of a source redacts it in the log too. `SENSAI_LOG_CONTENT=false` keeps only the measures, without any text; `/stats clear` empties the log.
+
+`monitoring/metrics.py`: `summarize` computes the metrics of a period, without printing them, so that another interface can show them. The times are those of the answers of the model: an answer from the cache or a blocked message would make them look faster. The p95 is the time 95% of the answers stay under: an average hides the few very slow answers. The first word is the first one shown, after the output guardrails, which hold back the end of the text to find a name cut in two: on a short answer, it comes with the last one. The version of the prompt is a hash of the system prompt (the persona or `SENSAI_SYSTEM_PROMPT`) and of the instructions written in the code for the documents and the reasoning: any change to them is a new version. A version whose answers are at least 50% slower than those of the previous one, on the same model and with at least three answers on each side, is flagged as a drift. With three answers, one long answer is enough to raise it, as above: the more answers, the more the alert can be trusted.
+
+A graphical dashboard was left for later: `/stats` already shows what the metrics are for, and `summarize` keeps them apart from their display. Observability tools like [Langfuse](https://langfuse.com) were ruled out: even self-hosted, they run as a web service with its own database, a lot to install next to a CLI that works offline, when one SQLite file next to the index is enough.
+
 ### Scheduled tasks
 
 A journalist does not only ask questions, they also watch a case. A task is a question Sensai goes through on its own, at set times, with nobody at the keyboard:
@@ -344,6 +404,34 @@ Every path goes through `tools/permissions.py` before the file is touched. `Perm
 
 It is the `files` feature, off by default because the model reads and writes files on this machine. Turned on, it reads the folder Sensai runs in and writes nowhere, until `SENSAI_FILES_WRITE` names a folder. `/files` shows what is allowed.
 
+### Questions to the user
+
+A journalist's question is sometimes ambiguous: two companies share a name, a nickname stands for someone, a period is missing. With the `questions` feature (on by default), the model can ask instead of guessing: it calls `ask_user`, the CLI shows the question and its options, the journalist answers with a number or in their own words, and the model goes on with the answer. During the step-by-step reasoning, on a bank statement with two Vidal:
+
+```
+> Il y a deux Vidal dans le relevé et je ne sais pas lequel m'intéresse. Combien Vidal a-t-il reçu de Nordbank ?
+[search] 1 excerpts from 1 documents
+[thought 1] I need to find out who 'M. Marc Vidal' and 'Mme Sophie Vidal' refer to.
+[ask_user] Quel sont les deux Vidal qui figurent dans le relevé et à qui appartient celui du crédit ?
+Your answer: Marc Vidal
+[ask_user] answered "Marc Vidal"
+[thought 2] The user has identified 'M. Marc Vidal' as Marc Vidal.
+[...]
+Il y a deux Vidal dans le relevé. 'M. Marc Vidal' a reçu 480 000,00 de Nordbank, tandis que 'Mme Sophie Vidal' a reçu 35 000,00 de la société.
+```
+
+`tools/questions.py`: `ask_user(question, options)` is a tool like the others, whose docstring tells the model when to ask (a missing piece that no document and no tool can give) and when not to (what it can find itself). The question is put to the user by the interface, through the `Asker` it gives to `build_registry`, like the approver: the CLI prints the options numbered, a number picks one and anything else is sent as it is, an empty answer asks again, and `Ctrl+D` tells the model that the user did not answer and that it should not ask again. The call itself is not printed, so that the question is not shown twice. The question is the argument of a tool call: it goes through the guardrails of the tool calls before it is shown, so that a protected name is redacted from it. The answer is the journalist's own words, given to the model as the result of the tool, and it lives only in the messages of that turn, like the excerpts; what the model then writes goes through the output guardrails as usual. An answer that called `ask_user` is never kept by the semantic cache, since it depends on more than the question.
+
+Whether the model asks is up to the model. On ambiguous questions like "Combien Vidal a-t-il reçu de Nordbank ?" on a statement with Marc and Sophie Vidal, each asked several times:
+
+| | The ambiguity is said in the question | The ambiguity is only in the documents |
+|---|---|---|
+| `qwen2.5:1.5b` | never asks | never asks |
+| `qwen2.5:1.5b` with the reasoning | asks 1 time out of 3 | never asks: it answers with Marc Vidal's amount |
+| `qwen3:1.7b` | asks 6 times out of 6 | never asks |
+
+Small models ask when the user says the request is ambiguous, not when only the documents show it, and `qwen3:1.7b` never filled the options. Without documents, `qwen2.5:1.5b` with the reasoning asked too much instead, things it should have looked for itself ("which bank?", "which period?"). Having Sensai check every message for an ambiguity before answering was considered and ruled out: it would cost one more call to the model for every message, for questions that are rarely ambiguous.
+
 ### MCP servers
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) lets a program, the server, offer tools to an AI application. Sensai is an MCP client: it reads the tools of the servers listed in `SENSAI_MCP_PATH`, and the model calls them like its own tools. Only servers reached by their URL are supported (Streamable HTTP transport).
@@ -424,6 +512,82 @@ The page is three static files in `sensai/interfaces/web/static/`, without a bui
 
 Limits: there is one conversation at a time and one user, so two tabs share the same conversation. The stop button acts at the next event: it cannot cut a tool that is running, nor a model that has not written its first word yet. The gauge counts each piece of the stream as one token until Ollama gives the exact count at the end, and it is an estimate after a stop or a resume. The page has the chat, not all the commands: `/review`, `/json`, `/ingest`, `/edit`, `/schedule` and the other commands stay in the CLI, and the semantic cache is not offered, since confirming a cached answer has no screen yet. A model that writes its tool calls as text instead of using tool calling, like `granite3.1-moe` in our tests, never reaches the approval screen.
 
+### Automated evaluation & hallucination detection
+
+An investigative journalist cannot publish claims that the documents do not support. Sensai implements a hybrid evaluation pipeline (`evaluation/`) to verify each answer against retrieved excerpts and tool results:
+
+1. **Pre-check by code (`facts.py`)**:
+   - Amounts (`480 000,00`, `480.000 EUR`, `480 000 €`), dates (`05/04/2023`, `2023-04-05`, `5 avril 2023`, years) and capitalized names are extracted and normalized by code.
+   - Any figure, date or name present in the sentence but absent from the evidence is flagged immediately as `not in the excerpts` (verdict `unsupported`). This check runs in milliseconds, never confuses decimal commas, and saves model calls.
+2. **Per-sentence judge (`judge.py`)**:
+   - Sentences whose explicit facts exist in the evidence are sent one by one to `SENSAI_JUDGE_MODEL` (the chat model by default; `qwen3:1.7b` recommended) with a strict JSON schema requiring a reason and a verdict: `supported`, `contradicted`, or `unsupported`.
+   - A final call scores the answer from 1 to 5 on `relevance` (answering the question asked) and `coherence` (clarity and internal consistency).
+   - Source `faithfulness` is computed as the share of checked sentences verified as `supported`.
+3. **Bounded execution**:
+   - On a CPU, a thinking model can reason for thousands of tokens. `SENSAI_JUDGE_MAX_TOKENS` (1500 by default) caps the tokens per sentence; if the judge exceeds the budget or returns invalid JSON, the sentence is marked `unchecked` instead of hanging the session.
+
+```
+> Qui dirige Orion Delta Consulting, et combien a-t-elle reçu de Nordbank ?
+[search] 2 excerpts from 2 documents
+Orion Delta Consulting est gérée par Marc Vidal [1]. Elle a reçu un virement de 480 000 EUR de Nordbank le 05/04/2023 [2].
+
+[check] Checking 2 sentences with qwen3:1.7b, this can take a few minutes (Ctrl+C to skip)...
+[check] 2 sentences: 2 supported, faithfulness 100%, relevance 5/5, coherence 5/5
+```
+
+When an answer invents claims or contradicts evidence:
+
+```
+[check] 2 sentences: 0 supported, faithfulness 0%, relevance 5/5, coherence 5/5
+  not in the excerpts: "Il a touché 480 000 EUR en 2022 [2]." (2022)
+  contradicted: "Marc Vidal est le seul associé d'Orion [1]." (he is the manager, not an associate)
+```
+
+The CLI distinguishes certainty from suspicion:
+- `not in the excerpts`: an amount, date or name confirmed absent from the evidence by code.
+- `contradicted`: the judge found the evidence directly contradicts the statement.
+- `to verify`: the judge gave an `unsupported` verdict, which may be an over-cautious false alarm.
+- `unchecked`: the judge reached `SENSAI_JUDGE_MAX_TOKENS` or returned unparseable output.
+
+#### Scoring system versions (`sensai eval`)
+
+You can run automated benchmarks on a set of questions to validate prompt changes, RAG tuning, or new model versions:
+
+```bash
+python -m sensai eval eval.json --out results.json
+python -m sensai eval eval.json --compare results.json
+```
+
+`eval.json` specifies questions and optional expected facts:
+
+```json
+{
+  "cases": [
+    {"question": "Qui dirige Orion Delta Consulting ?", "expected": ["Marc Vidal"]},
+    {"question": "Combien Nordbank a-t-elle viré à Orion ?", "expected": ["480 000", "05/04/2023"]},
+    {"question": "Quel salaire touche Marc Vidal ?"}
+  ]
+}
+```
+
+Each question is answered by a fresh agent with long-term memory, living document, cache and examples turned off, and then judged against retrieved evidence. Expected facts are matched using normalized values ("480 000 €" matches "480 000"). `--compare` prints side-by-side metric deltas against a previous benchmark run.
+
+#### Technical choices & honest evaluation
+
+Tested on fictional leaked documents with `qwen2.5:1.5b` and `qwen3:1.7b` on CPU:
+
+| Method / Model | Made-up facts caught | False alarms on accurate sentences | Time per answer |
+|---|---|---|---|
+| Whole-answer judge (`qwen2.5` or `qwen3`) | 0 / 4 (0%) | 0 / 4 | ~15 s |
+| Per-sentence judge (`qwen2.5:1.5b`) | 0 / 4 (0%) | 0 / 4 | ~45 s |
+| Per-sentence judge (`qwen3:1.7b`) | 4 / 4 (100%) | 2 / 4 (50%) | ~5 min |
+| Hybrid check (`facts.py` + `qwen3:1.7b`) | 4 / 4 (100%) | 2 / 4 (50%) | ~3-4 min |
+
+- **Why small models need per-sentence judging**: Small models (1.5B–3B) evaluating an entire paragraph at once (as in `/review`) completely missed invented claims. Only `qwen3:1.7b` with per-sentence chain-of-thought caught every hallucination.
+- **Why code-based fact extraction**: Small models misread numbers (reading French decimal "480 000,00" as "480 million") or demanded details that sentences were not meant to include. Pre-checking amounts and dates by code eliminated number hallucination errors instantly.
+- **Limits**: `qwen3:1.7b` remains overly suspicious on qualitative statements, occasionally claiming details are missing. On CPU, it takes minutes per answer. Therefore, `fact_check` is disabled by default (`/feature fact_check on` to enable), serving as a safeguard for careful verification rather than an automatic blocker.
+- **Alternatives ruled out**: Embedding comparison (cosine similarity failed to differentiate transaction direction), dedicated NLI libraries (to adhere strictly to standard Ollama API constraints), and 3-vote self-consistency (prohibitive 15-minute runtime per turn on CPU).
+
 ## Getting Started
 
 ### Installation
@@ -453,7 +617,9 @@ python -m sensai web --port 9000 # on another port
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
 python -m sensai status                  # what the index contains
+python -m sensai stats --days 30         # the metrics of the messages of the last 30 days
 python -m sensai -p fact_checker         # start with another persona
+python -m sensai eval eval.json          # evaluate and score Sensai on test questions
 ```
 
 ### Usage
@@ -506,6 +672,11 @@ Sources:
 | `/cache [clear]` | show how many answers the cache keeps and how often they were reused, or remove them all |
 | `/examples` | list the answers kept as examples, `*` marks those shown to the model for the last answer |
 | `/example add\|remove N` | keep the last answer as an example for similar questions, or remove example N |
+| `/stats [DAYS\|clear]` | show the metrics of the messages of the last DAYS days (7 by default), or empty the log |
+| `/prompts` | list the versions of the system prompt, `*` marks the one in use |
+| `/prompt show\|use N` | print version N of the system prompt, or use it from now on (roll back) |
+| `/prompt diff N M` | show what changed between versions N and M |
+| `/prompt compare N M` | ask the test cases with versions N and M, and compare the checks passed, the time and the tokens |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -628,12 +799,16 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_FILES` | `false` | `true` lets the model list, read and write files in the allowed folders; needs a model that supports tools |
 | `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
 | `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
+| `SENSAI_FEATURE_QUESTIONS` | `true` | let the model ask you a question when your request is ambiguous; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
 | `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
 | `SENSAI_FEATURE_EXAMPLES` | `true` | show the model the answers kept as examples, for the questions close to theirs |
 | `SENSAI_FEATURE_SCHEDULE` | `true` | let `python -m sensai schedule` run the scheduled tasks |
+| `SENSAI_FEATURE_PROMPT_VERSIONS` | `true` | keep every version of the system prompt, and use the one chosen with `/prompt use N` |
+| `SENSAI_FEATURE_LOGGING` | `true` | log every message with its prompt, answer, tools, time and tokens |
+| `SENSAI_FEATURE_FACT_CHECK` | `false` | check each answer against its excerpts and flag what they do not support |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -651,6 +826,10 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_EXAMPLES_K` | `2` | examples shown to the model for each question, the closest ones first (0-5) |
 | `SENSAI_SCHEDULE_PATH` | `.sensai/schedule.json` | the scheduled tasks and the list of their reports |
 | `SENSAI_REPORTS_DIR` | `.sensai/reports` | folder of the reports, in Markdown |
+| `SENSAI_PROMPTS_DIR` | `.sensai/prompts` | the versions of the system prompt (`system.json`) and the comparisons run |
+| `SENSAI_PROMPT_CASES_PATH` | `.sensai/prompt_cases.json` | the test questions of `/prompt compare` (see `prompt_cases.example.json`) |
+| `SENSAI_JUDGE_MODEL` | empty | model that checks the answers (/feature fact_check on); empty: the chat model |
+| `SENSAI_JUDGE_MAX_TOKENS` | `1500` | tokens the judge may write for each sentence before it is left unchecked (200-8000) |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -666,6 +845,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FILES_DENY` | empty | name patterns never readable nor writable inside these folders, like `sources,*.key`; `.env`, `.sensai` and `.git` always are |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 | `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
+| `SENSAI_LOG_PATH` | `.sensai/logs.db` | SQLite file holding the log of every message |
+| `SENSAI_LOG_CONTENT` | `true` | `false` logs only the measures: no question, prompt nor answer |
 
 ### Features
 
@@ -679,14 +860,18 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `questions` | the `ask_user` tool, with which the model asks you a question when your request is ambiguous |
 | `branching` | `/edit`, `/branches` and `/branch`, and keeping an interrupted answer; the branches stay saved |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 | `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
 | `examples` | the answers kept as examples shown to the model; they are kept, and `/example add` still works, when it is off |
 | `schedule` | the scheduled tasks and `/reports`; the tasks and the reports are kept when it is off |
+| `prompt_versions` | the versions of the system prompt; the configured prompt is used, and the versions kept, when it is off |
+| `logging` | the log of every message; the log is kept, and `python -m sensai stats` still reads it, when it is off |
+| `fact_check` | the verification of each answer against its excerpts, off by default because each sentence is a call to `SENSAI_JUDGE_MODEL` |
 
-The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec`, `files`, `reasoning` and `fact_check`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 
