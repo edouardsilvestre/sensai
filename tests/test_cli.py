@@ -66,6 +66,7 @@ def test_turning_tools_on_builds_them(config, client, capsys):
     config.features["tools"] = False
     config.features["web_search"] = True
     config.features["memory"] = False
+    config.features["questions"] = False
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature tools on")
     assert session.agent.tools.names() == ["web_search"]
@@ -75,6 +76,7 @@ def test_turning_tools_on_builds_them(config, client, capsys):
 def test_web_search_can_be_turned_on_and_off_during_a_chat(config, client, capsys):
     config.ollama_api_key = "secret"
     config.features["memory"] = False
+    config.features["questions"] = False
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature web_search on")
     assert session.agent.tools.names() == ["web_search"]
@@ -88,6 +90,7 @@ def test_web_search_can_be_turned_on_and_off_during_a_chat(config, client, capsy
 
 
 def test_memory_can_be_turned_off_and_on_during_a_chat(config, client, capsys):
+    config.features["questions"] = False
     session = Session(config, Agent(config, client))
     handle_command(session, "/feature memory on")
     assert session.agent.tools.names()[0] == "memory_search"
