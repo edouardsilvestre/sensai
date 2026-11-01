@@ -188,6 +188,14 @@ def test_only_the_question_and_the_final_text_are_kept(config):
 APPEND = '{"edits": [{"op": "append", "section": "Summary", "text": "- Orion paid Delta"}]}'
 
 
+def test_the_history_gets_the_question_as_the_guardrails_left_it(config):
+    rule = {"name": "source", "terms": ["Claire"], "on": ["input"], "replacement": "[SOURCE]"}
+    client = ScriptedClient(["An answer.", APPROVED, "The text."])
+    agent = Agent(config, client, guardrails=Guardrails(parse_rules([rule])))
+    list(Review(agent, PERSONAS).run("Who is Claire?"))
+    assert agent.memory.turns[0].user == "Who is [SOURCE]?"
+
+
 def test_only_the_approved_text_goes_to_the_document(config):
     client = ScriptedClient(["Orion paid Delta [1].", APPROVED, "Orion paid Delta."])
     client.edits = APPEND
