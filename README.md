@@ -427,6 +427,82 @@ The judge is the chat model itself, so nothing leaves the machine, at the cost o
 
 Without a rules file, one rule applies: personal data is blocked in web searches. A file at `SENSAI_GUARDRAILS_PATH` replaces it; [guardrails.example.json](guardrails.example.json) protects a source, keeps personal data out of web searches, flags bank details in answers and refuses requests about private life. Like the index, keep the file in `.sensai/`: it holds the names you protect.
 
+### Automated evaluation & hallucination detection
+
+An investigative journalist cannot publish claims that the documents do not support. Sensai implements a hybrid evaluation pipeline (`evaluation/`) to verify each answer against retrieved excerpts and tool results:
+
+1. **Pre-check by code (`facts.py`)**:
+   - Amounts (`480 000,00`, `480.000 EUR`, `480 000 €`), dates (`05/04/2023`, `2023-04-05`, `5 avril 2023`, years) and capitalized names are extracted and normalized by code.
+   - Any figure, date or name present in the sentence but absent from the evidence is flagged immediately as `not in the excerpts` (verdict `unsupported`). This check runs in milliseconds, never confuses decimal commas, and saves model calls.
+2. **Per-sentence judge (`judge.py`)**:
+   - Sentences whose explicit facts exist in the evidence are sent one by one to `SENSAI_JUDGE_MODEL` (the chat model by default; `qwen3:1.7b` recommended) with a strict JSON schema requiring a reason and a verdict: `supported`, `contradicted`, or `unsupported`.
+   - A final call scores the answer from 1 to 5 on `relevance` (answering the question asked) and `coherence` (clarity and internal consistency).
+   - Source `faithfulness` is computed as the share of checked sentences verified as `supported`.
+3. **Bounded execution**:
+   - On a CPU, a thinking model can reason for thousands of tokens. `SENSAI_JUDGE_MAX_TOKENS` (1500 by default) caps the tokens per sentence; if the judge exceeds the budget or returns invalid JSON, the sentence is marked `unchecked` instead of hanging the session.
+
+```
+> Qui dirige Orion Delta Consulting, et combien a-t-elle reçu de Nordbank ?
+[search] 2 excerpts from 2 documents
+Orion Delta Consulting est gérée par Marc Vidal [1]. Elle a reçu un virement de 480 000 EUR de Nordbank le 05/04/2023 [2].
+
+[check] Checking 2 sentences with qwen3:1.7b, this can take a few minutes (Ctrl+C to skip)...
+[check] 2 sentences: 2 supported, faithfulness 100%, relevance 5/5, coherence 5/5
+```
+
+When an answer invents claims or contradicts evidence:
+
+```
+[check] 2 sentences: 0 supported, faithfulness 0%, relevance 5/5, coherence 5/5
+  not in the excerpts: "Il a touché 480 000 EUR en 2022 [2]." (2022)
+  contradicted: "Marc Vidal est le seul associé d'Orion [1]." (he is the manager, not an associate)
+```
+
+The CLI distinguishes certainty from suspicion:
+- `not in the excerpts`: an amount, date or name confirmed absent from the evidence by code.
+- `contradicted`: the judge found the evidence directly contradicts the statement.
+- `to verify`: the judge gave an `unsupported` verdict, which may be an over-cautious false alarm.
+- `unchecked`: the judge reached `SENSAI_JUDGE_MAX_TOKENS` or returned unparseable output.
+
+#### Scoring system versions (`sensai eval`)
+
+You can run automated benchmarks on a set of questions to validate prompt changes, RAG tuning, or new model versions:
+
+```bash
+python -m sensai eval eval.json --out results.json
+python -m sensai eval eval.json --compare results.json
+```
+
+`eval.json` specifies questions and optional expected facts:
+
+```json
+{
+  "cases": [
+    {"question": "Qui dirige Orion Delta Consulting ?", "expected": ["Marc Vidal"]},
+    {"question": "Combien Nordbank a-t-elle viré à Orion ?", "expected": ["480 000", "05/04/2023"]},
+    {"question": "Quel salaire touche Marc Vidal ?"}
+  ]
+}
+```
+
+Each question is answered by a fresh agent with long-term memory, living document, cache and examples turned off, and then judged against retrieved evidence. Expected facts are matched using normalized values ("480 000 €" matches "480 000"). `--compare` prints side-by-side metric deltas against a previous benchmark run.
+
+#### Technical choices & honest evaluation
+
+Tested on fictional leaked documents with `qwen2.5:1.5b` and `qwen3:1.7b` on CPU:
+
+| Method / Model | Made-up facts caught | False alarms on accurate sentences | Time per answer |
+|---|---|---|---|
+| Whole-answer judge (`qwen2.5` or `qwen3`) | 0 / 4 (0%) | 0 / 4 | ~15 s |
+| Per-sentence judge (`qwen2.5:1.5b`) | 0 / 4 (0%) | 0 / 4 | ~45 s |
+| Per-sentence judge (`qwen3:1.7b`) | 4 / 4 (100%) | 2 / 4 (50%) | ~5 min |
+| Hybrid check (`facts.py` + `qwen3:1.7b`) | 4 / 4 (100%) | 2 / 4 (50%) | ~3-4 min |
+
+- **Why small models need per-sentence judging**: Small models (1.5B–3B) evaluating an entire paragraph at once (as in `/review`) completely missed invented claims. Only `qwen3:1.7b` with per-sentence chain-of-thought caught every hallucination.
+- **Why code-based fact extraction**: Small models misread numbers (reading French decimal "480 000,00" as "480 million") or demanded details that sentences were not meant to include. Pre-checking amounts and dates by code eliminated number hallucination errors instantly.
+- **Limits**: `qwen3:1.7b` remains overly suspicious on qualitative statements, occasionally claiming details are missing. On CPU, it takes minutes per answer. Therefore, `fact_check` is disabled by default (`/feature fact_check on` to enable), serving as a safeguard for careful verification rather than an automatic blocker.
+- **Alternatives ruled out**: Embedding comparison (cosine similarity failed to differentiate transaction direction), dedicated NLI libraries (to adhere strictly to standard Ollama API constraints), and 3-vote self-consistency (prohibitive 15-minute runtime per turn on CPU).
+
 ## Getting Started
 
 ### Installation
@@ -455,6 +531,7 @@ python -m sensai ingest ~/leak/          # index a folder (or files) for documen
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
 python -m sensai status                  # what the index contains
 python -m sensai -p fact_checker         # start with another persona
+python -m sensai eval eval.json          # evaluate and score Sensai on test questions
 ```
 
 ### Usage
@@ -640,6 +717,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_EXAMPLES` | `true` | show the model the answers kept as examples, for the questions close to theirs |
 | `SENSAI_FEATURE_SCHEDULE` | `true` | let `python -m sensai schedule` run the scheduled tasks |
 | `SENSAI_FEATURE_PROMPT_VERSIONS` | `true` | keep every version of the system prompt, and use the one chosen with `/prompt use N` |
+| `SENSAI_FEATURE_FACT_CHECK` | `false` | check each answer against its excerpts and flag what they do not support |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -659,6 +737,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_REPORTS_DIR` | `.sensai/reports` | folder of the reports, in Markdown |
 | `SENSAI_PROMPTS_DIR` | `.sensai/prompts` | the versions of the system prompt (`system.json`) and the comparisons run |
 | `SENSAI_PROMPT_CASES_PATH` | `.sensai/prompt_cases.json` | the test questions of `/prompt compare` (see `prompt_cases.example.json`) |
+| `SENSAI_JUDGE_MODEL` | empty | model that checks the answers (/feature fact_check on); empty: the chat model |
+| `SENSAI_JUDGE_MAX_TOKENS` | `1500` | tokens the judge may write for each sentence before it is left unchecked (200-8000) |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -694,8 +774,9 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `examples` | the answers kept as examples shown to the model; they are kept, and `/example add` still works, when it is off |
 | `schedule` | the scheduled tasks and `/reports`; the tasks and the reports are kept when it is off |
 | `prompt_versions` | the versions of the system prompt; the configured prompt is used, and the versions kept, when it is off |
+| `fact_check` | the verification of each answer against its excerpts, off by default because each sentence is a call to `SENSAI_JUDGE_MODEL` |
 
-The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec`, `files`, `reasoning` and `fact_check`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 
