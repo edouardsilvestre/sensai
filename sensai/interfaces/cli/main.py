@@ -46,6 +46,7 @@ from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
+from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, compare, comparison, diff
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -103,6 +104,10 @@ Commands:
   /cache [clear]          show the answers kept to reuse, or remove them all
   /examples               list the answers kept as examples, * marks those shown for the last answer
   /example add|remove N   keep the last answer as an example for similar questions, or remove example N
+  /prompts                list the versions of the system prompt, * marks the one in use
+  /prompt show|use N      read version N of the system prompt, or use it from now on (roll back)
+  /prompt diff N M        show what changed between versions N and M
+  /prompt compare N M     ask the test cases with versions N and M, and compare the answers, time and tokens
   /schedule               list the tasks run on their own by python -m sensai schedule
   /schedule add WHEN TASK add a task: every 6h, daily 08:00 or weekly mon 08:00, --allow TOOL for a critical tool
   /schedule remove N      remove task N, its reports stay
@@ -243,6 +248,7 @@ class Session:
     examples: ExampleLibrary | None = None
     examples_used: list[Example] = field(default_factory=list)
     answered: tuple[Turn, list[SearchResult]] | None = None
+    prompts: PromptStore | None = None
     schedule: Schedule | None = None
 
 
@@ -475,7 +481,11 @@ def save_session(session: Session) -> None:
     if session.session_id is None:
         session.session_id = session.store.new_id()
     try:
-        session.store.save(session.session_id, memory, session.config.model)
+        persona = session.agent.persona
+        session.store.save(
+            session.session_id, memory, session.config.model,
+            persona.id if persona else None, session.agent.prompt_version,
+        )
     except SessionError as e:
         warning(f"The conversation is not saved: {e}")
 
@@ -836,6 +846,17 @@ def feature_command(session: Session, argument: str) -> None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
     if name == "examples" and value == "on" and session.examples is None:
         session.examples = session.agent.examples = load_examples(config, session.agent.client)
+    if name == "prompt_versions":
+        if value == "on" and session.prompts is None:
+            session.prompts = session.agent.prompts = load_prompts(config)
+        if value == "on" and session.prompts is not None and session.agent.persona is None:
+            active = session.prompts.active()
+            if active:
+                session.agent.prompt_version = active.number
+                session.agent.memory.system_prompt = active.prompt
+        elif value == "off" and session.agent.persona is None:
+            session.agent.prompt_version = None
+            session.agent.memory.system_prompt = config.system_prompt
     if name == "schedule" and value == "on" and session.schedule is None:
         session.schedule = load_schedule(config)
 
@@ -1013,6 +1034,110 @@ def example_command(session: Session, argument: str) -> None:
     print(f'Example {number} removed: "{removed.question}"')
 
 
+def created_on(version: PromptVersion) -> str:
+    if not version.created_at:
+        return "-"
+    return f"{datetime.fromisoformat(version.created_at).astimezone():%Y-%m-%d %H:%M}"
+
+
+def list_prompts(session: Session) -> None:
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the system prompt.")
+        return
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return
+    try:
+        history = session.prompts.history()
+    except PromptError as e:
+        error(str(e))
+        return
+    if not history.versions:
+        print("No version of the system prompt yet: it is kept at the next start.")
+        return
+    print("Versions of the system prompt (* in use):")
+    for version in reversed(history.versions):
+        mark = "*" if version.number == history.active else " "
+        size = plural(len(version.prompt), "char")
+        print(f"  {mark} {version.number}. {created_on(version)}  {version.hash}  {size}")
+    if history.comparisons:
+        last = history.comparisons[-1]
+        scores = ", ".join(f"version {s['version']} {s['passed']}/{s['cases']}" for s in last["scores"])
+        print(f"Last comparison ({last['model']}): {scores}.")
+    print("/prompt show N to read one, /prompt use N to roll back to it.")
+
+
+def print_scores(scores: list[VersionScore]) -> None:
+    print(f"\n{'Version':<9}{'Passed':<9}{'Avg time':<10}Avg tokens")
+    for version in scores:
+        passed = f"{version.passed}/{len(version.results)}"
+        print(f"{version.version:<9}{passed:<9}{version.seconds:<10.2f}{version.tokens:.0f}")
+    for version in scores:
+        for number, result in enumerate(version.results, start=1):
+            if result.failed:
+                failed = ", ".join(result.failed)
+                print(f"  version {version.version}, case {number} ({result.case.question}): {failed}")
+
+
+def compare_prompts(session: Session, versions: list[PromptVersion]) -> None:
+    config = session.config
+    numbers = " and ".join(str(version.number) for version in versions)
+    print(f"Comparing versions {numbers} on the test cases with {config.model}...")
+    try:
+        scores = compare(session.agent.client, config, versions)
+    except (PromptError, LLMError) as e:
+        error(str(e))
+        return
+    except KeyboardInterrupt:
+        print("\n[interrupted] The comparison is not kept.")
+        return
+    print_scores(scores)
+    try:
+        session.prompts.record(comparison(config.model, scores))
+    except PromptError as e:
+        warning(f"The comparison is not kept: {e}")
+
+
+PROMPT_USAGE = "Usage: /prompt show|use N, or /prompt diff|compare N M"
+
+
+def prompt_command(session: Session, argument: str) -> None:
+    words = argument.split()
+    action, numbers = (words[0], words[1:]) if words else ("", [])
+    count = {"show": 1, "use": 1, "diff": 2, "compare": 2}.get(action)
+    if count is None or len(numbers) != count or not all(n.isdecimal() for n in numbers):
+        error(PROMPT_USAGE)
+        return
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the system prompt.")
+        return
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return
+    try:
+        versions = [session.prompts.version(int(number)) for number in numbers]
+    except PromptError as e:
+        error(str(e))
+        return
+    if action == "show":
+        print(f"Version {versions[0].number} of the system prompt ({created_on(versions[0])}):")
+        print(textwrap.indent(versions[0].prompt, "  "))
+    elif action == "diff":
+        print(diff(*versions) or f"Versions {versions[0].number} and {versions[1].number} are identical.")
+    elif action == "compare":
+        compare_prompts(session, versions)
+    else:
+        try:
+            session.prompts.activate(versions[0].number)
+        except PromptError as e:
+            error(str(e))
+            return
+        agent = session.agent
+        agent.prompt_version = versions[0].number
+        agent.memory.system_prompt = versions[0].prompt
+        print(f"Sensai uses version {versions[0].number} of its system prompt from now on.")
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -1175,6 +1300,10 @@ def handle_command(session: Session, line: str) -> bool:
         list_examples(session)
     elif name == "/example":
         example_command(session, argument.lower())
+    elif name == "/prompts":
+        list_prompts(session)
+    elif name == "/prompt":
+        prompt_command(session, argument)
     elif name == "/schedule":
         schedule_command(session, argument)
     elif name == "/reports":
@@ -1226,6 +1355,19 @@ def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None
         warning(f"Examples disabled: {e}")
         return None
     return examples
+
+
+def load_prompts(config: Config) -> PromptStore | None:
+    prompts = PromptStore(config.prompts_dir)
+    try:
+        if config.system_prompt:
+            version = prompts.snapshot(config.system_prompt)
+            if version is not None and version.number > 1:
+                print(f"System prompt changed: kept as version {version.number}. /prompts to list them.")
+    except PromptError as e:
+        warning(f"Prompt versions disabled: {e}")
+        return None
+    return prompts
 
 
 def load_schedule(config: Config) -> Schedule | None:
@@ -1288,7 +1430,8 @@ def start_session(config: Config) -> Session | None:
     except PersonaError as e:
         error(str(e))
         return None
-    agent = Agent(config, persona=persona)
+    prompts = load_prompts(config) if config.features["prompt_versions"] else None
+    agent = Agent(config, persona=persona, prompts=prompts)
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
@@ -1297,7 +1440,7 @@ def start_session(config: Config) -> Session | None:
         error(str(e))
         return None
 
-    session = Session(config, agent, personas=personas)
+    session = Session(config, agent, personas=personas, prompts=prompts)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
@@ -1332,7 +1475,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
-        print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
+        version = f" (prompt version {agent.prompt_version})" if agent.prompt_version else ""
+        print(f"Persona: {agent.persona.name}{version}. /personas to list them, /persona ID to switch.")
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
     load_memory(session, resume_id)

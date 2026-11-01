@@ -40,6 +40,7 @@ def test_features_lists_every_feature(session, capsys):
         ["reasoning", "off", "reason step by step and show each step before answering"],
         ["cache", "on", "reuse the answer to a close question already asked, once you confirm it"],
         ["examples", "on", "show the model your answers kept as examples, for similar questions"],
+        ["prompt_versions", "on", "keep every version of the system prompt, to compare them and roll back"],
         ["schedule", "on", "run the scheduled tasks and write their reports"],
     ]
 

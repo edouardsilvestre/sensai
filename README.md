@@ -24,6 +24,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
 - 💡 **Answer examples**: keep your best answers with `/example add`, and Sensai shows the closest ones to the model for each new question, so that even a small model cites its excerpts and says what the documents do not say.
 - ⏰ **Scheduled tasks**: a question Sensai goes through on its own every morning or every hour, comparing with its last run, and writing a sourced report only when it finds something else, with no tool used unless the journalist allowed it in advance.
+- 🗂️ **Prompt versioning**: each change to the system prompt is kept as a dated version that can be compared, measured on your own test questions, and rolled back with `/prompt use N`.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -120,6 +121,34 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 ```
 
 `name`, `role`, `tone` and `scope` are required; a file with a missing field or invalid JSON stops the startup with an error naming the file. Switching persona (`/persona ID`) only replaces the system message: the turns and the summary of older turns are kept, so the fact-checker knows what the investigator established.
+
+### Prompt versions
+
+With the `prompt_versions` feature (on by default), the system prompt is kept at every start in `SENSAI_PROMPTS_DIR/system.json`: a system prompt changed in configuration becomes a new dated version, and the version the agent uses from then on.
+
+```
+System prompt changed: kept as version 2. /prompts to list them.
+> /prompts
+Versions of the system prompt (* in use):
+  * 2. 2026-11-01 14:30  9c1e04ab  262 chars
+    1. 2026-10-12 09:12  60f1efc2  248 chars
+> /prompt diff 1 2
+> /prompt use 1
+Sensai uses version 1 of its system prompt from now on.
+```
+
+`/prompt show N` prints a version, `/prompt diff N M` what changed between two, and `/prompt use N` rolls back to version N: the agent uses it from then on, and after a restart too, until the configured prompt changes again. Each saved conversation records the version of its prompt (`prompt_version` in the session file), so an answer can be traced back to the prompt that wrote it.
+
+`/prompt compare N M` asks the questions of `SENSAI_PROMPT_CASES_PATH` (see `prompt_cases.example.json`) with each version, and prints how many answers pass their checks, the average time and the average tokens per answer:
+
+```
+Version  Passed   Avg time  Avg tokens
+1        2/3      4.12      412
+2        3/3      3.05      298
+  version 1, case 1 (Écris un titre : Marc Vidal a signé...): missing "480 000"
+```
+
+A case is a `question`, and optionally the texts its answer must contain (`must_contain`) and must not contain (`must_not_contain`), ignoring the case. To compare only the prompts, each question is asked alone with the system prompt, without the history, the documents nor the tools, at temperature 0 with a fixed seed. The result of each comparison is kept with the versions, and `/prompts` shows the last one. Turning the feature off goes back to the configured system prompt, and keeps the versions.
 
 ### Multi-agent review
 
@@ -478,6 +507,10 @@ Sources:
 | `/cache [clear]` | show how many answers the cache keeps and how often they were reused, or remove them all |
 | `/examples` | list the answers kept as examples, `*` marks those shown to the model for the last answer |
 | `/example add\|remove N` | keep the last answer as an example for similar questions, or remove example N |
+| `/prompts` | list the versions of the system prompt, `*` marks the one in use |
+| `/prompt show\|use N` | print version N of the system prompt, or use it from now on (roll back) |
+| `/prompt diff N M` | show what changed between versions N and M |
+| `/prompt compare N M` | ask the test cases with versions N and M, and compare the checks passed, the time and the tokens |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -606,6 +639,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
 | `SENSAI_FEATURE_EXAMPLES` | `true` | show the model the answers kept as examples, for the questions close to theirs |
 | `SENSAI_FEATURE_SCHEDULE` | `true` | let `python -m sensai schedule` run the scheduled tasks |
+| `SENSAI_FEATURE_PROMPT_VERSIONS` | `true` | keep every version of the system prompt, and use the one chosen with `/prompt use N` |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -623,6 +657,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_EXAMPLES_K` | `2` | examples shown to the model for each question, the closest ones first (0-5) |
 | `SENSAI_SCHEDULE_PATH` | `.sensai/schedule.json` | the scheduled tasks and the list of their reports |
 | `SENSAI_REPORTS_DIR` | `.sensai/reports` | folder of the reports, in Markdown |
+| `SENSAI_PROMPTS_DIR` | `.sensai/prompts` | the versions of the system prompt (`system.json`) and the comparisons run |
+| `SENSAI_PROMPT_CASES_PATH` | `.sensai/prompt_cases.json` | the test questions of `/prompt compare` (see `prompt_cases.example.json`) |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -657,6 +693,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
 | `examples` | the answers kept as examples shown to the model; they are kept, and `/example add` still works, when it is off |
 | `schedule` | the scheduled tasks and `/reports`; the tasks and the reports are kept when it is off |
+| `prompt_versions` | the versions of the system prompt; the configured prompt is used, and the versions kept, when it is off |
 
 The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
