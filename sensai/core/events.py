@@ -56,6 +56,11 @@ class ReasoningStoppedEvent:
 
 
 @dataclass
+class LogFailedEvent:
+    message: str
+
+
+@dataclass
 class DoneEvent:
     content: str
 
@@ -124,6 +129,7 @@ Event = (
     | ThoughtEvent
     | ReasoningStoppedEvent
     | DoneEvent
+    | LogFailedEvent
     | DocumentEvent
     | DocumentFailedEvent
     | AgentStartedEvent

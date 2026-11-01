@@ -23,6 +23,7 @@ from sensai.core.events import (
     DoneEvent,
     Event,
     GuardrailEvent,
+    LogFailedEvent,
     ReasoningStoppedEvent,
     ReviewDoneEvent,
     SourcesEvent,
@@ -37,6 +38,7 @@ from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
+from sensai.core.monitoring.log import InteractionLog, LogError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.embedder import Embedder
@@ -215,6 +217,7 @@ class Session:
     always_allowed: set[str] = field(default_factory=set)
     personas: dict[str, Persona] = field(default_factory=dict)
     cache: SemanticCache | None = None
+    log: InteractionLog | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -318,7 +321,16 @@ def chat_turn(session: Session, line: str) -> None:
     show_events(session, session.agent.run(line))
 
 
+def name_conversation(session: Session) -> None:
+    agent = session.agent
+    if session.session_id is not None:
+        agent.session_id = session.session_id
+    elif not agent.session_id and session.store is not None:
+        agent.session_id = session.store.new_id()
+
+
 def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
+    name_conversation(session)
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -333,6 +345,8 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                 print("[cache] Answer reused, the model was not called.")
             elif isinstance(event, CacheFailedEvent):
                 warning(f"The cache could not be used: {event.message}")
+            elif isinstance(event, LogFailedEvent):
+                warning(f"This message was not logged: {event.message}")
             elif isinstance(event, ReviewDoneEvent):
                 rounds = plural(event.rounds, "check")
                 if event.approved:
@@ -422,7 +436,7 @@ def save_session(session: Session) -> None:
     if session.store is None or not session.config.features["sessions"] or not (memory.turns or memory.summary):
         return
     if session.session_id is None:
-        session.session_id = session.store.new_id()
+        session.session_id = session.agent.session_id or session.store.new_id()
     try:
         session.store.save(session.session_id, memory, session.config.model)
     except SessionError as e:
@@ -480,6 +494,7 @@ def new_command(session: Session) -> None:
     memory.summary, memory.turns, memory.last_usage = "", [], None
     memory.document = Document()
     session.session_id = None
+    session.agent.session_id = ""
     session.last_sources = []
     session.agent.reasoning.clear()
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
@@ -693,6 +708,8 @@ def feature_command(session: Session, argument: str) -> None:
             print("No documents indexed yet: /ingest PATH to search your files.")
     if name == "cache" and value == "on" and session.cache is None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
+    if name == "logging" and value == "on" and session.log is None:
+        session.log = session.agent.log = load_log(config)
 
 
 def reload_tools(session: Session) -> None:
@@ -743,6 +760,7 @@ def review_command(session: Session, argument: str) -> None:
     if not argument:
         error("Usage: /review QUESTION")
         return
+    name_conversation(session)
     try:
         review = Review(session.agent, session.personas)
     except ReviewError as e:
@@ -891,6 +909,14 @@ def load_cache(config: Config, client: OllamaClient) -> SemanticCache | None:
         return None
 
 
+def load_log(config: Config) -> InteractionLog | None:
+    try:
+        return InteractionLog(config.log_path)
+    except LogError as e:
+        warning(f"Logging disabled: {e}")
+        return None
+
+
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     tools = build_registry(config, client)
     if tools and not client.can_call_tools(config.model):
@@ -957,6 +983,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         agent.retriever = session.index
     if config.features["cache"]:
         session.cache = agent.cache = load_cache(config, agent.client)
+    if config.features["logging"]:
+        session.log = agent.log = load_log(config)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     agent.confirm_cache = confirm_cached
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
@@ -996,6 +1024,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             session.index.close()
         if session.cache is not None:
             session.cache.close()
+        if session.log is not None:
+            session.log.close()
 
 
 def main(argv: list[str] | None = None) -> int:

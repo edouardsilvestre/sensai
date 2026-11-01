@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from collections.abc import Generator, Iterator
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
@@ -20,6 +21,7 @@ from sensai.core.events import (
     DoneEvent,
     Event,
     GuardrailEvent,
+    LogFailedEvent,
     ReasoningStoppedEvent,
     SourcesEvent,
     ThoughtEvent,
@@ -29,6 +31,7 @@ from sensai.core.events import (
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
+from sensai.core.monitoring.log import Interaction, InteractionLog, LogError
 from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
@@ -57,6 +60,7 @@ class Agent:
         editor: DocumentEditor | None = None,
         cache: SemanticCache | None = None,
         confirm_cache: ConfirmCache | None = None,
+        log: InteractionLog | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -69,6 +73,10 @@ class Agent:
         self.reasoning: list[Reasoning] = []
         self.cache = cache
         self.confirm_cache = confirm_cache
+        self.log = log
+        self.session_id = ""
+        self.last_input = ""
+        self.last_prompt: list[dict] = []
         # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
         self.keeps_document = True
         self.persona: Persona | None = None
@@ -195,13 +203,80 @@ class Agent:
         if report:
             yield DocumentEvent(report)
 
+    def prompt_version(self) -> str:
+        templates = [self.memory.system_prompt, build_prompt("", []), instructions(ToolRegistry())]
+        return hashlib.sha256(json.dumps(templates, ensure_ascii=False).encode()).hexdigest()[:8]
+
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
+        if self.log is None or not self.config.features["logging"]:
+            yield from self._answer(user_input, format)
+            return
+        if not user_input.strip():
+            raise EmptyInputError("Empty message")
+        record = Interaction(
+            self.config.model, "", session_id=self.session_id, persona=self.persona.id if self.persona else "",
+            prompt_version=self.prompt_version(),
+        )
+        start = time.monotonic()
+        try:
+            for event in self._answer(user_input, format):
+                self._observe(record, event, round(time.monotonic() - start, 3))
+                yield event
+        except GeneratorExit:
+            raise
+        except BaseException as e:
+            record.outcome, record.error = "error", str(e) or type(e).__name__
+            self._write(record, start)
+            raise
+        failed = self._write(record, start)
+        if failed:
+            yield LogFailedEvent(failed)
+
+    def _observe(self, record: Interaction, event: Event, elapsed: float) -> None:
+        if isinstance(event, TokenEvent) and record.first_token_seconds is None:
+            record.first_token_seconds = elapsed
+        elif isinstance(event, ToolCallEvent):
+            record.tools.append(event.call.name)
+        elif isinstance(event, SourcesEvent):
+            record.sources = len(event.sources)
+        elif isinstance(event, ThoughtEvent):
+            record.reasoning_steps += 1
+        elif isinstance(event, CacheHitEvent):
+            record.outcome = "cached"
+        elif isinstance(event, GuardrailEvent):
+            hit = event.hit
+            if hit.rule not in record.guardrails:
+                record.guardrails.append(hit.rule)
+            if hit.action == "block" and hit.stage in ("input", "output"):
+                record.outcome = "blocked" if hit.stage == "input" else "stopped"
+        elif isinstance(event, DoneEvent):
+            record.answer, record.seconds = event.content, elapsed
+            usage = self.memory.last_usage
+            if usage is not None:
+                record.prompt_tokens, record.completion_tokens = usage.prompt_tokens, usage.completion_tokens
+
+    def _write(self, record: Interaction, start: float) -> str | None:
+        if not record.seconds:
+            record.seconds = round(time.monotonic() - start, 3)
+        if self.config.log_content:
+            record.question, record.prompt = self.last_input, list(self.last_prompt)
+        else:
+            record.answer = ""
+        try:
+            self.log.add(record)
+        except LogError as e:
+            return str(e)
+        return None
+
+    def _answer(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
         user_input = user_input.strip()
+        self.last_input, self.last_prompt = user_input, []
         if not user_input:
             raise EmptyInputError("Empty message")
 
         guardrails = self.active_guardrails
         checked = guardrails.check_input(user_input)
+        self.last_input = checked.text
         for hit in checked.hits:
             yield GuardrailEvent(hit)
         if checked.blocked:
@@ -236,6 +311,7 @@ class Agent:
                 prompt = build_prompt(user_input, sources)
 
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
+        self.last_prompt = pending
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
         # The schema constrains every token of the answer: the model could not call a tool.
