@@ -80,7 +80,7 @@ def test_stats_clear_empties_the_log(session, capsys):
     assert session.log.since(NOW - timedelta(days=365)) == []
 
 
-@pytest.mark.parametrize("argument", ["0", "week", "-3"])
+@pytest.mark.parametrize("argument", ["0", "week", "-3", "²"])
 def test_stats_rejects_other_arguments(session, capsys, argument):
     handle_command(session, f"/stats {argument}")
     assert "Usage: /stats [DAYS|clear]" in capsys.readouterr().err

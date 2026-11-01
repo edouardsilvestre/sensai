@@ -905,7 +905,7 @@ def cache_command(session: Session, argument: str) -> None:
 
 
 def stats_command(session: Session, argument: str) -> None:
-    if argument and argument != "clear" and not (argument.isdigit() and int(argument) >= 1):
+    if argument and argument != "clear" and not (argument.isdecimal() and int(argument) >= 1):
         error("Usage: /stats [DAYS|clear], with DAYS at least 1")
         return
     log = session.log
