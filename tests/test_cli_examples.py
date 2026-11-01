@@ -92,6 +92,20 @@ def test_an_answer_stopped_by_a_guardrail_cannot_be_kept(session, client, capsys
     assert kept(session) == []
 
 
+def test_an_interrupted_answer_cannot_be_kept(session, client, capsys, monkeypatch):
+    def interrupted(*args, **kwargs):
+        yield "Le salaire de "
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(client, "chat_stream", interrupted)
+    chat_turn(session, SALARY)
+
+    handle_command(session, "/example add")
+
+    assert "An interrupted answer cannot be kept" in capsys.readouterr().err
+    assert kept(session) == []
+
+
 def test_the_same_answer_is_kept_once(session, capsys):
     chat_turn(session, SALARY)
     handle_command(session, "/example add")
