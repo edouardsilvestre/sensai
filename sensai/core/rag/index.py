@@ -9,7 +9,7 @@ from sensai.core.llm.ollama import OllamaClient
 from sensai.core.rag.chunker import Chunker
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.loaders import DocumentLoadError, is_supported, load_document
-from sensai.core.rag.models import SearchFilter, SearchResult
+from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
 from sensai.core.rag.reranker import Reranker
 from sensai.core.rag.retriever import fuse
 from sensai.core.rag.store import DocumentRecord, IndexStats, VectorStore
@@ -129,7 +129,9 @@ class DocumentIndex:
                 removed += 1
         return removed
 
-    def search(self, query: str, k: int, filters: Sequence[SearchFilter] = ()) -> list[SearchResult]:
+    def search(
+        self, query: str, k: int, filters: Sequence[SearchFilter] = (), report: SearchReport | None = None
+    ) -> list[SearchResult]:
         if self.store.is_empty():
             return []
         document_ids = self.store.allowed_documents(filters)
@@ -144,6 +146,12 @@ class DocumentIndex:
             found = fuse([found, keyword])[:candidates]
         if self.config.features["rerank"]:
             found = self.reranker.rerank(query, found)
+            threshold = self.config.rerank_threshold / 100
+            if report is not None:
+                report.candidates = len(found)
+                report.dropped = [result for result in found if result.relevance < threshold]
+            # A chunk on the subject that does not answer, like the transfer of May for a question on March.
+            found = [result for result in found if result.relevance >= threshold]
         return found[:k]
 
     def count_documents(self, filters: Sequence[SearchFilter]) -> int:

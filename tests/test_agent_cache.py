@@ -30,7 +30,7 @@ class Retriever:
         self.documents = "v1"
         self.queries: list[str] = []
 
-    def search(self, query: str, k: int, filters=()) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         self.queries.append(query)
         return [STATUTES]
 

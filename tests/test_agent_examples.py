@@ -24,7 +24,7 @@ def embed(text: str) -> list[float]:
 
 
 class Retriever:
-    def search(self, query: str, k: int, filters=()) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [SearchResult(1, "Gérant : Marc Vidal.", "p. 2", "statuts_orion.pdf", "", 0.9)]
 
 

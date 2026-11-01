@@ -21,7 +21,7 @@ class FakeRetriever:
         self.queries: list[tuple[str, int]] = []
         self.filters: list[list[SearchFilter]] = []
 
-    def search(self, query: str, k: int, filters=()) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         self.queries.append((query, k))
         self.filters.append(list(filters))
         return self.results

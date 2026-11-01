@@ -17,6 +17,15 @@ class SourcesEvent:
 
 
 @dataclass
+class RerankEvent:
+    """The candidates read by the reranker: `kept` were sent to the model, `dropped` were under the threshold."""
+
+    candidates: int
+    kept: int
+    dropped: list[SearchResult]
+
+
+@dataclass
 class TokenEvent:
     text: str
 
@@ -127,6 +136,7 @@ class CacheFailedEvent:
 
 Event = (
     SourcesEvent
+    | RerankEvent
     | TokenEvent
     | ToolCallEvent
     | ApprovalEvent

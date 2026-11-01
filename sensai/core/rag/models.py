@@ -49,6 +49,16 @@ class SearchResult:
         return f"{self.source}, {self.location}" if self.location else self.source
 
 
+@dataclass
+class SearchReport:
+    """What the reranker did with the candidates of a search, filled by the search when it is given one."""
+
+    # The chunks the reranker read; 0 when the search was not reranked.
+    candidates: int = 0
+    # The chunks under the relevance threshold, the most relevant first.
+    dropped: list[SearchResult] = field(default_factory=list)
+
+
 _DESCRIBED_FIELDS = {"from": "From", "to": "To", "cc": "Cc", "date": "Date", "author": "Author", "attachments": "Attachments"}
 
 

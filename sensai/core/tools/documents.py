@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from html import escape
 from typing import Protocol
 
-from sensai.core.rag.models import SearchFilter, SearchResult
+from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
 from sensai.core.tools.registry import ToolError, ToolResult
 
 _INSTRUCTIONS = """\
@@ -12,7 +12,9 @@ Cite each excerpt you rely on by its number, like [2]."""
 
 
 class Retriever(Protocol):
-    def search(self, query: str, k: int, filters: Sequence[SearchFilter] = ()) -> list[SearchResult]: ...
+    def search(
+        self, query: str, k: int, filters: Sequence[SearchFilter] = (), report: SearchReport | None = None
+    ) -> list[SearchResult]: ...
 
 
 class DocumentSearch:

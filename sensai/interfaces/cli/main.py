@@ -27,6 +27,7 @@ from sensai.core.events import (
     ExamplesFailedEvent,
     GuardrailEvent,
     ReasoningStoppedEvent,
+    RerankEvent,
     ReviewDoneEvent,
     SourcesEvent,
     ThoughtEvent,
@@ -69,6 +70,7 @@ HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
   /sources                show the excerpts retrieved for the last message
+  /sources dropped        show the excerpts found but dropped as not relevant enough
   /filter [FILTER|clear]  search only some documents, like after:2023-03 before:2023-07 from:dupont kind:email
   /tools                  list the tools the model can call
   /files                  show the folders the model may read and write
@@ -217,6 +219,8 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    # Found for the last message, but under SENSAI_RERANK_THRESHOLD: never sent to the model.
+    last_dropped: list[SearchResult] = field(default_factory=list)
     store: SessionStore | None = None
     # Given at the first save, so that a conversation without any message is never saved.
     session_id: str | None = None
@@ -293,6 +297,27 @@ def describe_score(source: SearchResult) -> str:
     return f"relevance {source.relevance:.2f}, similarity {source.score:.2f}"
 
 
+def rerank_report(event: RerankEvent, config: Config) -> str:
+    parts = [f"{event.kept} kept"]
+    # Relevant enough, but past the SENSAI_RAG_TOP_K best.
+    left_out = event.candidates - event.kept - len(event.dropped)
+    if left_out:
+        parts.append(f"{left_out} left out after the {config.rag_top_k} best")
+    if event.dropped:
+        parts.append(f"{len(event.dropped)} dropped under {config.rerank_threshold}% relevance (/sources dropped)")
+    return f"[rerank] {plural(event.candidates, 'candidate')}: " + ", ".join(parts)
+
+
+def show_dropped(dropped: list[SearchResult]) -> None:
+    if not dropped:
+        print("No excerpt was dropped for the last message.")
+        return
+    # Not numbered like the sources: the answer cannot cite them.
+    for source in dropped:
+        print(f"\n- {source.citation} ({describe_score(source)})")
+        print(textwrap.indent(source.text, "    "))
+
+
 def show_excerpts(sources: list[SearchResult]) -> None:
     if not sources:
         print("No excerpts were retrieved for the last message.")
@@ -333,6 +358,7 @@ def print_guardrail(hit: Hit) -> None:
 def chat_turn(session: Session, line: str) -> None:
     if line.strip():
         session.last_sources = []
+        session.last_dropped = []
         session.examples_used = []
     turns = session.agent.memory.turns
     last = turns[-1] if turns else None
@@ -369,6 +395,9 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                     print(f"\n[review] approved by the fact-checker after {rounds}, the editor's text is kept.")
                 else:
                     warning(f"Answer not approved after {rounds}: the last answer is kept, check the remarks above.")
+            elif isinstance(event, RerankEvent):
+                session.last_dropped = event.dropped
+                print(rerank_report(event, session.config))
             elif isinstance(event, SourcesEvent):
                 sources = session.last_sources = event.sources
                 documents = len({source.source for source in sources})
@@ -492,6 +521,7 @@ def resume(session: Session, session_id: str) -> bool:
         return False
     session.session_id = session_id
     session.last_sources = []
+    session.last_dropped = []
     session.agent.reasoning.clear()
     memory_turns = session.agent.memory.turns
     session.answered = (memory_turns[-1], []) if memory_turns else None
@@ -513,6 +543,7 @@ def new_command(session: Session) -> None:
     memory.document = Document()
     session.session_id = None
     session.last_sources = []
+    session.last_dropped = []
     session.agent.reasoning.clear()
     session.answered = None
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
@@ -809,6 +840,7 @@ def review_command(session: Session, argument: str) -> None:
         error(f"{e} (in {session.config.personas_dir}).")
         return
     session.last_sources = []
+    session.last_dropped = []
     show_events(session, review.run(argument))
 
 
@@ -941,6 +973,7 @@ def json_command(session: Session, argument: str) -> None:
         error("Usage: /json QUESTION")
         return
     session.last_sources = []
+    session.last_dropped = []
     show_events(session, session.agent.run(argument, ANSWER_SCHEMA), structured=True)
 
 
@@ -952,7 +985,12 @@ def handle_command(session: Session, line: str) -> bool:
     if name == "/help":
         print(HELP)
     elif name == "/sources":
-        show_excerpts(session.last_sources)
+        if argument == "dropped":
+            show_dropped(session.last_dropped)
+        elif argument:
+            error("Usage: /sources [dropped]")
+        else:
+            show_excerpts(session.last_sources)
     elif name == "/filter":
         filter_command(session, argument)
     elif name == "/tools":

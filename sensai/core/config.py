@@ -83,6 +83,8 @@ class Config:
     rag_candidates: int = 30
     # A multilingual cross-encoder from Hugging Face, small enough to read the candidates in a few seconds on a CPU.
     rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    # Relevance (0-100 %) under which the reranker drops a chunk: it never reaches the model. 0 keeps them all.
+    rerank_threshold: int = 30
     chunk_size: int = 1200
     chunk_overlap: int = 200
     cache_path: Path = Path(".sensai/cache.db")
@@ -189,6 +191,7 @@ def load_config(path: Path | None = None) -> Config:
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         rag_candidates=_int_env("SENSAI_RAG_CANDIDATES", Config.rag_candidates, minimum=1, maximum=200),
         rerank_model=os.getenv("SENSAI_RERANK_MODEL", Config.rerank_model).strip() or Config.rerank_model,
+        rerank_threshold=_int_env("SENSAI_RERANK_THRESHOLD", Config.rerank_threshold, minimum=0, maximum=100),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),

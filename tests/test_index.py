@@ -3,7 +3,7 @@ import os
 import pytest
 
 from sensai.core.rag.index import DocumentIndex
-from sensai.core.rag.models import SearchFilter
+from sensai.core.rag.models import SearchFilter, SearchReport
 from sensai.core.rag.reranker import Reranker
 from sensai.core.rag.store import IndexMismatchError
 
@@ -136,7 +136,9 @@ def test_changing_the_embedding_model_needs_a_rebuild(config, client, corpus):
     rebuilt.close()
 
 
-def test_a_filter_limits_the_search_to_its_documents(index, corpus, client):
+def test_a_filter_limits_the_search_to_its_documents(index, corpus, client, config):
+    # The spreadsheet does not answer the question: the threshold would drop it.
+    config.rerank_threshold = 0
     index.ingest([corpus])
     results = index.search("who approved the transfer to Delta?", k=3, filters=[SearchFilter(kind="spreadsheet")])
     assert [result.source for result in results] == ["leak/accounts.csv"]
@@ -188,3 +190,32 @@ def test_the_reranker_reads_every_candidate_but_keeps_k(index, corpus, config):
     config.rag_candidates = 3
     assert len(index.search("transfer budget bank", k=1)) == 1
     assert len(read) == 3
+
+
+def test_the_chunks_under_the_threshold_are_dropped_and_reported(index, corpus, config):
+    index.ingest([corpus])
+    index.reranker = Reranker("fake", scorer=lambda pairs: [5.0 if "Alice" in passage else -5.0 for _, passage in pairs])
+    report = SearchReport()
+    results = index.search("who approved the transfer to Delta?", k=3, report=report)
+    assert [result.source for result in results] == ["leak/emails/transfer.txt"]
+    assert report.candidates == 3
+    assert sorted(result.source for result in report.dropped) == ["leak/accounts.csv", "leak/minutes.md"]
+    assert all(result.relevance < 0.3 for result in report.dropped)
+
+
+def test_a_threshold_of_0_keeps_every_chunk(index, corpus, config):
+    index.ingest([corpus])
+    index.reranker = Reranker("fake", scorer=lambda pairs: [-20.0] * len(pairs))
+    config.rerank_threshold = 0
+    report = SearchReport()
+    assert len(index.search("transfer", k=3, report=report)) == 3
+    assert report.dropped == []
+
+
+def test_without_the_reranker_nothing_is_dropped(index, corpus, config):
+    index.ingest([corpus])
+    index.reranker = Reranker("fake", scorer=lambda pairs: [-20.0] * len(pairs))
+    config.features["rerank"] = False
+    report = SearchReport()
+    assert len(index.search("transfer", k=3, report=report)) == 3
+    assert (report.candidates, report.dropped) == (0, [])

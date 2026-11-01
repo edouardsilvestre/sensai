@@ -24,6 +24,7 @@ from sensai.core.events import (
     ExamplesFailedEvent,
     GuardrailEvent,
     ReasoningStoppedEvent,
+    RerankEvent,
     SourcesEvent,
     ThoughtEvent,
     TokenEvent,
@@ -33,8 +34,8 @@ from sensai.core.events import (
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.persona import Persona
-from sensai.core.rag.models import SearchFilter, SearchResult
-from sensai.core.rag.prompt import build_prompt
+from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
+from sensai.core.rag.prompt import build_no_excerpt_prompt, build_prompt
 from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema, tool_messages
 from sensai.core.tools.documents import DocumentSearch, Retriever
 from sensai.core.tools.registry import ToolRegistry, ToolResult
@@ -244,10 +245,15 @@ class Agent:
         prompt = user_input
         sources: list[SearchResult] = []
         if self.retriever is not None and self.config.features["rag"]:
-            sources = self.retriever.search(user_input, self.config.rag_top_k, [self.search_filter])
+            report = SearchReport()
+            sources = self.retriever.search(user_input, self.config.rag_top_k, [self.search_filter], report)
+            if report.candidates:
+                yield RerankEvent(report.candidates, len(sources), report.dropped)
             if sources:
                 yield SourcesEvent(sources)
                 prompt = build_prompt(user_input, sources)
+            elif report.dropped:
+                prompt = build_no_excerpt_prompt(user_input)
 
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         if self.examples is not None and self.config.features["examples"] and format is None:

@@ -11,7 +11,7 @@ VARIABLES = [
     "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CANDIDATES", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
-    "SENSAI_RERANK_MODEL", "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
+    "SENSAI_RERANK_MODEL", "SENSAI_RERANK_THRESHOLD", "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
     "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
     "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
@@ -56,6 +56,12 @@ def test_the_rerank_model_from_environment(env_file, monkeypatch):
     assert load_config(env_file).rerank_model == "BAAI/bge-reranker-v2-m3"
     monkeypatch.setenv("SENSAI_RERANK_MODEL", " ")
     assert load_config(env_file).rerank_model == "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+
+
+def test_the_rerank_threshold_from_environment(env_file, monkeypatch):
+    assert load_config(env_file).rerank_threshold == 30
+    monkeypatch.setenv("SENSAI_RERANK_THRESHOLD", "0")
+    assert load_config(env_file).rerank_threshold == 0
 
 
 def test_cache_settings_from_environment(env_file, monkeypatch):
@@ -250,6 +256,8 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
         ("SENSAI_RAG_TOP_K", "5000"),
         ("SENSAI_RAG_CANDIDATES", "0"),
         ("SENSAI_RAG_CANDIDATES", "1000"),
+        ("SENSAI_RERANK_THRESHOLD", "-1"),
+        ("SENSAI_RERANK_THRESHOLD", "101"),
         ("SENSAI_RAG_CHUNK_OVERLAP", "5000"),
         ("SENSAI_COMPACT_THRESHOLD", "5"),
         ("SENSAI_COMPACT_THRESHOLD", "100"),
