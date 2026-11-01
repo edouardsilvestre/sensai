@@ -37,6 +37,7 @@ FEATURES = {
     "document": Feature("keep a working document of the established facts, updated after every answer"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
+    "branching": Feature("edit a past message into a new branch, and keep an interrupted answer to redirect it"),
     "reasoning": Feature("reason step by step and show each step before answering", default=False),
     "cache": Feature("reuse the answer to a close question already asked, once you confirm it"),
     "examples": Feature("show the model your answers kept as examples, for similar questions"),

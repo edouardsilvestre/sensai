@@ -10,6 +10,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
 - 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
+- 🌿 **Branches & interruption**: `/edit` tries another question from any point of the conversation without losing the first version, and Ctrl+C stops an answer to redirect it.
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔌 **MCP servers**: the model can call the tools of any MCP server reached by its URL, like a company registry lookup, each call approved first.
@@ -47,6 +48,17 @@ Answering: the message is embedded, the closest chunks are added to the prompt a
 - `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
 
 Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
+
+### Branches & interruption
+
+A conversation is not a straight line: the journalist often wants to ask a question differently without losing what the first version gave, or to stop an answer that goes the wrong way.
+
+- `ConversationMemory` (`memory/conversation.py`) holds several `Branch`es. `/edit N` calls `fork`: the new branch gets the turns before message N, the summary, and the working document as it was before that turn, which each `Turn` records. Each branch has its own copy of its history and of its document, so that an answer, a compaction or a document edit in one branch never reaches another. The cost is some repeated text in the session file; the older turns cannot be edited, since the compaction has replaced them with the summary.
+- `SessionStore` saves the active branch as before, and the others in `other_branches`: older session files are read as a conversation with one branch.
+- An edit that gets no answer (blocked by a guardrail, or Ollama failed) removes its branch instead of leaving an empty one.
+- Ctrl+C stops the generator of `Agent.run`, which closes the connection, so Ollama stops generating too. `Agent.interrupt` then adds the question and the text already shown to the history, followed by `[answer interrupted by the user]`, so that the next message redirects the answer: the model sees where it was stopped. Only the text that passed the guardrails is kept, along with the earlier text and the tool results of the turn, including those of the reasoning, which go through the same rules, so that the model can go on from there. It stays out of the working document, a cut `/json` answer is not kept, and an interrupted `/review` keeps the question and the last text written.
+
+It is the `branching` feature, on by default: off, the commands are refused and an interrupted turn is dropped, as a stopped generation has nothing to keep.
 
 ### Long-term memory
 
@@ -170,7 +182,7 @@ Question 1: Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu 
     [...]
 ```
 
-`/reasoning` lists the questions of the conversation, `/reasoning N` shows the thoughts, the tool calls and the full results of question N, so that the journalist can check what a conclusion rests on. The reasoning is never sent back to the model: only the question and the answer are kept in the history. `/new` and `/resume` clear it.
+`/reasoning` lists the questions of the conversation, `/reasoning N` shows the thoughts, the tool calls and the full results of question N, so that the journalist can check what a conclusion rests on. The reasoning is never sent back to the model: only the question and the answer are kept in the history, plus the tool results of a turn the user interrupts. `/new` and `/resume` clear it.
 
 `reasoning.py` and `Agent._reason`: at each step, the model replies with a JSON object `{"thought", "action", "arguments"}` that Ollama is forced to follow (the `format` option of the chat API). The schema has one form per tool, with the arguments of that tool, plus `answer`: the model cannot invent a tool or an argument. A tool chosen by the model goes through the guardrails and the approval like any tool call, and its result is given back to the model for the next step; the thoughts go through the output guardrails before they are shown. Once the model picks `answer`, the final answer is streamed from the steps and their results, without tools. With indexed documents and the `rag` feature on, the reasoning can also call `search_documents`, which searches the documents again with the model's own words to follow a lead (the manager found in the statutes, then his transfers). The excerpts it finds are numbered after those of the first search, so that the answer can cite them, and they are listed with the sources and in `/sources`. As the actions come from the schema, the reasoning also works with models that cannot call tools, like `llama3`.
 
@@ -217,7 +229,7 @@ Answers kept as examples (* shown to the model for the last answer):
   * 1. Quel bonus touche Marc Vidal ? (kept on 2026-10-31)
 ```
 
-`examples.py`: `ExampleLibrary` keeps the examples in `SENSAI_EXAMPLES_PATH`, each with its question, its answer and the excerpts the answer cites, under their number so that `[2]` keeps its meaning. For each message, the question is embedded with `SENSAI_EMBED_MODEL` and compared by cosine similarity to the questions kept, and the `SENSAI_EXAMPLES_K` closest ones (2 by default) above a similarity of 0.5 are sent in a system message just before the question, with the instruction to answer the same way without reusing their facts. They never go to the history, and the step-by-step reasoning gets them too. Only plain answers can be kept: not `/json` nor `/review`, not an answer stopped by a guardrail, and never the same answer twice. Sensai ships no examples: only the journalist decides what a good answer is, and their examples stay on the machine, since they hold the names of the case.
+`examples.py`: `ExampleLibrary` keeps the examples in `SENSAI_EXAMPLES_PATH`, each with its question, its answer and the excerpts the answer cites, under their number so that `[2]` keeps its meaning. For each message, the question is embedded with `SENSAI_EMBED_MODEL` and compared by cosine similarity to the questions kept, and the `SENSAI_EXAMPLES_K` closest ones (2 by default) above a similarity of 0.5 are sent in a system message just before the question, with the instruction to answer the same way without reusing their facts. They never go to the history, and the step-by-step reasoning gets them too. Only plain answers can be kept: not `/json` nor `/review`, not an answer stopped by a guardrail or interrupted, and never the same answer twice. Sensai ships no examples: only the journalist decides what a good answer is, and their examples stay on the machine, since they hold the names of the case.
 
 The threshold comes from `qwen3-embedding:0.6b`: with examples from the same case, the questions on the same subject scored between 0.68 and 0.88, and messages like "Bonjour", "Merci" or a question off the case at most 0.30. With examples from another case, the right example still came first, but at 0.35 to 0.48, as close as "Bonjour": the examples of another case are not shown.
 
@@ -451,6 +463,10 @@ Sources:
 | `/sessions` | list the saved conversations, the current one marked with `*` |
 | `/resume [ID]` | continue a saved conversation, the last one without ID |
 | `/new` | start a new conversation; the current one stays saved |
+| `/history` | list the messages of this branch with their numbers |
+| `/edit N [TEXT]` | replace message N in a new branch; the original conversation stays in its branch |
+| `/branches` | list the branches of this conversation, the active one marked with `*` |
+| `/branch N` | continue branch N |
 | `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
 | `/document` | show the working document |
 | `/document undo` | undo the changes made to the document by the last answer |
@@ -595,6 +611,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
 | `SENSAI_PROFILE_PATH` | `.sensai/profile.md` | your profile, one instruction per line |
 | `SENSAI_MEMORY_PATH` | `.sensai/memory.db` | SQLite file holding the long-term memory |
+| `SENSAI_FEATURE_BRANCHING` | `true` | edit past messages into branches, and keep an interrupted answer |
 | `SENSAI_CACHE_PATH` | `.sensai/cache.db` | SQLite file holding the answers kept by the cache |
 | `SENSAI_CACHE_THRESHOLD` | `90` | similarity, in percent, from which a kept answer is offered (50-100) |
 | `SENSAI_FEATURE_GUARDRAILS` | `true` | check the messages, the answers and the tool calls against the rules |
@@ -634,6 +651,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `branching` | `/edit`, `/branches` and `/branch`, and keeping an interrupted answer; the branches stay saved |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 | `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
