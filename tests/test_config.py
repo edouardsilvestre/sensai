@@ -11,6 +11,7 @@ VARIABLES = [
     "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CANDIDATES", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
+    "SENSAI_RAG_NEIGHBORS",
     "SENSAI_RERANK_MODEL", "SENSAI_RERANK_THRESHOLD", "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
     "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
@@ -48,6 +49,12 @@ def test_rag_settings_from_environment(env_file, monkeypatch):
     config = load_config(env_file)
     assert (config.embed_model, config.index_path, config.rag_top_k) == ("bge-m3", Path("/tmp/case.db"), 8)
     assert config.rag_candidates == 50
+
+
+def test_the_neighbors_from_environment(env_file, monkeypatch):
+    assert load_config(env_file).rag_neighbors == 1
+    monkeypatch.setenv("SENSAI_RAG_NEIGHBORS", "0")
+    assert load_config(env_file).rag_neighbors == 0
 
 
 def test_the_rerank_model_from_environment(env_file, monkeypatch):
@@ -258,6 +265,8 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
         ("SENSAI_RAG_CANDIDATES", "1000"),
         ("SENSAI_RERANK_THRESHOLD", "-1"),
         ("SENSAI_RERANK_THRESHOLD", "101"),
+        ("SENSAI_RAG_NEIGHBORS", "-1"),
+        ("SENSAI_RAG_NEIGHBORS", "4"),
         ("SENSAI_RAG_CHUNK_OVERLAP", "5000"),
         ("SENSAI_COMPACT_THRESHOLD", "5"),
         ("SENSAI_COMPACT_THRESHOLD", "100"),

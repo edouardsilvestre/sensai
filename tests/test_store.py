@@ -315,3 +315,15 @@ def test_a_word_in_the_text_counts_more_than_in_the_header(store):
     save_named(store, "/a.eml", ["Merci de valider le paiement."], {"from": "Jean Dupont"})
     save_named(store, "/b.eml", ["Dupont a validé le paiement."], {"from": "Marc Vidal"})
     assert keywords(store, "dupont") == ["Dupont a validé le paiement.", "Merci de valider le paiement."]
+
+
+def test_the_chunks_of_a_document_by_position(store):
+    save(store, "/a.txt", ["zero", "one", "two", "three"])
+    save(store, "/b.txt", ["other"])
+    ids = [result.chunk_id for result in store.search(FakeClient.vector("one"), 5)]
+    positions = store.chunk_positions(ids)
+    assert sorted(positions.values()) == [(1, 0), (1, 1), (1, 2), (1, 3), (2, 0)]
+
+    assert [chunk.text for chunk in store.chunks_between(1, 1, 2)] == ["one", "two"]
+    assert [chunk.location for chunk in store.chunks_between(1, 2, 9)] == ["p. 3", "p. 4"]
+    assert store.chunks_between(2, 1, 3) == []

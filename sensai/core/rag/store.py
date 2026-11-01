@@ -250,6 +250,22 @@ class VectorStore:
             [(chunk_id, text, _header(title, json.loads(metadata))) for chunk_id, text, title, metadata in rows],
         )
 
+    def chunk_positions(self, chunk_ids: list[int]) -> dict[int, tuple[int, int]]:
+        """The document id and the position in it of each chunk."""
+        rows = self._db.execute(
+            "SELECT id, document_id, position FROM chunks WHERE id IN (SELECT value FROM json_each(?))",
+            (json.dumps(chunk_ids),),
+        )
+        return {chunk_id: (document_id, position) for chunk_id, document_id, position in rows}
+
+    def chunks_between(self, document_id: int, first: int, last: int) -> list[Chunk]:
+        """The chunks of a document from position `first` to `last`, in their order."""
+        rows = self._db.execute(
+            "SELECT text, location FROM chunks WHERE document_id = ? AND position BETWEEN ? AND ? ORDER BY position",
+            (document_id, first, last),
+        )
+        return [Chunk(text, location) for text, location in rows]
+
     def is_empty(self) -> bool:
         return self._db.execute("SELECT NOT EXISTS (SELECT 1 FROM chunks)").fetchone()[0] == 1
 

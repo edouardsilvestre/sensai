@@ -531,7 +531,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_PERSONA` | empty | persona used at startup (overridden by `-p ID`); empty: no persona, `SENSAI_SYSTEM_PROMPT` is used |
 | `SENSAI_PERSONAS_DIR` | `personas/` of the repository | folder of the persona files |
 | `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation when no persona is active |
-| `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
+| `SENSAI_NUM_CTX` | `16384` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |

@@ -1,12 +1,12 @@
 import hashlib
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from sensai.core.config import Config
 from sensai.core.llm.ollama import OllamaClient
-from sensai.core.rag.chunker import Chunker
+from sensai.core.rag.chunker import Chunker, join_chunks, join_locations
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.loaders import DocumentLoadError, is_supported, load_document
 from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
@@ -35,6 +35,16 @@ class IngestReport:
     unsupported: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)
     seconds: float = 0.0
+
+
+@dataclass
+class _Passage:
+    """The chunks `first` to `last` of a document, shown as one excerpt."""
+
+    excerpt: SearchResult
+    document_id: int
+    first: int
+    last: int
 
 
 class DocumentIndex:
@@ -152,7 +162,40 @@ class DocumentIndex:
                 report.dropped = [result for result in found if result.relevance < threshold]
             # A chunk on the subject that does not answer, like the transfer of May for a question on March.
             found = [result for result in found if result.relevance >= threshold]
-        return found[:k]
+        return self._widen(found[:k])
+
+    def _widen(self, results: list[SearchResult]) -> list[SearchResult]:
+        """
+        Each excerpt with the chunks around it, to read the whole passage while searching small chunks.
+        The passages that touch in a document make one, under the most relevant of their excerpts.
+        """
+        around = self.config.rag_neighbors
+        if not around or not results:
+            return results
+        positions = self.store.chunk_positions([result.chunk_id for result in results])
+        passages: list[_Passage] = []
+        for result in results:
+            document_id, position = positions[result.chunk_id]
+            first, last = max(position - around, 0), position + around
+            touching = [
+                p for p in passages if p.document_id == document_id and p.first <= last + 1 and first <= p.last + 1
+            ]
+            if not touching:
+                passages.append(_Passage(result, document_id, first, last))
+                continue
+            # The passages are in the order of their excerpts: the first one touched is the most relevant.
+            kept = touching[0]
+            kept.first = min([first] + [p.first for p in touching])
+            kept.last = max([last] + [p.last for p in touching])
+            for passage in touching[1:]:
+                passages.remove(passage)
+        widened = []
+        for passage in passages:
+            chunks = self.store.chunks_between(passage.document_id, passage.first, passage.last)
+            text = join_chunks([chunk.text for chunk in chunks], self.config.chunk_overlap)
+            location = join_locations([chunk.location for chunk in chunks])
+            widened.append(replace(passage.excerpt, text=text, location=location))
+        return widened
 
     def count_documents(self, filters: Sequence[SearchFilter]) -> int:
         document_ids = self.store.allowed_documents(filters)

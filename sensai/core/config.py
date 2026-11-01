@@ -59,7 +59,7 @@ class Config:
     model: str = "llama3"
     host: str = "http://localhost:11434"
     system_prompt: str = ""
-    num_ctx: int = 8192
+    num_ctx: int = 16384
     think: bool | None = None
     persona: str = ""
     personas_dir: Path = DEFAULT_PERSONAS_DIR
@@ -85,6 +85,9 @@ class Config:
     rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     # Relevance (0-100 %) under which the reranker drops a chunk: it never reaches the model. 0 keeps them all.
     rerank_threshold: int = 30
+    # Chunks added before and after each excerpt kept, from the same document: the sentence that answers can be
+    # just before the cut. 0 sends the excerpts alone.
+    rag_neighbors: int = 1
     chunk_size: int = 1200
     chunk_overlap: int = 200
     cache_path: Path = Path(".sensai/cache.db")
@@ -192,6 +195,7 @@ def load_config(path: Path | None = None) -> Config:
         rag_candidates=_int_env("SENSAI_RAG_CANDIDATES", Config.rag_candidates, minimum=1, maximum=200),
         rerank_model=os.getenv("SENSAI_RERANK_MODEL", Config.rerank_model).strip() or Config.rerank_model,
         rerank_threshold=_int_env("SENSAI_RERANK_THRESHOLD", Config.rerank_threshold, minimum=0, maximum=100),
+        rag_neighbors=_int_env("SENSAI_RAG_NEIGHBORS", Config.rag_neighbors, minimum=0, maximum=3),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),

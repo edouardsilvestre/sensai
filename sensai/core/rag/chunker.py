@@ -86,6 +86,58 @@ class Chunker:
         return tail
 
 
+def join_chunks(texts: list[str], overlap: int) -> str:
+    """
+    The text of consecutive chunks of a document, without their overlap twice: a chunk starts with the last
+    sentences of the previous one, up to `overlap` characters, unless a page of another sheet starts with it.
+    """
+    joined = texts[0]
+    for text in texts[1:]:
+        shared = _shared(joined, text, overlap)
+        joined += text[shared:] if shared else "\n\n" + text
+    return joined
+
+
+def _shared(before: str, after: str, overlap: int) -> int:
+    # The overlap is whole sentences or lines: a name both ends with and starts with is not one.
+    for length in range(min(overlap, len(before), len(after)), 0, -1):
+        if (
+            before.endswith(after[:length])
+            and _is_break(before[:-length], before[-length:])
+            and _is_break(after[:length], after[length:])
+        ):
+            return length
+    return 0
+
+
+def _is_break(left: str, right: str) -> bool:
+    """Whether a sentence or a line ends between `left` and `right`, the separator being at the end of either."""
+    if not left or not right or left.endswith("\n") or right.startswith("\n"):
+        return True
+    if left.endswith(" "):
+        return left.rstrip(" ")[-1:] in tuple(".!?…")
+    return right.startswith(" ") and left[-1] in ".!?…"
+
+
+_LOCATION = re.compile(r"^(?:(?P<scope>.+), )?(?:p\. |(?P<kind>[a-z]+?)s? )(?P<first>\d+)(?:-(?P<last>\d+))?$")
+
+
+def join_locations(locations: list[str]) -> str:
+    """The location of consecutive chunks, like "p. 2-4" for "p. 2", "p. 3" and "p. 3-4"."""
+    locators: list[Locator] = []
+    for location in locations:
+        match = _LOCATION.match(location)
+        if not match:
+            locators = []
+            break
+        kind, scope = match["kind"] or "page", match["scope"] or ""
+        locators += [Locator(kind, int(match["first"]), scope), Locator(kind, int(match["last"] or match["first"]), scope)]
+    if locators and len({(locator.kind, locator.scope) for locator in locators}) == 1:
+        return format_location(locators)
+    # Another sheet, or a location of another form: each one, once.
+    return "; ".join(dict.fromkeys(filter(None, locations)))
+
+
 def _length(units: list[_Unit]) -> int:
     return sum(len(u.text) for u in units) + sum(len(u.separator) for u in units[1:])
 

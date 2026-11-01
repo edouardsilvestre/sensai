@@ -1,6 +1,8 @@
+import re
+
 import pytest
 
-from sensai.core.rag.chunker import Chunker, format_location
+from sensai.core.rag.chunker import Chunker, format_location, join_chunks, join_locations
 from sensai.core.rag.models import Document, Locator, Section
 
 
@@ -79,3 +81,54 @@ def test_format_location(locators, expected):
 def test_invalid_settings_are_rejected():
     with pytest.raises(ValueError):
         Chunker(100, 100)
+
+
+@pytest.mark.parametrize("overlap", [0, 40, 80, 150])
+def test_joined_chunks_give_back_the_text_without_the_overlap(overlap):
+    text = "First paragraph here.\n\n" + sentences(30) + "\nA line.\n\n" + sentences(12)
+    chunks = Chunker(200, overlap).split(Document("text", [Section(text)]))
+    assert len(chunks) > 3
+    whole = Chunker(10_000, 0).split(Document("text", [Section(text)]))[0].text
+    joined = join_chunks([chunk.text for chunk in chunks], overlap)
+    if overlap:
+        assert joined == whole
+    else:
+        # Without overlap, nothing tells which separator was cut: the chunks are kept apart.
+        assert joined.replace("\n\n", " ").split() == whole.split()
+
+
+def test_joined_rows_give_back_the_sheet():
+    rows = [Section(f"name: a{i} | amount: {i * 100}", Locator("row", i, "Sheet A"), separator="\n") for i in range(2, 30)]
+    chunks = Chunker(200, 80).split(Document("spreadsheet", rows))
+    assert len(chunks) > 3
+    whole = Chunker(10_000, 0).split(Document("spreadsheet", rows))[0]
+    assert join_chunks([chunk.text for chunk in chunks], 80) == whole.text
+    assert join_locations([chunk.location for chunk in chunks]) == whole.location == "Sheet A, rows 2-29"
+
+
+def test_a_run_of_chunks_in_the_middle_is_joined_too():
+    chunks = Chunker(200, 80).split(Document("text", [Section(sentences(40))]))
+    joined = join_chunks([chunk.text for chunk in chunks[2:5]], 80)
+    assert joined.startswith(chunks[2].text) and joined.endswith(chunks[4].text)
+    assert joined.count("Sentence number") == len(set(re.findall(r"Sentence number \d+", joined)))
+
+
+def test_chunks_that_do_not_overlap_are_kept_apart():
+    assert join_chunks(["Sheet A rows.", "Sheet B rows."], 100) == "Sheet A rows.\n\nSheet B rows."
+    # A word in common is not an overlap: the overlap is whole sentences.
+    assert join_chunks(["It was paid by Delta", "Delta Holding paid"], 100) == "It was paid by Delta\n\nDelta Holding paid"
+
+
+@pytest.mark.parametrize(
+    ("locations", "expected"),
+    [
+        (["p. 2", "p. 3", "p. 3-4"], "p. 2-4"),
+        (["p. 7"], "p. 7"),
+        (["Transfers, row 3", "Transfers, rows 4-9"], "Transfers, rows 3-9"),
+        (["Sheet A, rows 8-9", "Sheet B, rows 2-5"], "Sheet A, rows 8-9; Sheet B, rows 2-5"),
+        (["", ""], ""),
+        (["intro", "intro"], "intro"),
+    ],
+)
+def test_join_locations(locations, expected):
+    assert join_locations(locations) == expected
