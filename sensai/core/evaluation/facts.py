@@ -91,7 +91,7 @@ def facts(text: str) -> list[Fact]:
     return amounts + dates + names
 
 
-def _known(evidence: str) -> tuple[set[str], str]:
+def known(evidence: str) -> tuple[set[str], str]:
     values = set()
     for fact in facts(evidence):
         values.add(fact.value)
@@ -101,7 +101,7 @@ def _known(evidence: str) -> tuple[set[str], str]:
 
 
 def missing(sentence: str, evidence: str) -> list[Fact]:
-    values, text = _known(evidence)
+    values, text = known(evidence)
     absent = []
     for fact in facts(sentence):
         if fact.kind == "name":
