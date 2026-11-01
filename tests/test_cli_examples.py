@@ -169,6 +169,17 @@ def test_an_invalid_file_disables_the_examples(config, client, capsys):
     assert "[warning] Examples disabled: Invalid examples file" in capsys.readouterr().err
 
 
+def test_a_date_edited_by_hand_does_not_stop_the_cli(config, client, capsys):
+    example = {"question": SALARY, "answer": ANSWER, "created_at": "yesterday"}
+    config.examples_path.write_text(json.dumps({"examples": [example]}), encoding="utf-8")
+    session = Session(config, Agent(config, client))
+    session.examples = load_examples(config, client)
+    handle_command(session, "/examples")
+    out, err = capsys.readouterr()
+    assert 'example 1 has an invalid date: "yesterday"' in err
+    assert "The examples could not be loaded" in out
+
+
 def test_a_missing_embedding_model_disables_the_examples(config, client, capsys):
     ExampleLibrary(config.examples_path, lambda text: [1.0]).add(Example(SALARY, ANSWER))
 

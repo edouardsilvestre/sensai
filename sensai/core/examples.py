@@ -83,6 +83,19 @@ def _excerpt(data: dict) -> Excerpt:
     return Excerpt(int(data["number"]), str(data["source"]), str(data.get("location", "")), str(data["text"]))
 
 
+def _date(value: object, number: int) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str):
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            return value
+    raise ValueError(f"example {number} has an invalid date: {json.dumps(value, ensure_ascii=False)}")
+
+
 def _parse(data: object) -> list[Example]:
     if not isinstance(data, dict) or not isinstance(data.get("examples"), list):
         raise ValueError('expected {"examples": [...]}')
@@ -99,7 +112,7 @@ def _parse(data: object) -> list[Example]:
             parsed = [_excerpt(excerpt) for excerpt in excerpts]
         except (TypeError, KeyError, ValueError):
             raise ValueError(f"example {number} has an excerpt without a number, a source or a text") from None
-        examples.append(Example(question, answer, parsed, str(item.get("created_at", ""))))
+        examples.append(Example(question, answer, parsed, _date(item.get("created_at"), number)))
     return examples
 
 

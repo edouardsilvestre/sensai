@@ -139,6 +139,8 @@ def test_make_example_needs_a_question_and_an_answer(question, answer):
             "excerpts of example 1 are not a list",
         ),
         ({"examples": [{"question": "Qui ?", "answer": "Lui.", "excerpts": [{"text": "x"}]}]}, "excerpt without"),
+        ({"examples": [{"question": "Qui ?", "answer": "Lui.", "created_at": "hier"}]}, 'invalid date: "hier"'),
+        ({"examples": [{"question": "Qui ?", "answer": "Lui.", "created_at": 20261031}]}, "invalid date: 20261031"),
     ],
 )
 def test_an_invalid_file_is_an_error(path, data, message):
@@ -198,3 +200,9 @@ def test_the_fingerprint_changes_with_the_examples(path):
     assert len({empty, one}) == 2 and ExampleLibrary(path, embed).fingerprint() == one
     library.remove(1)
     assert library.fingerprint() == empty
+
+
+@pytest.mark.parametrize("value, expected", [(None, ""), ("", ""), ("2026-10-31", "2026-10-31")])
+def test_a_missing_date_is_no_date_and_a_valid_one_is_kept(path, value, expected):
+    path.write_text(json.dumps({"examples": [{"question": "Qui ?", "answer": "Lui.", "created_at": value}]}))
+    assert ExampleLibrary(path, embed).examples[0].created_at == expected
