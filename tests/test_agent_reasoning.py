@@ -285,7 +285,7 @@ class KeywordRetriever:
         self.results = results
         self.queries: list[str] = []
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=()) -> list[SearchResult]:
         self.queries.append(query)
         return [result for word, found in self.results.items() if word in query.lower() for result in found]
 

@@ -132,6 +132,7 @@ class Review:
             guardrails=main.guardrails, persona=persona, approver=main.approver,
         )
         agent.memory.profile = main.memory.profile
+        agent.search_filter = main.search_filter
         agent.keeps_document = False
         return agent
 

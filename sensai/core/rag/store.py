@@ -2,13 +2,14 @@ import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlite_vec
 
-from sensai.core.rag.models import Chunk, SearchResult, describe
+from sensai.core.rag.models import Chunk, SearchFilter, SearchResult, describe
 
 SCHEMA_VERSION = "2"
 
@@ -101,6 +102,8 @@ class VectorStore:
             raise StoreError(f"Cannot load sqlite-vec (this Python's sqlite3 may not support extensions): {e}") from e
         try:
             self._db.execute("PRAGMA foreign_keys = ON")
+            # SQLite's lower() and LIKE only fold ASCII: "élodie" would not find "Élodie".
+            self._db.create_function("casefold", 1, lambda text: text.casefold() if text else text, deterministic=True)
             self._db.execute("PRAGMA journal_mode = WAL")
             if rebuild:
                 self._drop_tables()
@@ -218,15 +221,49 @@ class VectorStore:
     def is_empty(self) -> bool:
         return self._db.execute("SELECT NOT EXISTS (SELECT 1 FROM chunks)").fetchone()[0] == 1
 
-    def search(self, vector: list[float], k: int) -> list[SearchResult]:
-        if self.dimensions is None:
+    def allowed_documents(self, filters: Iterable[SearchFilter]) -> list[int] | None:
+        """The ids of the documents that match every filter, or None when no filter limits the search."""
+        where: list[str] = []
+        params: list[str | int] = []
+        for search_filter in filters:
+            if search_filter.after:
+                where.append("date >= ?")
+                params.append(search_filter.after)
+            if search_filter.before:
+                where.append("date < ?")
+                params.append(search_filter.before)
+            if search_filter.author:
+                where.append("(instr(casefold(author), ?) OR instr(casefold(sender), ?))")
+                params += [search_filter.author.casefold()] * 2
+            if search_filter.recipient:
+                where.append("instr(casefold(recipients), ?)")
+                params.append(search_filter.recipient.casefold())
+            if search_filter.kind:
+                where.append("kind = ?")
+                params.append(search_filter.kind)
+            if search_filter.source:
+                where.append("substr(name, 1, ?) = ?")
+                params += [len(search_filter.source), search_filter.source]
+        if not where:
+            return None
+        rows = self._db.execute(f"SELECT id FROM documents WHERE {' AND '.join(where)}", params)
+        return [row[0] for row in rows]
+
+    def search(self, vector: list[float], k: int, document_ids: list[int] | None = None) -> list[SearchResult]:
+        if self.dimensions is None or document_ids == []:
             return []
         if len(vector) != self.dimensions:
             raise IndexMismatchError(f"Query vector has {len(vector)} dimensions, the index has {self.dimensions}")
+        # The filter runs inside the KNN: the k closest chunks are taken among the allowed documents.
+        allowed = ""
+        params: list = [sqlite_vec.serialize_float32(vector), k]
+        if document_ids is not None:
+            allowed = "AND document_id IN (SELECT value FROM json_each(?))"
+            params.append(json.dumps(document_ids))
         rows = self._db.execute(
-            """
+            f"""
             WITH knn AS (
-                SELECT rowid, distance FROM vec_chunks WHERE embedding MATCH ? AND k = ?
+                SELECT rowid, distance FROM vec_chunks WHERE embedding MATCH ? AND k = ? {allowed}
             )
             SELECT c.id, c.text, c.location, d.name, d.title, d.metadata, knn.distance
             FROM knn
@@ -234,7 +271,7 @@ class VectorStore:
             JOIN documents d ON d.id = c.document_id
             ORDER BY knn.distance
             """,
-            (sqlite_vec.serialize_float32(vector), k),
+            params,
         ).fetchall()
         return [
             SearchResult(

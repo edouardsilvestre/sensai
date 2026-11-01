@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from sensai.core.rag.models import Chunk
+from sensai.core.rag.models import Chunk, SearchFilter
 from sensai.core.rag.store import DocumentRecord, IndexMismatchError, StoreError, VectorStore
 from tests.conftest import FakeClient
 
@@ -175,3 +175,67 @@ def test_an_index_of_an_older_format_needs_a_rebuild(tmp_path):
     save(rebuilt, "/docs/a.txt", ["alpha"])
     assert rebuilt.search(FakeClient.vector("alpha"), k=1)[0].text == "alpha"
     rebuilt.close()
+
+
+@pytest.fixture
+def leak(store):
+    documents = [
+        ("/leak/mails/march.eml", "email", {"from": "Jean Dupont", "to": "Marc", "date": "2023-03-14T10:05+01:00"}),
+        ("/leak/mails/june.eml", "email", {"from": "Élodie Martin", "cc": "Jean Dupont", "date": "2023-06-30T18:00"}),
+        ("/leak/report.pdf", "pdf", {"author": "Jean Dupont", "date": "2023-07-01"}),
+        ("/leak/ledger.xlsx", "spreadsheet", {}),
+    ]
+    for path, kind, metadata in documents:
+        name = path.removeprefix("/")
+        document = DocumentRecord(path, name, kind, "", metadata, "sha", 1, 1.0)
+        store.save_document(document, [Chunk(f"transfer to delta {name}")], [FakeClient.vector(f"transfer {name}")], "m")
+    return store
+
+
+def names(store: VectorStore, *filters: SearchFilter) -> set[str]:
+    ids = store.allowed_documents(filters)
+    return {result.source for result in store.search(FakeClient.vector("transfer"), 10, ids)}
+
+
+@pytest.mark.parametrize(
+    "search_filter, expected",
+    [
+        (SearchFilter(after="2023-06"), {"leak/mails/june.eml", "leak/report.pdf"}),
+        (SearchFilter(before="2023-06-30"), {"leak/mails/march.eml"}),
+        (SearchFilter(after="2023-03-14", before="2023-07"), {"leak/mails/march.eml", "leak/mails/june.eml"}),
+        (SearchFilter(author="dupont"), {"leak/mails/march.eml", "leak/report.pdf"}),
+        (SearchFilter(author="élodie"), {"leak/mails/june.eml"}),
+        (SearchFilter(recipient="DUPONT"), {"leak/mails/june.eml"}),
+        (SearchFilter(kind="email"), {"leak/mails/march.eml", "leak/mails/june.eml"}),
+        (SearchFilter(source="leak/mails/"), {"leak/mails/march.eml", "leak/mails/june.eml"}),
+        (SearchFilter(author="dupont", kind="pdf"), {"leak/report.pdf"}),
+    ],
+)
+def test_a_filter_keeps_the_matching_documents_only(leak, search_filter, expected):
+    assert names(leak, search_filter) == expected
+
+
+def test_no_filter_keeps_every_document(leak):
+    assert leak.allowed_documents([]) is None
+    assert leak.allowed_documents([SearchFilter()]) is None
+    assert len(names(leak)) == 4
+
+
+def test_a_date_filter_leaves_out_the_documents_without_a_date(leak):
+    assert "leak/ledger.xlsx" not in names(leak, SearchFilter(after="1900"))
+
+
+def test_several_filters_must_all_match(leak):
+    assert names(leak, SearchFilter(author="dupont"), SearchFilter(after="2023-06")) == {"leak/report.pdf"}
+
+
+def test_the_closest_chunks_are_taken_among_the_allowed_documents(leak):
+    ids = leak.allowed_documents([SearchFilter(kind="spreadsheet")])
+    results = leak.search(FakeClient.vector("transfer leak mails march eml"), 1, ids)
+    assert [result.source for result in results] == ["leak/ledger.xlsx"]
+
+
+def test_a_filter_that_matches_nothing_finds_nothing(leak):
+    ids = leak.allowed_documents([SearchFilter(author="nobody")])
+    assert ids == []
+    assert leak.search(FakeClient.vector("transfer"), 5, ids) == []

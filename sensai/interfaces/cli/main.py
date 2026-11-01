@@ -46,7 +46,7 @@ from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult, parse_filter
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
@@ -68,6 +68,7 @@ HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
   /sources                show the excerpts retrieved for the last message
+  /filter [FILTER|clear]  search only some documents, like after:2023-03 before:2023-07 from:dupont kind:email
   /tools                  list the tools the model can call
   /files                  show the folders the model may read and write
   /context                show the context usage and the summary of older turns
@@ -675,6 +676,31 @@ def guardrails_command(session: Session) -> None:
         print(f"  {rule.name}: {rule.action} in {where}, {rule.summary}")
     if not config.guardrails_path.exists():
         print(f"Write your own rules in {config.guardrails_path}: see guardrails.example.json.")
+
+
+FILTER_USAGE = "Usage: /filter [clear | after:2023-03 before:2023-07 from:NAME to:NAME kind:KIND source:FOLDER/]"
+
+
+def filter_command(session: Session, argument: str) -> None:
+    if argument.lower() == "clear":
+        session.agent.search_filter = SearchFilter()
+    elif argument:
+        try:
+            session.agent.search_filter = parse_filter(argument)
+        except ValueError as e:
+            error(f"{e}\n{FILTER_USAGE}")
+            return
+    search_filter = session.agent.search_filter
+    if search_filter.is_empty():
+        print("No filter: the searches look at every document.")
+        return
+    matching = ""
+    if session.index is not None:
+        count = session.index.count_documents([search_filter])
+        matching = f": the searches look at {count} of the {session.index.stats().documents} indexed documents"
+    print(f"Filter: {search_filter.describe()}{matching}.")
+
+
 def approval_command(session: Session, argument: str) -> None:
     if argument:
         if argument not in APPROVAL_MODES:
@@ -920,6 +946,8 @@ def handle_command(session: Session, line: str) -> bool:
         print(HELP)
     elif name == "/sources":
         show_excerpts(session.last_sources)
+    elif name == "/filter":
+        filter_command(session, argument)
     elif name == "/tools":
         tools_command(session)
     elif name == "/files":

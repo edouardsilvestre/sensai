@@ -3,6 +3,7 @@ import os
 import pytest
 
 from sensai.core.rag.index import DocumentIndex
+from sensai.core.rag.models import SearchFilter
 from sensai.core.rag.store import IndexMismatchError
 
 
@@ -132,3 +133,15 @@ def test_changing_the_embedding_model_needs_a_rebuild(config, client, corpus):
     rebuilt = DocumentIndex.open(config, client, rebuild=True)
     assert rebuilt.stats().documents == 0
     rebuilt.close()
+
+
+def test_a_filter_limits_the_search_to_its_documents(index, corpus, client):
+    index.ingest([corpus])
+    results = index.search("who approved the transfer to Delta?", k=3, filters=[SearchFilter(kind="spreadsheet")])
+    assert [result.source for result in results] == ["leak/accounts.csv"]
+    assert index.count_documents([SearchFilter(source="leak/emails/")]) == 1
+    assert index.count_documents([]) == 3
+
+    client.embedded.clear()
+    assert index.search("transfer", k=3, filters=[SearchFilter(author="nobody")]) == []
+    assert client.embedded == []

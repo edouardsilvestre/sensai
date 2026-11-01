@@ -14,7 +14,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.llm.ollama import LLMError, ToolCall
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult
 from sensai.core.tools.registry import SchemaTool, ToolRegistry, ToolResult, requires_approval
 from sensai.core.tools.code_runner import CodeRunner, Execution
 from sensai.core.tools.registry import ToolRegistry, ToolResult
@@ -24,9 +24,11 @@ class FakeRetriever:
     def __init__(self, results: list[SearchResult]):
         self.results = results
         self.queries: list[tuple[str, int]] = []
+        self.filters: list[list] = []
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=()) -> list[SearchResult]:
         self.queries.append((query, k))
+        self.filters.append(list(filters))
         return self.results
 
 
@@ -65,6 +67,14 @@ def test_excerpts_are_added_to_the_prompt_only(config, client):
     assert "Alice approved the transfer." in prompt
     assert prompt.endswith("Message: Who approved it?")
     assert agent.messages[0] == {"role": "user", "content": "Who approved it?"}
+
+
+def test_the_search_keeps_to_the_filter_of_the_user(config, client):
+    retriever = FakeRetriever([RESULT])
+    agent = Agent(config, client, retriever)
+    agent.search_filter = SearchFilter(author="alice", kind="email")
+    list(agent.run("Who approved it?"))
+    assert retriever.filters == [[SearchFilter(author="alice", kind="email")]]
 
 
 def test_no_results_means_a_plain_prompt(config, client):

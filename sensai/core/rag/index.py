@@ -1,6 +1,6 @@
 import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,7 +9,7 @@ from sensai.core.llm.ollama import OllamaClient
 from sensai.core.rag.chunker import Chunker
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.loaders import DocumentLoadError, is_supported, load_document
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult
 from sensai.core.rag.store import DocumentRecord, IndexStats, VectorStore
 
 
@@ -123,10 +123,17 @@ class DocumentIndex:
                 removed += 1
         return removed
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters: Sequence[SearchFilter] = ()) -> list[SearchResult]:
         if self.store.is_empty():
             return []
-        return self.store.search(self.embedder.embed_query(query), k)
+        document_ids = self.store.allowed_documents(filters)
+        if document_ids == []:
+            return []
+        return self.store.search(self.embedder.embed_query(query), k, document_ids)
+
+    def count_documents(self, filters: Sequence[SearchFilter]) -> int:
+        document_ids = self.store.allowed_documents(filters)
+        return self.stats().documents if document_ids is None else len(document_ids)
 
     def stats(self) -> IndexStats:
         return self.store.stats()

@@ -33,7 +33,7 @@ from sensai.core.events import (
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.persona import Persona
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult
 from sensai.core.rag.prompt import build_prompt
 from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema, tool_messages
 from sensai.core.tools.documents import DocumentSearch, Retriever
@@ -65,6 +65,8 @@ class Agent:
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
         self.retriever = retriever
+        # Set by the user: every search, automatic or by the model, keeps to it.
+        self.search_filter = SearchFilter()
         self.tools = tools or ToolRegistry()
         self.approver = approver
         self.memory = ConversationMemory(config, self.client)
@@ -128,7 +130,8 @@ class Agent:
         self.reasoning.append(reasoning)
         tools = self.tools if self.config.features["tools"] else ToolRegistry()
         if self.retriever is not None and self.config.features["rag"]:
-            tools = tools.extended([DocumentSearch(self.retriever, self.config.rag_top_k, sources).search_documents])
+            search = DocumentSearch(self.retriever, self.config.rag_top_k, sources, self.search_filter)
+            tools = tools.extended([search.search_documents])
         actions = tools.names()
         schema = step_schema(tools)
         messages = pending[:-1] + [{"role": "system", "content": instructions(tools)}] + pending[-1:]
@@ -168,6 +171,7 @@ class Agent:
             "model": self.config.model,
             "messages": self.memory.messages(),
             "documents": fingerprint() if fingerprint and self.config.features["rag"] else None,
+            "filter": self.search_filter.describe() if self.config.features["rag"] else None,
             "guardrails": self.active_guardrails.fingerprint(),
             "examples": [self.examples.fingerprint(), self.config.examples_k] if examples else None,
             "features": {name: self.config.features[name] for name in ("rag", "tools", "reasoning")},
@@ -240,7 +244,7 @@ class Agent:
         prompt = user_input
         sources: list[SearchResult] = []
         if self.retriever is not None and self.config.features["rag"]:
-            sources = self.retriever.search(user_input, self.config.rag_top_k)
+            sources = self.retriever.search(user_input, self.config.rag_top_k, [self.search_filter])
             if sources:
                 yield SourcesEvent(sources)
                 prompt = build_prompt(user_input, sources)

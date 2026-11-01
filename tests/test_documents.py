@@ -1,6 +1,7 @@
 import pytest
+from ollama._utils import convert_function_to_tool
 
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult
 from sensai.core.tools.documents import DocumentSearch
 from sensai.core.tools.registry import ToolError, ToolRegistry
 
@@ -18,9 +19,11 @@ class FakeRetriever:
     def __init__(self, results: list[SearchResult]):
         self.results = results
         self.queries: list[tuple[str, int]] = []
+        self.filters: list[list[SearchFilter]] = []
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=()) -> list[SearchResult]:
         self.queries.append((query, k))
+        self.filters.append(list(filters))
         return self.results
 
 
@@ -54,7 +57,7 @@ def test_an_empty_query_is_refused():
 
 def test_the_model_sees_what_the_tool_is_for():
     registry = ToolRegistry([DocumentSearch(FakeRetriever([]), 4, []).search_documents])
-    assert registry.parameters() == {"search_documents": ["query"]}
+    assert registry.parameters() == {"search_documents": ["query", "after", "before", "author", "kind"]}
     assert registry.descriptions()["search_documents"].startswith("Search the user's indexed documents")
 
 
@@ -66,3 +69,36 @@ def test_the_numbers_follow_the_excerpts_already_found():
     assert '<excerpt id="2" source="statuts_orion.pdf, p. 2">' in result.content
     assert sources == [initial, STATUTES, STATEMENT]
     assert "Cite each excerpt you rely on by its number" in result.content
+
+
+def test_the_model_can_narrow_the_search():
+    retriever = FakeRetriever([STATEMENT])
+    DocumentSearch(retriever, 4, []).search_documents("Nordbank", after="2023-04", author=" Vidal ", kind="spreadsheet")
+    assert retriever.filters == [[SearchFilter(), SearchFilter(after="2023-04", author="Vidal", kind="spreadsheet")]]
+
+
+def test_the_model_cannot_widen_the_filter_of_the_user():
+    retriever = FakeRetriever([STATEMENT])
+    journalist = SearchFilter(source="leak/banque/")
+    DocumentSearch(retriever, 4, [], journalist).search_documents("Nordbank", kind="pdf")
+    assert retriever.filters == [[journalist, SearchFilter(kind="pdf")]]
+
+
+def test_a_wrong_filter_tells_the_model_how_to_fix_it():
+    with pytest.raises(ToolError, match="search_documents: after must be a year, a month or a day"):
+        DocumentSearch(FakeRetriever([]), 4, []).search_documents("Nordbank", after="April 2023")
+
+
+def test_no_excerpt_mentions_the_filter():
+    journalist = SearchFilter(author="Vidal")
+    result = DocumentSearch(FakeRetriever([]), 4, [], journalist).search_documents("Nordbank", after="2023")
+    assert result.content == "No excerpt of the documents matches 'Nordbank' with the filter from:Vidal after:2023."
+
+
+def test_only_the_query_is_required():
+    registry = ToolRegistry([DocumentSearch(FakeRetriever([]), 4, []).search_documents])
+    [tool] = registry.tools()
+    assert convert_function_to_tool(tool).function.parameters.required == ["query"]
+    schema = registry.arguments_schemas()["search_documents"]
+    assert schema["required"] == ["query"]
+    assert schema["properties"]["after"] == {"type": "string"}

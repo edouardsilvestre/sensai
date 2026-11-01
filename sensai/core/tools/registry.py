@@ -1,4 +1,5 @@
 import inspect
+import types
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -55,7 +56,11 @@ def _arguments_schema(function: Callable) -> dict:
     parameters = inspect.signature(function).parameters.values()
     properties = {}
     for parameter in parameters:
-        json_type = _JSON_TYPES.get(parameter.annotation)
+        annotation = parameter.annotation
+        # str | None: Ollama leaves the argument out of the required ones, the type stays str.
+        if isinstance(annotation, types.UnionType):
+            annotation = next((arg for arg in annotation.__args__ if arg is not type(None)), annotation)
+        json_type = _JSON_TYPES.get(annotation)
         properties[parameter.name] = {"type": json_type} if json_type else {}
     required = [parameter.name for parameter in parameters if parameter.default is inspect.Parameter.empty]
     return {"type": "object", "properties": properties, "required": required}
