@@ -6,9 +6,11 @@ from sensai.core.evaluation.judge import (
     CLAIM_SCHEMA,
     NO_EVIDENCE,
     SCORE_SCHEMA,
+    UNCHECKED,
     Claim,
     Judgement,
     JudgeError,
+    check,
     evidence,
     judge,
     parse_claim,
@@ -147,3 +149,34 @@ def test_evidence_numbers_the_excerpts_like_the_answer_cites_them():
 
 def test_no_evidence_is_said_plainly():
     assert evidence([]) == NO_EVIDENCE
+
+
+def test_a_sentence_the_judge_cannot_finish_is_left_unchecked_and_the_next_one_is_checked():
+    client = Recorder('{"reason": "The evidence states', verdict("contradicted", "he is the manager"), scores())
+    judgement = judge(client, "qwen3:1.7b", "Qui dirige Orion ?", ANSWER, evidence([STATUTES, STATEMENT]))
+
+    assert [claim.verdict for claim in judgement.claims] == [UNCHECKED, "contradicted"]
+    assert judgement.unchecked[0].reason == "The judge did not reply in JSON"
+    assert judgement.faithfulness == 0.0
+
+
+def test_faithfulness_leaves_out_the_unchecked_sentences():
+    judgement = Judgement([Claim("a", "supported"), Claim("b", UNCHECKED), Claim("c", "unsupported")], 4, 4)
+    assert judgement.faithfulness == 0.5
+    assert Judgement([Claim("a", UNCHECKED)], 4, 4).faithfulness is None
+
+
+def test_scores_the_judge_cannot_give_are_empty():
+    client = Recorder(verdict("supported"), verdict("supported"), "{")
+    judgement = judge(client, "qwen3:1.7b", "Qui dirige Orion ?", ANSWER, evidence([STATUTES, STATEMENT]))
+    assert (judgement.relevance, judgement.coherence, judgement.faithfulness) == (None, None, 1.0)
+
+
+@pytest.mark.parametrize("judge_model, expected", [("", "chat-model"), ("qwen3:1.7b", "qwen3:1.7b")])
+def test_check_bounds_each_reply_of_the_judge(config, judge_model, expected):
+    config.judge_model, config.judge_max_tokens, config.think = judge_model, 1200, True
+    client = Recorder(verdict("supported"), verdict("supported"), scores())
+    check(client, config, "Qui dirige Orion ?", ANSWER, evidence([STATUTES, STATEMENT]))
+    assert {(call["model"], call["options"]["num_predict"], call["think"]) for call in client.calls} == {
+        (expected, 1200, True)
+    }

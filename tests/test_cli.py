@@ -39,6 +39,7 @@ def test_features_lists_every_feature(session, capsys):
         ["reasoning", "off", "reason step by step and show each step before answering"],
         ["cache", "on", "reuse the answer to a close question already asked, once you confirm it"],
         ["examples", "on", "show the model your answers kept as examples, for similar questions"],
+        ["fact_check", "off", "check each answer against its excerpts and flag what they do not support"],
     ]
 
 

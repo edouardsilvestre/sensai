@@ -2,11 +2,13 @@ import json
 import re
 from dataclasses import dataclass
 
+from sensai.core.config import Config
 from sensai.core.evaluation.facts import missing
 from sensai.core.llm.ollama import OllamaClient
 from sensai.core.rag.models import SearchResult
 
 VERDICTS = ("supported", "contradicted", "unsupported")
+UNCHECKED = "unchecked"
 FLAGGED = ("contradicted", "unsupported")
 SCORES = ("relevance", "coherence")
 
@@ -70,18 +72,23 @@ class Claim:
 @dataclass
 class Judgement:
     claims: list[Claim]
-    relevance: int
-    coherence: int
+    relevance: int | None
+    coherence: int | None
 
     @property
     def flagged(self) -> list[Claim]:
         return [claim for claim in self.claims if claim.verdict in FLAGGED]
 
     @property
+    def unchecked(self) -> list[Claim]:
+        return [claim for claim in self.claims if claim.verdict == UNCHECKED]
+
+    @property
     def faithfulness(self) -> float | None:
-        if not self.claims:
+        checked = [claim for claim in self.claims if claim.verdict != UNCHECKED]
+        if not checked:
             return None
-        return sum(claim.verdict == "supported" for claim in self.claims) / len(self.claims)
+        return sum(claim.verdict == "supported" for claim in checked) / len(checked)
 
 
 def sentences(answer: str) -> list[str]:
@@ -137,7 +144,19 @@ def judge(
             continue
         prompt = CLAIM_PROMPT.format(evidence=given, sentence=sentence)
         reply = client.chat(model, [{"role": "user", "content": prompt}], options, think=think, format=CLAIM_SCHEMA)
-        claims.append(parse_claim(sentence, reply))
+        try:
+            claims.append(parse_claim(sentence, reply))
+        except JudgeError as e:
+            claims.append(Claim(sentence, UNCHECKED, str(e)))
     prompt = SCORE_PROMPT.format(question=question, answer=answer)
     reply = client.chat(model, [{"role": "user", "content": prompt}], options, think=think, format=SCORE_SCHEMA)
-    return Judgement(claims, *parse_scores(reply))
+    try:
+        relevance, coherence = parse_scores(reply)
+    except JudgeError:
+        relevance = coherence = None
+    return Judgement(claims, relevance, coherence)
+
+
+def check(client: OllamaClient, config: Config, question: str, answer: str, given: str) -> Judgement:
+    options = {"num_ctx": config.num_ctx, "num_predict": config.judge_max_tokens}
+    return judge(client, config.judge_model or config.model, question, answer, given, options, think=config.think)
