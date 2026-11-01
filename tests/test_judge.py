@@ -90,8 +90,7 @@ def test_a_sentence_with_an_amount_a_date_or_a_name_not_in_the_evidence_is_not_s
     judgement = judge(client, "qwen3:1.7b", "Qui a reçu de l'argent ?", answer, evidence([STATUTES, STATEMENT]))
 
     assert judgement.claims[1] == Claim(
-        "Paul Girard a reçu 35 000 EUR de Nordbank en 2022 [2].", "unsupported",
-        "Not in the evidence: 35 000, 2022, Paul Girard.",
+        "Paul Girard a reçu 35 000 EUR de Nordbank en 2022 [2].", "unsupported", "35 000, 2022, Paul Girard", "code"
     )
     assert [call["format"] for call in client.calls] == [CLAIM_SCHEMA, SCORE_SCHEMA]
     assert "Paul Girard" not in client.calls[0]["prompt"]

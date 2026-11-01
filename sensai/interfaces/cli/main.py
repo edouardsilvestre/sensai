@@ -14,6 +14,9 @@ from sensai.core.cache import CachedAnswer, CacheError, SemanticCache
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
 from sensai.core.events import (
     AgentStartedEvent,
+    CheckEvent,
+    CheckFailedEvent,
+    CheckStartedEvent,
     CacheFailedEvent,
     CacheHitEvent,
     CompactionEvent,
@@ -35,6 +38,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.document.document import Document, Edit, EditReport
+from sensai.core.evaluation.judge import UNCHECKED, Claim, Judgement
 from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
@@ -322,6 +326,30 @@ def print_guardrail(hit: Hit) -> None:
     # A blocked tool call is reported by its result, which the model also gets.
 
 
+def claim_label(claim: Claim) -> str:
+    if claim.verdict == UNCHECKED:
+        return "unchecked"
+    if claim.by == "code":
+        return "not in the excerpts"
+    return "contradicted" if claim.verdict == "contradicted" else "to verify"
+
+
+def print_judgement(judgement: Judgement) -> None:
+    supported = sum(claim.verdict == "supported" for claim in judgement.claims)
+    faithfulness = "-" if judgement.faithfulness is None else f"{judgement.faithfulness:.0%}"
+    scores = ", ".join(
+        f"{name} {'-' if score is None else score}/5"
+        for name, score in (("relevance", judgement.relevance), ("coherence", judgement.coherence))
+    )
+    print(
+        f"[check] {plural(len(judgement.claims), 'sentence')}: {supported} supported, "
+        f"faithfulness {faithfulness}, {scores}"
+    )
+    for claim in judgement.claims:
+        if claim.verdict != "supported":
+            print(f'  {claim_label(claim)}: "{claim.text}"' + (f" ({claim.reason})" if claim.reason else ""))
+
+
 def chat_turn(session: Session, line: str) -> None:
     if line.strip():
         session.last_sources = []
@@ -355,6 +383,15 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                 print(f"[examples] {plural(len(event.examples), 'example')}: {questions}")
             elif isinstance(event, ExamplesFailedEvent):
                 warning(f"No examples were shown to the model: {event.message}")
+            elif isinstance(event, CheckStartedEvent):
+                print(
+                    f"[check] Checking {plural(event.sentences, 'sentence')} with {event.model}, "
+                    "this can take a few minutes (Ctrl+C to skip)..."
+                )
+            elif isinstance(event, CheckEvent):
+                print_judgement(event.judgement)
+            elif isinstance(event, CheckFailedEvent):
+                warning(f"The answer could not be checked: {event.message}")
             elif isinstance(event, ReviewDoneEvent):
                 rounds = plural(event.rounds, "check")
                 if event.approved:

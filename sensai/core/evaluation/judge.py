@@ -67,6 +67,7 @@ class Claim:
     text: str
     verdict: str
     reason: str = ""
+    by: str = "judge"
 
 
 @dataclass
@@ -139,8 +140,7 @@ def judge(
     for sentence in sentences(answer):
         absent = missing(sentence, given)
         if absent:
-            reason = f"Not in the evidence: {', '.join(fact.text for fact in absent)}."
-            claims.append(Claim(sentence, "unsupported", reason))
+            claims.append(Claim(sentence, "unsupported", ", ".join(fact.text for fact in absent), by="code"))
             continue
         prompt = CLAIM_PROMPT.format(evidence=given, sentence=sentence)
         reply = client.chat(model, [{"role": "user", "content": prompt}], options, think=think, format=CLAIM_SCHEMA)
