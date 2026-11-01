@@ -716,17 +716,28 @@ def resume(session: Session, session_id: str) -> bool:
         error(str(e))
         return False
     session.session_id = session_id
-    session.last_sources = []
-    session.last_dropped = []
-    session.agent.reasoning.clear()
+    cleared = forget_conversation(session)
     memory_turns = session.agent.memory.turns
     session.answered = (memory_turns[-1], []) if memory_turns else None
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
-    print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
+    print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.{cleared}")
     branches = session.agent.memory.branches()
     if len(branches) > 1:
         print(f"On branch {session.agent.memory.branch.number} of {len(branches)}: /branches lists them.")
     return True
+
+
+def forget_conversation(session: Session) -> str:
+    """
+    Forgets what belongs to the conversation left, and says which filter it cleared: the filter is shown nowhere, it
+    would narrow the searches of the next conversation without the user knowing.
+    """
+    session.last_sources = []
+    session.last_dropped = []
+    session.agent.reasoning.clear()
+    previous = session.agent.search_filter.describe()
+    session.agent.search_filter = SearchFilter()
+    return f" Filter {previous} cleared: /filter to set it again." if previous else ""
 
 
 def resume_command(session: Session, argument: str) -> None:
@@ -740,12 +751,10 @@ def new_command(session: Session) -> None:
     session.agent.memory.clear()
     session.session_id = None
     session.agent.session_id = ""
-    session.last_sources = []
-    session.last_dropped = []
-    session.agent.reasoning.clear()
+    cleared = forget_conversation(session)
     session.answered = None
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
-    print(f"New conversation.{saved}")
+    print(f"New conversation.{saved}{cleared}")
 
 
 def shorten(text: str) -> str:

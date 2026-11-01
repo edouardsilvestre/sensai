@@ -1,9 +1,10 @@
 import pytest
 
 from sensai.core.agent import Agent
+from sensai.core.memory.sessions import SessionStore
 from sensai.core.rag.models import SearchFilter
 from sensai.core.rag.store import IndexStats
-from sensai.interfaces.cli.main import Session, handle_command
+from sensai.interfaces.cli.main import Session, handle_command, load_memory
 
 
 class FakeIndex:
@@ -58,3 +59,26 @@ def test_a_filter_without_index(config, client, capsys):
     handle_command(session, "/filter kind:pdf")
     assert session.agent.search_filter == SearchFilter(kind="pdf")
     assert "Filter: kind:pdf." in capsys.readouterr().out
+
+
+def test_a_new_conversation_clears_the_filter(session, capsys):
+    handle_command(session, "/filter from:Marc after:2023")
+    capsys.readouterr()
+    handle_command(session, "/new")
+    assert session.agent.search_filter.is_empty()
+    assert "Filter after:2023 from:Marc cleared: /filter to set it again." in capsys.readouterr().out
+
+
+def test_a_resumed_conversation_clears_the_filter(session, capsys):
+    load_memory(session, None)
+    SessionStore(session.config.sessions_dir).save("vidal", session.agent.memory, "m")
+    handle_command(session, "/filter kind:pdf")
+    capsys.readouterr()
+    handle_command(session, "/resume vidal")
+    assert session.agent.search_filter.is_empty()
+    assert "Filter kind:pdf cleared" in capsys.readouterr().out
+
+
+def test_no_filter_cleared_without_a_filter(session, capsys):
+    handle_command(session, "/new")
+    assert "Filter" not in capsys.readouterr().out
