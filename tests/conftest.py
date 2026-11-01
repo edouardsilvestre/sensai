@@ -107,4 +107,6 @@ def config(tmp_path) -> Config:
         examples_path=tmp_path / "examples.json",
         prompts_dir=tmp_path / "prompts",
         prompt_cases_path=tmp_path / "prompt_cases.json",
+        schedule_path=tmp_path / "schedule.json",
+        reports_dir=tmp_path / "reports",
     )

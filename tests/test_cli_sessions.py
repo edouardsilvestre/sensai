@@ -134,7 +134,7 @@ def test_profile_shows_the_numbered_instructions(session, capsys):
     assert "  1. Answer in French." in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("argument", ["remove", "remove x", "remove 3", "add", "edit"])
+@pytest.mark.parametrize("argument", ["remove", "remove x", "remove ²", "remove 3", "add", "edit"])
 def test_invalid_profile_command(session, capsys, argument):
     handle_command(session, f"/profile {argument}")
     assert capsys.readouterr().err
