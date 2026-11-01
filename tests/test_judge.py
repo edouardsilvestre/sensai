@@ -19,7 +19,7 @@ from sensai.core.rag.models import SearchResult
 
 STATUTES = SearchResult(1, "Gérance : M. Marc Vidal, nommé gérant.", "p. 2", "statuts_orion.pdf", "", 0.9)
 STATEMENT = SearchResult(2, "05/04/2023 VIR NORDBANK SA -> ORION 480 000,00", "", "releve.csv", "", 0.8)
-ANSWER = "Marc Vidal dirige Orion [1]. Il a touché 480 000 EUR en 2022 [2]."
+ANSWER = "Marc Vidal dirige Orion [1]. Il est le seul associé [1]."
 
 
 def verdict(value: str, reason: str = "the evidence says so") -> str:
@@ -61,14 +61,14 @@ def test_an_initial_does_not_cut_a_sentence():
 
 
 def test_each_sentence_is_checked_on_its_own_then_the_answer_is_scored():
-    client = Recorder(verdict("supported"), verdict("contradicted", "the transfer is of 2023"), scores())
+    client = Recorder(verdict("supported"), verdict("contradicted", "he is the manager"), scores())
     judgement = judge(client, "qwen3:1.7b", "Qui dirige Orion ?", ANSWER, evidence([STATUTES, STATEMENT]),
                       {"num_ctx": 8192}, think=True)
 
     assert judgement == Judgement(
         [
             Claim("Marc Vidal dirige Orion [1].", "supported", "the evidence says so"),
-            Claim("Il a touché 480 000 EUR en 2022 [2].", "contradicted", "the transfer is of 2023"),
+            Claim("Il est le seul associé [1].", "contradicted", "he is the manager"),
         ],
         5, 4,
     )
@@ -77,9 +77,22 @@ def test_each_sentence_is_checked_on_its_own_then_the_answer_is_scored():
     assert {(call["model"], call["think"], call["options"]["num_ctx"]) for call in client.calls} == {
         ("qwen3:1.7b", True, 8192)
     }
-    assert "Sentence: Marc Vidal dirige Orion [1]." in first["prompt"] and "Il a touché" not in first["prompt"]
+    assert "Sentence: Marc Vidal dirige Orion [1]." in first["prompt"] and "seul associé" not in first["prompt"]
     assert "Evidence:\n[1] statuts_orion.pdf, p. 2:" in second["prompt"]
     assert "Question: Qui dirige Orion ?" in last["prompt"] and ANSWER in last["prompt"]
+
+
+def test_a_sentence_with_an_amount_a_date_or_a_name_not_in_the_evidence_is_not_sent_to_the_model():
+    client = Recorder(verdict("supported"), scores())
+    answer = "Marc Vidal dirige Orion [1]. Paul Girard a reçu 35 000 EUR de Nordbank en 2022 [2]."
+    judgement = judge(client, "qwen3:1.7b", "Qui a reçu de l'argent ?", answer, evidence([STATUTES, STATEMENT]))
+
+    assert judgement.claims[1] == Claim(
+        "Paul Girard a reçu 35 000 EUR de Nordbank en 2022 [2].", "unsupported",
+        "Not in the evidence: 35 000, 2022, Paul Girard.",
+    )
+    assert [call["format"] for call in client.calls] == [CLAIM_SCHEMA, SCORE_SCHEMA]
+    assert "Paul Girard" not in client.calls[0]["prompt"]
 
 
 def test_faithfulness_is_the_share_of_supported_sentences():

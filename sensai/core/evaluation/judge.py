@@ -2,6 +2,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from sensai.core.evaluation.facts import missing
 from sensai.core.llm.ollama import OllamaClient
 from sensai.core.rag.models import SearchResult
 
@@ -129,6 +130,11 @@ def judge(
 ) -> Judgement:
     claims = []
     for sentence in sentences(answer):
+        absent = missing(sentence, given)
+        if absent:
+            reason = f"Not in the evidence: {', '.join(fact.text for fact in absent)}."
+            claims.append(Claim(sentence, "unsupported", reason))
+            continue
         prompt = CLAIM_PROMPT.format(evidence=given, sentence=sentence)
         reply = client.chat(model, [{"role": "user", "content": prompt}], options, think=think, format=CLAIM_SCHEMA)
         claims.append(parse_claim(sentence, reply))
