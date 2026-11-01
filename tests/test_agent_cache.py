@@ -6,6 +6,7 @@ import pytest
 from sensai.core.agent import Agent
 from sensai.core.cache import SemanticCache
 from sensai.core.events import CacheFailedEvent, CacheHitEvent, DoneEvent, SourcesEvent, TokenEvent
+from sensai.core.examples import Example, ExampleLibrary
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.persona import Persona
@@ -168,6 +169,50 @@ def test_turning_the_guardrails_off_is_another_context(config, client, cache):
     config.features["guardrails"] = False
     list(agent.run(QUESTION))
     assert confirm.asked == []
+
+
+@pytest.fixture
+def examples(tmp_path):
+    return ExampleLibrary(tmp_path / "examples.json", embed)
+
+
+def test_a_new_example_is_another_context(config, client, cache, examples):
+    confirm = Confirm()
+    agent = make_agent(config, client, cache, confirm, examples=examples)
+    list(agent.run(QUESTION))
+    new_conversation(agent)
+    examples.add(Example("Quel montant a reçu Marc Vidal ?", "Les documents ne le disent pas."))
+    list(agent.run(QUESTION))
+    assert confirm.asked == []
+
+
+@pytest.mark.parametrize("change", ["feature off", "k changed"])
+def test_showing_the_examples_differently_is_another_context(config, client, cache, examples, change):
+    examples.add(Example("Quel montant a reçu Marc Vidal ?", "Les documents ne le disent pas."))
+    confirm = Confirm()
+    agent = make_agent(config, client, cache, confirm, examples=examples)
+    list(agent.run(QUESTION))
+    new_conversation(agent)
+    if change == "feature off":
+        config.features["examples"] = False
+    else:
+        config.examples_k = 1
+    list(agent.run(QUESTION))
+    assert confirm.asked == []
+
+
+@pytest.mark.parametrize("setting", ["empty library", "feature off"])
+def test_examples_never_shown_do_not_change_the_context(config, client, cache, examples, setting):
+    if setting == "feature off":
+        examples.add(Example("Quel montant a reçu Marc Vidal ?", "Les documents ne le disent pas."))
+        config.features["examples"] = False
+    confirm = Confirm()
+    agent = make_agent(config, client, cache, confirm)
+    list(agent.run(QUESTION))
+    new_conversation(agent)
+    agent.examples = examples
+    list(agent.run(QUESTION))
+    assert len(confirm.asked) == 1
 
 
 def test_an_answer_that_used_a_tool_is_not_kept(config, client, cache):

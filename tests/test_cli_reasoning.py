@@ -92,7 +92,7 @@ def test_reasoning_shows_the_steps_and_the_results_of_a_question(session, client
     ]
 
 
-@pytest.mark.parametrize("argument", ["2", "0", "abc"])
+@pytest.mark.parametrize("argument", ["2", "0", "abc", "²"])
 def test_reasoning_refuses_an_unknown_question(session, client, capsys, argument):
     ask(session, client, "Merci", step("Nothing to look up."))
     handle_command(session, f"/reasoning {argument}")

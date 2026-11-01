@@ -7,6 +7,7 @@ from sensai.core.cache import CacheError, CachedAnswer, ConfirmCache, SemanticCa
 from sensai.core.config import Config
 from sensai.core.document.document import DocumentError, Edit, Rejected
 from sensai.core.document.editor import DocumentEditor, model_editor
+from sensai.core.examples import ExampleLibrary, examples_message
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
@@ -19,6 +20,8 @@ from sensai.core.events import (
     DocumentFailedEvent,
     DoneEvent,
     Event,
+    ExamplesEvent,
+    ExamplesFailedEvent,
     GuardrailEvent,
     ReasoningStoppedEvent,
     SourcesEvent,
@@ -57,6 +60,7 @@ class Agent:
         editor: DocumentEditor | None = None,
         cache: SemanticCache | None = None,
         confirm_cache: ConfirmCache | None = None,
+        examples: ExampleLibrary | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -66,6 +70,7 @@ class Agent:
         self.memory = ConversationMemory(config, self.client)
         self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
+        self.examples = examples
         self.reasoning: list[Reasoning] = []
         self.cache = cache
         self.confirm_cache = confirm_cache
@@ -155,11 +160,16 @@ class Agent:
 
     def _context(self) -> str:
         fingerprint = getattr(self.retriever, "fingerprint", None)
+        examples = (
+            self.examples is not None and self.examples.examples
+            and self.config.examples_k > 0 and self.config.features["examples"]
+        )
         context = {
             "model": self.config.model,
             "messages": self.memory.messages(),
             "documents": fingerprint() if fingerprint and self.config.features["rag"] else None,
             "guardrails": self.active_guardrails.fingerprint(),
+            "examples": [self.examples.fingerprint(), self.config.examples_k] if examples else None,
             "features": {name: self.config.features[name] for name in ("rag", "tools", "reasoning")},
         }
         return hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -236,6 +246,15 @@ class Agent:
                 prompt = build_prompt(user_input, sources)
 
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
+        if self.examples is not None and self.config.features["examples"] and format is None:
+            try:
+                chosen = self.examples.closest(user_input, self.config.examples_k)
+            except LLMError as e:
+                yield ExamplesFailedEvent(str(e))
+                chosen = []
+            if chosen:
+                yield ExamplesEvent(chosen)
+                pending.insert(-1, {"role": "system", "content": examples_message(chosen)})
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
         # The schema constrains every token of the answer: the model could not call a tool.
