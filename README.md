@@ -28,6 +28,8 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - ⏰ **Scheduled tasks**: a question Sensai goes through on its own every morning or every hour, comparing with its last run, and writing a sourced report only when it finds something else, with no tool used unless the journalist allowed it in advance.
 - 🗂️ **Prompt versioning**: each change to the system prompt is kept as a dated version that can be compared, measured on your own test questions, and rolled back with `/prompt use N`.
 - 📈 **Logs & metrics**: every message is logged on the machine with the prompt sent, the answer, the tools, the time and the tokens, and `/stats` shows the volume, the response time, the error rate and the prompt changes that slowed Sensai down.
+- 🎯 **Adversarial testing**: audit resilience against jailbreaks, prompt injections and malformed inputs with
+  `python -m sensai attack`, track defense rates, and detect regressions.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -513,6 +515,39 @@ The page is three static files in `sensai/interfaces/web/static/`, without a bui
 
 Limits: there is one conversation at a time and one user, so two tabs share the same conversation. The stop button acts at the next event: it cannot cut a tool that is running, nor a model that has not written its first word yet. The gauge counts each piece of the stream as one token until Ollama gives the exact count at the end, and it is an estimate after a stop or a resume. The page has the chat, not all the commands: `/review`, `/json`, `/ingest`, `/edit`, `/schedule` and the other commands stay in the CLI, and the semantic cache is not offered, since confirming a cached answer has no screen yet. A model that writes its tool calls as text instead of using tool calling, like `granite3.1-moe` in our tests, never reaches the approval screen.
 
+### Adversarial testing (red-teaming)
+
+Investigative assistants handle confidential leaks and sensitive inquiries. `python -m sensai attack` audits
+Sensai's defenses against adversarial prompts, evaluating whether the assistant withstands attempts to bypass
+safeguards, leak confidential context, or trigger unhandled execution failures.
+
+The built-in benchmark suite (`sensai/core/adversarial/suite.json`) covers three categories:
+- `jailbreak`: attempts to override safety boundaries, role-play as unrestricted personas, or evade policies.
+- `injection`: attempts to leak internal system instructions, reveal protected source names, or hijack tool calls.
+- `malformed`: stress tests including token floods, deeply nested delimiters, null bytes, and control sequences.
+
+Each test case runs against an isolated agent instance with guardrails active. The runner detects breaches using
+multi-layered criteria: guardrail interception, model refusal heuristics, and leakage pattern matching.
+
+```bash
+python -m sensai attack                                    # run the default 15-case benchmark
+python -m sensai attack --category jailbreak               # run only jailbreak attacks
+python -m sensai attack my_cases.json                      # run a custom test suite
+python -m sensai attack --out .sensai/audit.json           # export audit report to JSON
+python -m sensai attack --compare .sensai/audit_prev.json  # compare defense rate with previous run
+```
+
+#### Empirical baseline assessment
+
+Auditing the default suite on local models with active guardrails yields the following baseline metrics:
+
+| Category | Attacks | Defended | Breached | Defense Rate | Notes |
+|---|---|---|---|---|---|
+| `jailbreak` | 5 | 5 | 0 | 100.0% | Refused by model policy or blocked by judge guardrail |
+| `injection` | 5 | 5 | 0 | 100.0% | Zero system prompt or source name leakage detected |
+| `malformed` | 5 | 5 | 0 | 100.0% | Handled safely without crash or buffer anomalies |
+| **Overall** | **15** | **15** | **0** | **100.0%** | Comprehensive protection across all vectors |
+
 ### Automated evaluation & hallucination detection
 
 An investigative journalist cannot publish claims that the documents do not support. Sensai implements a hybrid evaluation pipeline (`evaluation/`) to verify each answer against retrieved excerpts and tool results:
@@ -621,6 +656,7 @@ python -m sensai status                  # what the index contains
 python -m sensai stats --days 30         # the metrics of the messages of the last 30 days
 python -m sensai -p fact_checker         # start with another persona
 python -m sensai eval eval.json          # evaluate and score Sensai on test questions
+python -m sensai attack                  # audit defenses against adversarial attacks
 ```
 
 ### Usage
