@@ -3,7 +3,7 @@ from dataclasses import dataclass, field, replace
 
 from sensai.core.config import Config
 from sensai.core.document.document import Document
-from sensai.core.llm.ollama import OllamaClient, Usage
+from sensai.core.llm.ollama import OllamaClient, ToolCall, Usage
 from sensai.core.memory.profile import PROFILE_HEADER
 from sensai.core.memory.prompt import build_summary_prompt, summary_word_limit
 
@@ -14,15 +14,32 @@ DOCUMENT_HEADER = (
 
 
 @dataclass
+class ToolUse:
+    """A tool call of a past turn, kept short: `Agent.used_tool` says what is in it."""
+
+    name: str
+    arguments: dict
+    result: str
+
+    def messages(self) -> list[dict]:
+        return [
+            {"role": "assistant", "content": "", "tool_calls": [ToolCall(self.name, self.arguments).message()]},
+            {"role": "tool", "tool_name": self.name, "content": self.result},
+        ]
+
+
+@dataclass
 class Turn:
     user: str
     assistant: str
     citations: list[str] = field(default_factory=list)
     # The working document before this turn: a branch that replaces the turn starts from it.
     document: str = field(default="", compare=False)
+    tools: list[ToolUse] = field(default_factory=list)
 
     def messages(self) -> list[dict]:
-        return [{"role": "user", "content": self.user}, {"role": "assistant", "content": self.assistant}]
+        tools = [message for tool in self.tools for message in tool.messages()]
+        return [{"role": "user", "content": self.user}, *tools, {"role": "assistant", "content": self.assistant}]
 
 
 @dataclass
@@ -85,9 +102,11 @@ class ConversationMemory:
         return messages
 
     def commit(
-        self, user: str, assistant: str, citations: list[str] | None = None, usage: Usage | None = None
+        self, user: str, assistant: str, citations: list[str] | None = None, usage: Usage | None = None,
+        tools: list[ToolUse] | None = None,
     ) -> None:
-        self.turns = self.turns + [Turn(user, assistant, list(citations or []), self.document.markdown())]
+        turn = Turn(user, assistant, list(citations or []), self.document.markdown(), list(tools or []))
+        self.turns = self.turns + [turn]
         self.last_usage = usage
         # The first message of a branch names it, as it was kept: the guardrails went through it.
         if self.branch.parent is not None and not self.branch.label:

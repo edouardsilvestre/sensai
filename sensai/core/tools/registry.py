@@ -12,11 +12,15 @@ class ToolError(Exception):
 
 @dataclass
 class ToolResult:
-    """`content` is sent to the model, `summary` is only shown to the user."""
+    """
+    `content` is sent to the model, `summary` is only shown to the user.
+    A `private` result stays in its turn: neither the history nor the saved session keeps it.
+    """
 
     content: str
     summary: str = ""
     error: bool = False
+    private: bool = False
 
 
 @dataclass

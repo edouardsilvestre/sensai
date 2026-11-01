@@ -3,6 +3,7 @@ from collections.abc import Generator, Iterator
 
 from sensai.core.agent import Agent, cut_answer
 from sensai.core.events import AgentStartedEvent, DoneEvent, Event, ReviewDoneEvent, SourcesEvent, ToolResultEvent
+from sensai.core.memory.conversation import ToolUse
 from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 
@@ -122,6 +123,8 @@ class Review:
         self.investigator.memory.document = agent.memory.document
         self.sources: dict[int, SearchResult] = {}
         self.tool_results: list[str] = []
+        # The tool calls of the rounds already over, which the history of the main agent keeps.
+        self.used: list[ToolUse] = []
         # What `interrupt` needs: the agent at work, the question and the last complete answer of the investigator.
         self.running: Agent | None = None
         self.question = ""
@@ -152,7 +155,7 @@ class Review:
             return False
         # The fact-checker writes JSON for the review, not a text for the journalist.
         written = "" if self.running is self.fact_checker else "".join(self.running.shown).lstrip()
-        self.agent.memory.commit(question, cut_answer(written or self.answer))
+        self.agent.memory.commit(question, cut_answer(written or self.answer), tools=self.used + self.running.used)
         self.running = None
         return True
 
@@ -196,6 +199,7 @@ class Review:
             elif isinstance(event, ToolResultEvent) and not event.result.error:
                 self.tool_results.append(f"[{event.call.name}] {event.result.content}")
             yield event
+        self.used = self.used + agent.used
         return content
 
     def _evidence(self) -> str:
@@ -207,7 +211,7 @@ class Review:
         return "\n\n".join(excerpts + self.tool_results) or NO_EVIDENCE
 
     def _finish(self, question: str, is_approved: bool, content: str, rounds: int) -> Iterator[Event]:
-        self.agent.memory.commit(question, content)
+        self.agent.memory.commit(question, content, tools=self.used)
         self.running = None
         yield ReviewDoneEvent(is_approved, content, rounds)
         # A text the fact-checker did not approve is not an established fact.

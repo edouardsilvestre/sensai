@@ -16,7 +16,7 @@ from sensai.core.evaluation.runner import (
     save_results,
     summarize,
 )
-from sensai.core.llm.ollama import LLMError
+from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.interfaces.cli.main import main
 
 from test_agent_check import ANSWER, JudgeClient, Retriever
@@ -196,6 +196,15 @@ def test_the_eval_command_compares_with_a_former_run(cli, tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Compared with" in out and "expected: 50% → 100% (+50)" in out
+
+
+def test_the_eval_command_has_nobody_to_ask(cli, monkeypatch):
+    client, cases, env = cli
+    monkeypatch.setenv("SENSAI_FEATURE_TOOLS", "true")
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("the evaluation waited for the keyboard"))
+    client.tool_rounds = [[ToolCall("ask_user", {"question": "Which Orion?"})]]
+    assert main(["-e", env, "eval", cases]) == 0
+    assert "ask_user" not in str(client.tools_seen)
 
 
 def test_the_eval_command_stops_on_an_invalid_file(cli, tmp_path, capsys):

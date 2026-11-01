@@ -2,6 +2,8 @@ ollama>=0.6
 python-dotenv>=1.0
 sqlite-vec>=0.1.6
 pypdf>=4.0
+fastapi>=0.115
+uvicorn>=0.30
 openpyxl>=3.1
 # The cross-encoder of the rerank feature. Without a GPU, install torch first, from
 # https://download.pytorch.org/whl/cpu: the default one comes with gigabytes of CUDA libraries.

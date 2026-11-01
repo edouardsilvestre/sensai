@@ -52,6 +52,12 @@ def test_shipped_personas_are_valid():
     assert set(load_personas(DEFAULT_PERSONAS_DIR)) == {"investigator", "fact_checker", "editor"}
 
 
+def test_the_scope_is_not_a_task_to_start():
+    prompt = Persona("p", "Ana", "a role.", "calm.", "find leads.").system_prompt()
+    assert "Answer the user's message and nothing else." in prompt
+    assert "When the user asks for it, you can help with this work: find leads." in prompt
+
+
 def test_system_prompt_contains_every_field():
     prompt = Persona("p", "Ana", "a role.", "calm.", "only facts.", "Cite.").system_prompt()
     for text in ("Ana", "a role.", "calm.", "only facts.", "Cite."):

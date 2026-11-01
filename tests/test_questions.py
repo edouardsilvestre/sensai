@@ -50,7 +50,7 @@ def test_an_empty_question_is_refused():
 @pytest.mark.parametrize("answer", [None, "", "   "])
 def test_without_answer_the_model_goes_on_without_asking_again(answer):
     result = Questions(FakeAsker(answer)).ask_user(QUESTION)
-    assert result == ToolResult(NO_ANSWER, summary="no answer")
+    assert result == ToolResult(NO_ANSWER, summary="no answer", private=True)
     assert "Do not ask again" in result.content
 
 

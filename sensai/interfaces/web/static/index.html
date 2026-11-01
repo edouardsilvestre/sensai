@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sensai</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c96442'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='21' text-anchor='middle' fill='%23fff'%3ES%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="brand">Sensai</div>
+    <button id="new-chat" class="side-button" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      New chat
+    </button>
+    <h2>Recents</h2>
+    <nav id="sessions" aria-label="Saved conversations"></nav>
+    <button id="open-settings" class="side-button" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+      Settings
+    </button>
+  </aside>
+
+  <main id="main" class="empty">
+    <button id="toggle-sidebar" type="button" aria-label="Show the conversations">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <div id="scroller">
+      <div id="conversation" aria-live="polite"></div>
+    </div>
+    <div id="dock">
+      <h1 id="greeting">What are we looking into?</h1>
+      <form id="composer">
+        <textarea id="input" rows="1" placeholder="Ask about your documents..." aria-label="Message" autofocus></textarea>
+        <div class="composer-row">
+          <select id="persona" aria-label="Persona"></select>
+          <div id="usage" title="Context used by the conversation">
+            <div class="meter"><div id="meter-fill"></div></div>
+            <span id="usage-text"></span>
+          </div>
+          <span id="model"></span>
+          <button id="send" type="submit" aria-label="Send" disabled>
+            <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+            <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+          </button>
+        </div>
+      </form>
+      <p id="notice">Sensai runs on this machine. Check every claim against its source.</p>
+    </div>
+  </main>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <div class="settings-head">
+        <h2>Settings</h2>
+        <button class="close" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <p class="settings-note">Features change for this run. Set them in <code>.env</code> to keep them.</p>
+      <div id="features"></div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="alert"></div>
+  <script src="app.js"></script>
+</body>
+</html>
