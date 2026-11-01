@@ -4,6 +4,7 @@ import pytest
 
 from sensai.core.rag.index import DocumentIndex
 from sensai.core.rag.models import SearchFilter
+from sensai.core.rag.reranker import Reranker
 from sensai.core.rag.store import IndexMismatchError
 
 
@@ -166,3 +167,24 @@ def test_the_hybrid_search_finds_what_the_vectors_miss(config, client, accounts)
     config.features["hybrid"] = False
     assert [r.source for r in index.search("FR7630004000 transfer", k=2)] == ["accounts/a.txt", "accounts/c.txt"]
     index.close()
+
+
+def test_the_reranker_puts_first_the_chunk_that_answers(index, corpus, config):
+    index.ingest([corpus])
+    index.reranker = Reranker("fake", scorer=lambda pairs: [5.0 if "Geneva" in passage else -5.0 for _, passage in pairs])
+    [best] = index.search("who approved the transfer to Delta?", k=1)
+    assert best.source == "leak/accounts.csv"
+    assert best.relevance > 0.99
+
+    config.features["rerank"] = False
+    [best] = index.search("who approved the transfer to Delta?", k=1)
+    assert (best.source, best.relevance) == ("leak/emails/transfer.txt", None)
+
+
+def test_the_reranker_reads_every_candidate_but_keeps_k(index, corpus, config):
+    index.ingest([corpus])
+    read = []
+    index.reranker = Reranker("fake", scorer=lambda pairs: read.extend(pairs) or [0.0] * len(pairs))
+    config.rag_candidates = 3
+    assert len(index.search("transfer budget bank", k=1)) == 1
+    assert len(read) == 3

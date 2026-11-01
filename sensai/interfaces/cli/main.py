@@ -48,6 +48,7 @@ from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchFilter, SearchResult, parse_filter
 from sensai.core.rag.prompt import cited_numbers
+from sensai.core.rag.reranker import RerankError
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
 from sensai.core.tools.catalog import build_registry
@@ -286,12 +287,18 @@ def print_sources(sources: list[SearchResult], cited: list[int]) -> None:
         warning("the answer cites excerpts that do not exist: " + " ".join(f"[{n}]" for n in unknown))
 
 
+def describe_score(source: SearchResult) -> str:
+    if source.relevance is None:
+        return f"similarity {source.score:.2f}"
+    return f"relevance {source.relevance:.2f}, similarity {source.score:.2f}"
+
+
 def show_excerpts(sources: list[SearchResult]) -> None:
     if not sources:
         print("No excerpts were retrieved for the last message.")
         return
     for number, source in enumerate(sources, start=1):
-        print(f"\n[{number}] {source.citation} (similarity {source.score:.2f})")
+        print(f"\n[{number}] {source.citation} ({describe_score(source)})")
         print(textwrap.indent(source.text, "    "))
 
 
@@ -413,7 +420,7 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                 warning(f"Could not condense the history, retrying after the next message: {event.message}")
     except EmptyInputError:
         error("Empty message, please type something.")
-    except (LLMError, StoreError) as e:
+    except (LLMError, StoreError, RerankError) as e:
         print()
         error(str(e))
     except KeyboardInterrupt:

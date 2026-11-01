@@ -39,7 +39,10 @@ class SearchResult:
     location: str
     source: str
     description: str
+    # The cosine similarity of the chunk to the query.
     score: float
+    # From 0 to 1, how well the chunk answers the query according to the reranker; None when it was not reranked.
+    relevance: float | None = None
 
     @property
     def citation(self) -> str:

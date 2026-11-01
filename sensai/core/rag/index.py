@@ -10,6 +10,7 @@ from sensai.core.rag.chunker import Chunker
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.loaders import DocumentLoadError, is_supported, load_document
 from sensai.core.rag.models import SearchFilter, SearchResult
+from sensai.core.rag.reranker import Reranker
 from sensai.core.rag.retriever import fuse
 from sensai.core.rag.store import DocumentRecord, IndexStats, VectorStore
 
@@ -37,11 +38,12 @@ class IngestReport:
 
 
 class DocumentIndex:
-    def __init__(self, store: VectorStore, embedder: Embedder, chunker: Chunker, config: Config):
+    def __init__(self, store: VectorStore, embedder: Embedder, chunker: Chunker, reranker: Reranker, config: Config):
         self.store = store
         self.embedder = embedder
         self.chunker = chunker
-        # Read at each search, so that /feature hybrid off takes effect at once.
+        self.reranker = reranker
+        # Read at each search, so that /feature hybrid off or /feature rerank off takes effect at once.
         self.config = config
 
     @classmethod
@@ -53,7 +55,8 @@ class DocumentIndex:
             store.close()
             raise
         embedder = Embedder(client, config.embed_model, max_chars=config.chunk_size)
-        return cls(store, embedder, Chunker(config.chunk_size, config.chunk_overlap), config)
+        chunker = Chunker(config.chunk_size, config.chunk_overlap)
+        return cls(store, embedder, chunker, Reranker(config.rerank_model), config)
 
     def ingest(self, paths: list[Path], on_progress: Callable[[IngestProgress], None] | None = None) -> IngestReport:
         started = time.monotonic()
@@ -134,11 +137,14 @@ class DocumentIndex:
             return []
         vector = self.embedder.embed_query(query)
         candidates = max(self.config.rag_candidates, k)
-        semantic = self.store.search(vector, candidates, document_ids)
-        if not self.config.features["hybrid"]:
-            return semantic[:k]
-        keyword = self.store.keyword_search(query, candidates, vector, document_ids)
-        return fuse([semantic, keyword])[:k]
+        found = self.store.search(vector, candidates, document_ids)
+        if self.config.features["hybrid"]:
+            keyword = self.store.keyword_search(query, candidates, vector, document_ids)
+            # Up to twice as many chunks when the searches found different ones: the reranker reads the best only.
+            found = fuse([found, keyword])[:candidates]
+        if self.config.features["rerank"]:
+            found = self.reranker.rerank(query, found)
+        return found[:k]
 
     def count_documents(self, filters: Sequence[SearchFilter]) -> int:
         document_ids = self.store.allowed_documents(filters)

@@ -23,6 +23,7 @@ class Feature:
 FEATURES = {
     "rag": Feature("answer from the indexed documents"),
     "hybrid": Feature("also search the documents by their exact words, like a name, an amount or an account number"),
+    "rerank": Feature("read each excerpt found with the question, to put first the ones that answer it"),
     "tools": Feature("let the model call the tools enabled in the configuration"),
     # Off by default: the queries leave the machine.
     "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
@@ -80,6 +81,8 @@ class Config:
     rag_top_k: int = 5
     # Chunks taken from each search before they are merged and the best rag_top_k are kept.
     rag_candidates: int = 30
+    # A multilingual cross-encoder from Hugging Face, small enough to read the candidates in a few seconds on a CPU.
+    rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     chunk_size: int = 1200
     chunk_overlap: int = 200
     cache_path: Path = Path(".sensai/cache.db")
@@ -185,6 +188,7 @@ def load_config(path: Path | None = None) -> Config:
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         rag_candidates=_int_env("SENSAI_RAG_CANDIDATES", Config.rag_candidates, minimum=1, maximum=200),
+        rerank_model=os.getenv("SENSAI_RERANK_MODEL", Config.rerank_model).strip() or Config.rerank_model,
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),
