@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sensai.core.config import Config
 from sensai.core.document.document import Document
@@ -18,9 +18,25 @@ class Turn:
     user: str
     assistant: str
     citations: list[str] = field(default_factory=list)
+    # The working document before this turn: a branch that replaces the turn starts from it.
+    document: str = field(default="", compare=False)
 
     def messages(self) -> list[dict]:
         return [{"role": "user", "content": self.user}, {"role": "assistant", "content": self.assistant}]
+
+
+@dataclass
+class Branch:
+    """One version of the conversation, with its own history and document: what happens in one never reaches another."""
+
+    number: int = 1
+    parent: int | None = None
+    # In the parent, the number of the turn this branch replaces, and the message that replaced it.
+    turn: int = 0
+    label: str = ""
+    summary: str = ""
+    turns: list[Turn] = field(default_factory=list)
+    document: Document = field(default_factory=Document)
 
 
 Summarizer = Callable[[str, list[Turn]], str]
@@ -39,6 +55,9 @@ class ConversationMemory:
         self.last_usage: Usage | None = None
         self.summary_usage: Usage | None = None
         self.turns: list[Turn] = []
+        # The active branch only names itself: its content is in the attributes above.
+        self.branch = Branch()
+        self.other_branches: list[Branch] = []
 
     @property
     def keep_recent(self) -> int:
@@ -68,8 +87,52 @@ class ConversationMemory:
     def commit(
         self, user: str, assistant: str, citations: list[str] | None = None, usage: Usage | None = None
     ) -> None:
-        self.turns = self.turns + [Turn(user, assistant, list(citations or []))]
+        self.turns = self.turns + [Turn(user, assistant, list(citations or []), self.document.markdown())]
         self.last_usage = usage
+        # The first message of a branch names it, as it was kept: the guardrails went through it.
+        if self.branch.parent is not None and not self.branch.label:
+            self.branch.label = " ".join(user.split())
+
+    def clear(self) -> None:
+        self.summary, self.turns, self.last_usage = "", [], None
+        self.document = Document()
+        self.branch, self.other_branches = Branch(), []
+
+    def _active(self) -> Branch:
+        return replace(self.branch, summary=self.summary, turns=self.turns, document=self.document)
+
+    def _activate(self, branch: Branch) -> None:
+        self.branch, self.summary, self.turns, self.document = branch, branch.summary, branch.turns, branch.document
+        self.last_usage = None
+
+    def branches(self) -> list[Branch]:
+        return sorted([*self.other_branches, self._active()], key=lambda branch: branch.number)
+
+    def fork(self, number: int) -> None:
+        """Starts a branch just before the turn `number` (from 1), which the active branch keeps, like all its turns."""
+        turn = self.turns[number - 1]
+        # Sessions saved before the branches do not have the document of each turn.
+        document = Document(turn.document) if turn.document else Document()
+        branch = Branch(
+            max(branch.number for branch in self.branches()) + 1, self.branch.number, number,
+            summary=self.summary, turns=self.turns[: number - 1], document=document,
+        )
+        self.other_branches.append(self._active())
+        self._activate(branch)
+
+    def switch(self, number: int) -> bool:
+        target = next((branch for branch in self.other_branches if branch.number == number), None)
+        if target is None:
+            return False
+        self.other_branches = [branch for branch in self.other_branches if branch is not target] + [self._active()]
+        self._activate(target)
+        return True
+
+    def discard_branch(self) -> None:
+        """Back to the parent of the active branch, which is forgotten: its first message never got an answer."""
+        parent = next(branch for branch in self.other_branches if branch.number == self.branch.parent)
+        self.other_branches.remove(parent)
+        self._activate(parent)
 
     def needs_compaction(self, used_tokens: int) -> bool:
         return bool(self.turns) and used_tokens >= self.limit

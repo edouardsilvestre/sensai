@@ -41,6 +41,13 @@ from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 # Ends an answer that a block rule stopped, in the history, so that the model knows it was cut.
 STOPPED = "[answer stopped by a guardrail]"
+# Ends an answer the user interrupted, in the history, so that the model knows it was cut.
+INTERRUPTED = "[answer interrupted by the user]"
+
+
+def cut_answer(text: str) -> str:
+    """What the history keeps of an answer the user interrupted."""
+    return "\n".join(filter(None, [text, INTERRUPTED]))
 
 
 class EmptyInputError(ValueError):
@@ -76,6 +83,11 @@ class Agent:
         self.confirm_cache = confirm_cache
         # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
         self.keeps_document = True
+        # The turn being answered and the text shown so far, for `interrupt`.
+        self.answering: tuple[str, list[SearchResult]] | None = None
+        self.shown: list[str] = []
+        # The last question sent to the model, as the guardrails let it through.
+        self.asked = ""
         self.persona: Persona | None = None
         if persona is not None:
             self.set_persona(persona)
@@ -91,6 +103,18 @@ class Agent:
     @property
     def active_guardrails(self) -> Guardrails:
         return self.guardrails if self.config.features["guardrails"] else Guardrails()
+
+    def interrupt(self) -> bool:
+        """
+        Call it when `run` was stopped midway. The question and the text already shown go to the history, so that the
+        next message can redirect the answer. The document does not change: a cut answer establishes nothing.
+        """
+        if self.answering is None:
+            return False
+        (user_input, sources), self.answering = self.answering, None
+        text = cut_answer("".join(self.shown).lstrip())
+        self.memory.commit(user_input, text, [source.citation for source in sources])
+        return True
 
     def _approve(self, call: ToolCall, tools: ToolRegistry) -> Approval | None:
         reason = approval_reason(self.config.approval, tools, call)
@@ -118,6 +142,7 @@ class Agent:
             if approval is not None:
                 yield ApprovalEvent(call, approval)
             result = tools.execute(call) if approval is None or approval.approved else refusal(approval)
+        self.shown.append(self._kept_result(call, result, guardrails))
         yield ToolResultEvent(call, result)
         return call, result
 
@@ -205,7 +230,25 @@ class Agent:
         if report:
             yield DocumentEvent(report)
 
+    def _kept_result(self, call: ToolCall, result: ToolResult, guardrails: Guardrails) -> str:
+        """
+        A tool result as an interrupted turn keeps it, for the model to go on from it: unlike an answer, this one reaches
+        the history and the saved session, so it goes through the same rules as an answer.
+        """
+        output = guardrails.output_filter()
+        content = output.feed(result.content) + output.close()
+        return f"\n[{call.name}] {'result withheld by a guardrail' if output.blocked else content}\n"
+
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
+        try:
+            yield from self._answer(user_input, format)
+        except Exception:
+            # Unlike an interruption, a failure leaves nothing to keep.
+            self.answering, self.shown = None, []
+            raise
+
+    def _answer(self, user_input: str, format: dict | None) -> Iterator[Event]:
+        self.answering, self.shown = None, []
         user_input = user_input.strip()
         if not user_input:
             raise EmptyInputError("Empty message")
@@ -245,6 +288,11 @@ class Agent:
                 yield SourcesEvent(sources)
                 prompt = build_prompt(user_input, sources)
 
+        # A JSON answer cut halfway is of no use to anyone: only a prose answer is kept.
+        # A copy: the reasoning adds the excerpts it finds, and an interrupted turn cites them too.
+        sources = list(sources)
+        self.asked = user_input
+        self.answering = None if format else (user_input, sources)
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
         if self.examples is not None and self.config.features["examples"] and format is None:
             try:
@@ -262,7 +310,6 @@ class Agent:
         used_tools = False
         if self.config.features["reasoning"] and format is None:
             found = len(sources)
-            sources = list(sources)
             reasoning = yield from self._reason(user_input, pending, options, guardrails, sources)
             if len(sources) > found:
                 yield SourcesEvent(list(sources))
@@ -283,12 +330,14 @@ class Agent:
                 shown = output.feed(chunk)
                 if shown:
                     answer.append(shown)
+                    self.shown.append(shown)
                     yield TokenEvent(shown)
                 if output.blocked:
                     break
             shown = output.close()
             if shown:
                 answer.append(shown)
+                self.shown.append(shown)
                 yield TokenEvent(shown)
             for hit in output.hits.values():
                 yield GuardrailEvent(hit)
@@ -306,6 +355,7 @@ class Agent:
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)
+        self.answering = None
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
         if vector is not None and not used_tools and not output.blocked and content.strip():
