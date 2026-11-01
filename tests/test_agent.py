@@ -214,12 +214,14 @@ def test_tool_call_is_run_and_its_result_sent_back(config, client):
     assert messages[-1] == {"role": "tool", "tool_name": "lookup", "content": "Alvor is registered in Lisbon."}
 
 
-def test_only_the_final_answer_is_kept_in_memory(config, client):
+def test_the_memory_keeps_the_final_answer_and_a_short_record_of_the_call(config, client):
     agent, _ = tool_agent(config, client)
     client.tool_rounds = [[ToolCall("lookup", {"query": "Alvor"})]]
     list(agent.run("Where is Alvor based?"))
     assert agent.messages == [
         {"role": "user", "content": "Where is Alvor based?"},
+        {"role": "assistant", "content": "", "tool_calls": [ToolCall("lookup", {"query": "Alvor"}).message()]},
+        {"role": "tool", "tool_name": "lookup", "content": "Alvor is registered in Lisbon."},
         {"role": "assistant", "content": "Hello there "},
     ]
 
@@ -310,13 +312,11 @@ def test_refused_critical_call_is_not_run_and_the_model_gets_the_reason(config, 
     assert events[-1] == DoneEvent("Hello there ")
 
 
-def test_refusal_is_not_kept_in_memory(config, client):
-    agent, _, _ = approval_agent(config, client, Approval(False))
+def test_the_reason_of_a_refusal_is_not_kept_in_memory(config, client):
+    agent, _, _ = approval_agent(config, client, Approval(False, "keep the source secret"))
     list(agent.run("Where is Alvor based?"))
-    assert agent.messages == [
-        {"role": "user", "content": "Where is Alvor based?"},
-        {"role": "assistant", "content": "Hello there "},
-    ]
+    assert agent.memory.turns[0].tools[0].result == "refused"
+    assert "keep the source secret" not in str(agent.messages)
 
 
 def test_tools_that_are_not_critical_run_without_asking(config, client):

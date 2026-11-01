@@ -1,9 +1,18 @@
+import inspect
+
 import pytest
 
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.memory.store import MemoryStore
 from sensai.core.tools.memory import MemoryTools
 from sensai.core.tools.registry import ToolError, ToolRegistry
+
+
+def test_the_descriptions_give_no_example_names():
+    """A small model repeats a name it finds in a description as if it were a fact of the case."""
+    for name, tool in inspect.getmembers(MemoryTools, inspect.isfunction):
+        if name.startswith("memory_"):
+            assert not any(example in inspect.getdoc(tool) for example in ("Dupont", "Alvor", "Vidal"))
 
 
 @pytest.fixture

@@ -31,7 +31,7 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
-from sensai.core.memory.conversation import ConversationMemory
+from sensai.core.memory.conversation import ConversationMemory, ToolUse
 from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
@@ -43,6 +43,9 @@ from sensai.core.tools.registry import ToolRegistry, ToolResult
 STOPPED = "[answer stopped by a guardrail]"
 # Ends an answer the user interrupted, in the history, so that the model knows it was cut.
 INTERRUPTED = "[answer interrupted by the user]"
+WITHHELD = "result withheld by a guardrail"
+# Of each argument and result of a past tool call: enough to show that it was made, without filling the context.
+KEPT_CHARS = 200
 
 
 def cut_answer(text: str) -> str:
@@ -86,6 +89,8 @@ class Agent:
         # The turn being answered and the text shown so far, for `interrupt`.
         self.answering: tuple[str, list[SearchResult]] | None = None
         self.shown: list[str] = []
+        # The tool calls of the turn being answered, as the history will keep them.
+        self.used: list[ToolUse] = []
         # The last question sent to the model, as the guardrails let it through.
         self.asked = ""
         self.persona: Persona | None = None
@@ -113,7 +118,7 @@ class Agent:
             return False
         (user_input, sources), self.answering = self.answering, None
         text = cut_answer("".join(self.shown).lstrip())
-        self.memory.commit(user_input, text, [source.citation for source in sources])
+        self.memory.commit(user_input, text, [source.citation for source in sources], tools=self.used)
         return True
 
     def _approve(self, call: ToolCall, tools: ToolRegistry) -> Approval | None:
@@ -143,6 +148,9 @@ class Agent:
                 yield ApprovalEvent(call, approval)
             result = tools.execute(call) if approval is None or approval.approved else refusal(approval)
         self.shown.append(self._kept_result(call, result, guardrails))
+        # A blocked call is kept as the model wrote it: what the rule stopped must not reach the history.
+        if not checked.blocked:
+            self.used.append(self.used_tool(call, result, guardrails))
         yield ToolResultEvent(call, result)
         return call, result
 
@@ -178,6 +186,9 @@ class Agent:
             if step.final:
                 return reasoning
             call, step.result = yield from self._run_tool(step.call(), guardrails, tools)
+            if not native:
+                # Such a model cannot read the tool messages of a past turn.
+                self.used.clear()
             step.arguments = call.arguments
             messages += tool_messages(step, native)
         yield ReasoningStoppedEvent(f"no answer after {self.config.max_tool_rounds} steps")
@@ -230,25 +241,42 @@ class Agent:
         if report:
             yield DocumentEvent(report)
 
-    def _kept_result(self, call: ToolCall, result: ToolResult, guardrails: Guardrails) -> str:
-        """
-        A tool result as an interrupted turn keeps it, for the model to go on from it: unlike an answer, this one reaches
-        the history and the saved session, so it goes through the same rules as an answer.
-        """
+    def _filtered(self, text: str, guardrails: Guardrails) -> str:
+        """Tool calls and results reach the history and the saved session: they go through the rules of an answer."""
         output = guardrails.output_filter()
-        content = output.feed(result.content) + output.close()
-        return f"\n[{call.name}] {'result withheld by a guardrail' if output.blocked else content}\n"
+        content = output.feed(text) + output.close()
+        return WITHHELD if output.blocked else content
+
+    def _kept_result(self, call: ToolCall, result: ToolResult, guardrails: Guardrails) -> str:
+        """A tool result as an interrupted turn keeps it, for the model to go on from it."""
+        return f"\n[{call.name}] {self._filtered(result.content, guardrails)}\n"
+
+    def used_tool(self, call: ToolCall, result: ToolResult, guardrails: Guardrails) -> ToolUse:
+        """
+        A tool call as the history keeps it. It shows that the call was made: with the answer alone, a model imitates that
+        answer for the next request, and says a file is saved without calling the tool.
+        """
+
+        def short(text: str) -> str:
+            text = self._filtered(text, guardrails)
+            return text if len(text) <= KEPT_CHARS else f"{text[:KEPT_CHARS].rstrip()}..."
+
+        arguments = {
+            name: short(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+            for name, value in call.arguments.items()
+        }
+        return ToolUse(call.name, arguments, short(result.summary or result.content))
 
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
         try:
             yield from self._answer(user_input, format)
         except Exception:
             # Unlike an interruption, a failure leaves nothing to keep.
-            self.answering, self.shown = None, []
+            self.answering, self.shown, self.used = None, [], []
             raise
 
     def _answer(self, user_input: str, format: dict | None) -> Iterator[Event]:
-        self.answering, self.shown = None, []
+        self.answering, self.shown, self.used = None, [], []
         user_input = user_input.strip()
         if not user_input:
             raise EmptyInputError("Empty message")
@@ -348,7 +376,7 @@ class Agent:
             if not calls:
                 break
             used_tools = True
-            # Tool calls and results only live in this turn's messages, like the excerpts.
+            # The full results only live in this turn's messages, like the excerpts: the history keeps them short.
             pending.append({"role": "assistant", "content": "".join(answer), "tool_calls": [c.message() for c in calls]})
             for call in calls:
                 call, result = yield from self._run_tool(call, guardrails, self.tools)
@@ -356,7 +384,7 @@ class Agent:
 
         content = "".join(answer)
         self.answering = None
-        self.memory.commit(user_input, content, [source.citation for source in sources], usage)
+        self.memory.commit(user_input, content, [source.citation for source in sources], usage, self.used)
         yield DoneEvent(content)
         if vector is not None and not used_tools and not output.blocked and content.strip():
             try:

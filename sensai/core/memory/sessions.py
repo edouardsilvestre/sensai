@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sensai.core.document.document import Document
-from sensai.core.memory.conversation import Branch, ConversationMemory, Turn
+from sensai.core.memory.conversation import Branch, ConversationMemory, ToolUse, Turn
 
 FORMAT_VERSION = 1
 TITLE_CHARS = 60
@@ -44,9 +44,17 @@ def _saved_branch(branch: Branch) -> dict:
     }
 
 
+def _read_tools(saved: list[dict]) -> list[ToolUse]:
+    return [ToolUse(str(tool["name"]), dict(tool["arguments"]), str(tool["result"])) for tool in saved]
+
+
 def _read_turns(saved: list[dict]) -> list[Turn]:
+    # Sessions saved before the tool calls were kept do not have them.
     return [
-        Turn(turn["user"], turn["assistant"], list(turn.get("citations", [])), str(turn.get("document", "")))
+        Turn(
+            turn["user"], turn["assistant"], list(turn.get("citations", [])), str(turn.get("document", "")),
+            _read_tools(turn.get("tools", [])),
+        )
         for turn in saved
     ]
 

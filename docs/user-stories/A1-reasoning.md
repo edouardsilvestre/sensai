@@ -8,7 +8,7 @@ Acceptance criteria:
 - `/feature reasoning on` (or `SENSAI_FEATURE_REASONING=true`) turns the reasoning on; it is off by default.
 - Each step is shown as soon as it is done (`[thought 1] ...`, then the tool call and its result), before the answer is streamed.
 - `/reasoning` lists the questions of the conversation with their number of steps; `/reasoning N` shows the thoughts, the tool calls and the full results of question N.
-- The reasoning is never sent back to the model and does not fill its context: only the question and the answer are kept in the history.
+- The reasoning is never sent back to the model and does not fill its context: only the question, the answer and a short record of the tool calls are kept in the history.
 - The history stays readable after `/feature reasoning off`, and is cleared by `/new` and `/resume`.
 
 ## Follow a lead through the documents
