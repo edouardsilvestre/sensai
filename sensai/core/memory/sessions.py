@@ -94,7 +94,7 @@ class SessionStore:
             "model": model,
             # Which system prompt the last answers came from: /prompts lists the versions.
             "persona": persona,
-            "prompt_version": prompt_version,
+            "prompt_version": prompt_version if isinstance(prompt_version, int) else None,
             "summary": memory.summary,
             "turns": [asdict(turn) for turn in memory.turns],
             "document": memory.document.markdown(),
