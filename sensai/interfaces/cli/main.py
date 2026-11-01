@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ingest_parser = commands.add_parser("ingest", help="index documents for search")
     ingest_parser.add_argument("paths", nargs="+", type=Path, metavar="PATH", help="files or folders to index")
     ingest_parser.add_argument(
-        "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model)"
+        "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model or updating Sensai's index format)"
     )
     commands.add_parser("status", help="show what the document index contains")
     return parser.parse_args(argv)

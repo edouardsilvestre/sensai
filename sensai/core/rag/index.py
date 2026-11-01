@@ -43,10 +43,8 @@ class DocumentIndex:
 
     @classmethod
     def open(cls, config: Config, client: OllamaClient, rebuild: bool = False) -> "DocumentIndex":
-        store = VectorStore(config.index_path)
+        store = VectorStore(config.index_path, rebuild=rebuild)
         try:
-            if rebuild:
-                store.reset()
             store.check_model(config.embed_model)
         except Exception:
             store.close()

@@ -10,7 +10,7 @@ import sqlite_vec
 
 from sensai.core.rag.models import Chunk, SearchResult, describe
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS documents (
     kind TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     metadata TEXT NOT NULL DEFAULT '{}',
+    -- Copied from the metadata for the search filters; date is ISO, or NULL when unreadable.
+    date TEXT,
+    author TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL DEFAULT '',
+    recipients TEXT NOT NULL DEFAULT '',
     sha256 TEXT NOT NULL,
     size INTEGER NOT NULL,
     mtime REAL NOT NULL,
@@ -37,6 +42,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
+CREATE INDEX IF NOT EXISTS documents_date ON documents(date);
 """
 
 
@@ -79,7 +85,7 @@ class IndexStats:
 
 
 class VectorStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, rebuild: bool = False):
         self.path = path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,17 +102,24 @@ class VectorStore:
         try:
             self._db.execute("PRAGMA foreign_keys = ON")
             self._db.execute("PRAGMA journal_mode = WAL")
+            if rebuild:
+                self._drop_tables()
+            # Checked before the schema runs: the tables of an older format may lack its columns.
+            has_meta = self._db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone()
+            version = self._get_meta("schema_version") if has_meta else None
+            if version is not None and version != SCHEMA_VERSION:
+                self._db.close()
+                raise StoreError(
+                    f"{path} uses index format v{version}, expected v{SCHEMA_VERSION}: "
+                    f"rebuild it with `python -m sensai ingest --rebuild PATH`"
+                )
             self._db.executescript(_SCHEMA)
+            if version is None:
+                with self._db:
+                    self._set_meta("schema_version", SCHEMA_VERSION)
         except sqlite3.DatabaseError as e:
             self._db.close()
             raise StoreError(f"Cannot use {path} as an index: {e}") from e
-        version = self._get_meta("schema_version")
-        if version is None:
-            with self._db:
-                self._set_meta("schema_version", SCHEMA_VERSION)
-        elif version != SCHEMA_VERSION:
-            self._db.close()
-            raise StoreError(f"{path} uses index format v{version}, expected v{SCHEMA_VERSION}: rebuild it")
 
     @property
     def embed_model(self) -> str | None:
@@ -159,20 +172,21 @@ class VectorStore:
             existing = self.get_document(record.path)
             values = (
                 record.name, record.kind, record.title, json.dumps(record.metadata, ensure_ascii=False),
+                *_filter_columns(record.metadata),
                 record.sha256, record.size, record.mtime, datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
             if existing:
                 self._delete_chunks(existing.id)
                 self._db.execute(
-                    "UPDATE documents SET name = ?, kind = ?, title = ?, metadata = ?, sha256 = ?, size = ?, "
-                    "mtime = ?, indexed_at = ? WHERE id = ?",
+                    "UPDATE documents SET name = ?, kind = ?, title = ?, metadata = ?, date = ?, author = ?, "
+                    "sender = ?, recipients = ?, sha256 = ?, size = ?, mtime = ?, indexed_at = ? WHERE id = ?",
                     (*values, existing.id),
                 )
                 document_id = existing.id
             else:
                 cursor = self._db.execute(
-                    "INSERT INTO documents (name, kind, title, metadata, sha256, size, mtime, indexed_at, path) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO documents (name, kind, title, metadata, date, author, sender, recipients, "
+                    "sha256, size, mtime, indexed_at, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (*values, record.path),
                 )
                 document_id = cursor.lastrowid
@@ -244,12 +258,10 @@ class VectorStore:
         documents = self._db.execute("SELECT path, sha256 FROM documents ORDER BY path").fetchall()
         return hashlib.sha256(json.dumps(documents).encode()).hexdigest()
 
-    def reset(self) -> None:
-        with self._db:
-            self._db.execute("DROP TABLE IF EXISTS vec_chunks")
-            self._db.execute("DELETE FROM chunks")
-            self._db.execute("DELETE FROM documents")
-            self._db.execute("DELETE FROM meta WHERE key IN ('embed_model', 'dimensions')")
+    def _drop_tables(self) -> None:
+        # Dropped rather than emptied, so that an index of an older format gets the current tables.
+        for table in ("vec_chunks", "chunks", "documents", "meta"):
+            self._db.execute(f"DROP TABLE IF EXISTS {table}")
 
     def close(self) -> None:
         self._db.close()
@@ -260,3 +272,14 @@ class VectorStore:
 
     def _set_meta(self, key: str, value: str) -> None:
         self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+
+def _filter_columns(metadata: dict[str, str]) -> tuple[str | None, str, str, str]:
+    date = metadata.get("date") or None
+    try:
+        if date is not None:
+            datetime.fromisoformat(date)
+    except ValueError:
+        date = None
+    recipients = ", ".join(filter(None, [metadata.get("to"), metadata.get("cc")]))
+    return date, metadata.get("author", ""), metadata.get("from", ""), recipients

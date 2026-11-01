@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from sensai.core.rag.models import Chunk
@@ -96,12 +98,15 @@ def test_vectors_must_match_the_index_dimensions(store):
         store.search([0.1, 0.2], k=1)
 
 
-def test_reset_allows_another_model(store):
-    save(store, "/docs/a.txt", ["alpha"], model="model-a")
-    store.reset()
+def test_rebuild_allows_another_model(tmp_path):
+    first = VectorStore(tmp_path / "index.db")
+    save(first, "/docs/a.txt", ["alpha"], model="model-a")
+    first.close()
+    store = VectorStore(tmp_path / "index.db", rebuild=True)
     save(store, "/docs/a.txt", ["alpha"], model="model-b")
     assert store.embed_model == "model-b"
     assert store.stats().chunks == 1
+    store.close()
 
 
 def test_unusable_path_is_a_store_error(tmp_path):
@@ -125,3 +130,48 @@ def test_index_survives_reopening(tmp_path):
     second = VectorStore(tmp_path / "index.db")
     assert second.search(FakeClient.vector("alpha"), k=1)[0].text == "alpha"
     second.close()
+
+
+def columns(path, name: str) -> tuple:
+    with sqlite3.connect(path) as db:
+        return db.execute("SELECT date, author, sender, recipients FROM documents WHERE name = ?", (name,)).fetchone()
+
+
+def test_the_metadata_used_by_the_filters_gets_its_own_columns(tmp_path):
+    store = VectorStore(tmp_path / "index.db")
+    documents = {
+        "mail.eml": {"from": "Jean Dupont <jd@alvor.fr>", "to": "Marc", "cc": "Lea", "date": "2023-03-14T10:05+01:00"},
+        "report.pdf": {"author": "Alice", "date": "2023-02-01"},
+        "ledger.xlsx": {"author": "Bob"},
+        "old.eml": {"from": "Marc", "date": "sometime in March"},
+    }
+    for name, metadata in documents.items():
+        document = DocumentRecord(f"/docs/{name}", name, "text", "", metadata, "sha", 1, 1.0)
+        store.save_document(document, [Chunk(name)], [FakeClient.vector(name)], "m")
+    store.close()
+
+    assert columns(tmp_path / "index.db", "mail.eml") == ("2023-03-14T10:05+01:00", "", "Jean Dupont <jd@alvor.fr>", "Marc, Lea")
+    assert columns(tmp_path / "index.db", "report.pdf") == ("2023-02-01", "Alice", "", "")
+    assert columns(tmp_path / "index.db", "ledger.xlsx") == (None, "Bob", "", "")
+    # An unreadable date cannot be compared: no date filter keeps the document.
+    assert columns(tmp_path / "index.db", "old.eml") == (None, "", "Marc", "")
+
+
+def test_an_index_of_an_older_format_needs_a_rebuild(tmp_path):
+    path = tmp_path / "index.db"
+    old = VectorStore(path)
+    save(old, "/docs/a.txt", ["alpha"])
+    old.close()
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+        db.execute("DROP INDEX documents_date")
+        for column in ("date", "author", "sender", "recipients"):
+            db.execute(f"ALTER TABLE documents DROP COLUMN {column}")
+
+    with pytest.raises(StoreError, match="--rebuild"):
+        VectorStore(path)
+    rebuilt = VectorStore(path, rebuild=True)
+    assert rebuilt.is_empty()
+    save(rebuilt, "/docs/a.txt", ["alpha"])
+    assert rebuilt.search(FakeClient.vector("alpha"), k=1)[0].text == "alpha"
+    rebuilt.close()
