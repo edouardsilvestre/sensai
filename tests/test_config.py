@@ -37,6 +37,7 @@ def test_features_have_their_default(env_file):
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
         "orchestration": True, "reasoning": False, "cache": True, "examples": True,
+        "prompt_versions": True,
     }
 
 
