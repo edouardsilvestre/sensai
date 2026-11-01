@@ -44,6 +44,7 @@ from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
+from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, comparison, diff, load_cases, score
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -92,6 +93,13 @@ Commands:
   /cache [clear]          show the answers kept to reuse, or remove them all
   /examples               list the answers kept as examples, * marks those shown for the last answer
   /example add|remove N   keep the last answer as an example for similar questions, or remove example N
+  /prompts [PERSONA]      list the versions of a persona prompt, * marks the one in use
+  /prompt show|use N [PERSONA]
+                          read version N of a persona prompt, or use it from now on (roll back)
+  /prompt diff N M [PERSONA]
+                          show what changed between versions N and M
+  /prompt compare N M [PERSONA]
+                          ask the test cases with versions N and M, and compare the answers, time and tokens
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
@@ -225,6 +233,7 @@ class Session:
     examples: ExampleLibrary | None = None
     examples_used: list[Example] = field(default_factory=list)
     answered: tuple[Turn, list[SearchResult]] | None = None
+    prompts: PromptStore | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -446,7 +455,11 @@ def save_session(session: Session) -> None:
     if session.session_id is None:
         session.session_id = session.store.new_id()
     try:
-        session.store.save(session.session_id, memory, session.config.model)
+        persona = session.agent.persona
+        session.store.save(
+            session.session_id, memory, session.config.model,
+            persona.id if persona else None, session.agent.prompt_version,
+        )
     except SessionError as e:
         warning(f"The conversation is not saved: {e}")
 
@@ -720,6 +733,12 @@ def feature_command(session: Session, argument: str) -> None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
     if name == "examples" and value == "on" and session.examples is None:
         session.examples = session.agent.examples = load_examples(config, session.agent.client)
+    if name == "prompt_versions":
+        if value == "on" and session.prompts is None:
+            session.prompts = session.agent.prompts = load_prompts(config, session.personas)
+        # On: the active version of the persona prompt, off: the prompt of the persona file.
+        if session.agent.persona:
+            session.agent.set_persona(session.agent.persona)
 
 
 def reload_tools(session: Session) -> None:
@@ -892,6 +911,128 @@ def example_command(session: Session, argument: str) -> None:
     print(f'Example {number} removed: "{removed.question}"')
 
 
+def created_on(version: PromptVersion) -> str:
+    if not version.created_at:
+        return "-"
+    return f"{datetime.fromisoformat(version.created_at).astimezone():%Y-%m-%d %H:%M}"
+
+
+def prompt_persona(session: Session, persona_id: str | None) -> str | None:
+    """The persona whose prompt versions a command is about: the one named, or the active one."""
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the persona prompts.")
+        return None
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return None
+    if persona_id is None:
+        if session.agent.persona is None:
+            error("No active persona: name one, like /prompts editor.")
+            return None
+        return session.agent.persona.id
+    if persona_id not in session.personas:
+        error(unknown_persona(session.personas, persona_id))
+        return None
+    return persona_id
+
+
+def list_prompts(session: Session, argument: str) -> None:
+    persona_id = prompt_persona(session, argument or None)
+    if persona_id is None:
+        return
+    try:
+        history = session.prompts.history(persona_id)
+    except PromptError as e:
+        error(str(e))
+        return
+    if not history.versions:
+        print(f"No version of the {persona_id} prompt yet: it is kept at the next start.")
+        return
+    print(f"Versions of the {persona_id} prompt (* in use):")
+    for version in reversed(history.versions):
+        mark = "*" if version.number == history.active else " "
+        print(f"  {mark} {version.number}. {created_on(version)}  {version.hash}  {plural(len(version.prompt), 'char')}")
+    if history.comparisons:
+        last = history.comparisons[-1]
+        scores = ", ".join(f"version {s['version']} {s['passed']}/{s['cases']}" for s in last["scores"])
+        print(f"Last comparison ({last['model']}): {scores}.")
+    print("/prompt show N to read one, /prompt use N to roll back to it.")
+
+
+def print_scores(scores: list[VersionScore]) -> None:
+    print(f"\n{'Version':<9}{'Passed':<9}{'Avg time':<10}Avg tokens")
+    for version in scores:
+        passed = f"{version.passed}/{len(version.results)}"
+        print(f"{version.version:<9}{passed:<9}{version.seconds:<10.2f}{version.tokens:.0f}")
+    for version in scores:
+        for number, result in enumerate(version.results, start=1):
+            if result.failed:
+                print(f"  version {version.version}, case {number} ({result.case.question}): {', '.join(result.failed)}")
+
+
+def compare_prompts(session: Session, persona_id: str, versions: list[PromptVersion]) -> None:
+    config = session.config
+    try:
+        cases = load_cases(config.prompt_cases_path)
+    except PromptError as e:
+        error(str(e))
+        return
+    scores = []
+    try:
+        for version in versions:
+            print(f"Version {version.number}: asking {plural(len(cases), 'case')} to {config.model}...")
+            scores.append(score(session.agent.client, config, version, cases))
+    except LLMError as e:
+        error(str(e))
+        return
+    except KeyboardInterrupt:
+        print("\n[interrupted] The comparison is not kept.")
+        return
+    print_scores(scores)
+    try:
+        session.prompts.record(persona_id, comparison(config.model, scores))
+    except PromptError as e:
+        warning(f"The comparison is not kept: {e}")
+
+
+PROMPT_USAGE = "Usage: /prompt show|use N [PERSONA], or /prompt diff|compare N M [PERSONA]"
+
+
+def prompt_command(session: Session, argument: str) -> None:
+    words = argument.split()
+    action, numbers = (words[0], words[1:]) if words else ("", [])
+    count = {"show": 1, "use": 1, "diff": 2, "compare": 2}.get(action)
+    if count is None or not count <= len(numbers) <= count + 1 or not all(n.isdecimal() for n in numbers[:count]):
+        error(PROMPT_USAGE)
+        return
+    persona_id = prompt_persona(session, numbers[count] if len(numbers) > count else None)
+    if persona_id is None:
+        return
+    try:
+        versions = [session.prompts.version(persona_id, int(number)) for number in numbers[:count]]
+    except PromptError as e:
+        error(str(e))
+        return
+    if action == "show":
+        print(f"Version {versions[0].number} of the {persona_id} prompt ({created_on(versions[0])}):")
+        print(textwrap.indent(versions[0].prompt, "  "))
+    elif action == "diff":
+        print(diff(*versions) or f"Versions {versions[0].number} and {versions[1].number} are identical.")
+    elif action == "compare":
+        compare_prompts(session, persona_id, versions)
+    else:
+        try:
+            session.prompts.activate(persona_id, versions[0].number)
+        except PromptError as e:
+            error(str(e))
+            return
+        agent = session.agent
+        if agent.persona and agent.persona.id == persona_id:
+            agent.set_persona(agent.persona)
+        print(f"{persona_id} uses version {versions[0].number} of its prompt from now on.")
+        print(f"Editing {persona_id}.json makes a new version, used from the next start.")
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -950,6 +1091,10 @@ def handle_command(session: Session, line: str) -> bool:
         list_examples(session)
     elif name == "/example":
         example_command(session, argument.lower())
+    elif name == "/prompts":
+        list_prompts(session, argument)
+    elif name == "/prompt":
+        prompt_command(session, argument)
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -997,6 +1142,20 @@ def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None
         warning(f"Examples disabled: {e}")
         return None
     return examples
+
+
+def load_prompts(config: Config, personas: dict[str, Persona]) -> PromptStore | None:
+    """Keeps the prompt of each persona file as a new version when it changed since the last start."""
+    prompts = PromptStore(config.prompts_dir)
+    try:
+        for persona in personas.values():
+            version = prompts.snapshot(persona.id, persona.system_prompt())
+            if version is not None and version.number > 1:
+                print(f"Prompt of {persona.id} changed: kept as version {version.number}. /prompts {persona.id} to list them.")
+    except PromptError as e:
+        warning(f"Prompt versions disabled: {e}")
+        return None
+    return prompts
 
 
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
@@ -1050,7 +1209,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     except PersonaError as e:
         error(str(e))
         return 1
-    agent = Agent(config, persona=persona)
+    prompts = load_prompts(config, personas) if config.features["prompt_versions"] else None
+    agent = Agent(config, persona=persona, prompts=prompts)
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
@@ -1059,7 +1219,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         error(str(e))
         return 1
 
-    session = Session(config, agent, personas=personas)
+    session = Session(config, agent, personas=personas, prompts=prompts)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
@@ -1086,7 +1246,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
-        print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
+        version = f" (prompt version {agent.prompt_version})" if agent.prompt_version else ""
+        print(f"Persona: {agent.persona.name}{version}. /personas to list them, /persona ID to switch.")
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
     load_memory(session, resume_id)

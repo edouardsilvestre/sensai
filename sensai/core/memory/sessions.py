@@ -50,12 +50,18 @@ class SessionStore:
             session_id, number = f"{base}-{number}", number + 1
         return session_id
 
-    def save(self, session_id: str, memory: ConversationMemory, model: str) -> None:
+    def save(
+        self, session_id: str, memory: ConversationMemory, model: str,
+        persona: str | None = None, prompt_version: int | None = None,
+    ) -> None:
         data = {
             "version": FORMAT_VERSION,
             "id": session_id,
             "updated": datetime.now().isoformat(timespec="seconds"),
             "model": model,
+            # Which system prompt the last answers came from: /prompts lists the versions.
+            "persona": persona,
+            "prompt_version": prompt_version,
             "summary": memory.summary,
             "turns": [asdict(turn) for turn in memory.turns],
             "document": memory.document.markdown(),

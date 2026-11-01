@@ -33,6 +33,7 @@ from sensai.core.events import (
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.persona import Persona
+from sensai.core.prompts import PromptStore
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import build_prompt
 from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema, tool_messages
@@ -61,6 +62,7 @@ class Agent:
         cache: SemanticCache | None = None,
         confirm_cache: ConfirmCache | None = None,
         examples: ExampleLibrary | None = None,
+        prompts: PromptStore | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -71,6 +73,9 @@ class Agent:
         self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
         self.examples = examples
+        self.prompts = prompts
+        # The version of the persona prompt in use, None for the prompt of the persona file.
+        self.prompt_version: int | None = None
         self.reasoning: list[Reasoning] = []
         self.cache = cache
         self.confirm_cache = confirm_cache
@@ -82,7 +87,11 @@ class Agent:
 
     def set_persona(self, persona: Persona) -> None:
         self.persona = persona
-        self.memory.system_prompt = persona.system_prompt()
+        version = None
+        if self.prompts is not None and self.config.features["prompt_versions"]:
+            version = self.prompts.active(persona.id)
+        self.prompt_version = version.number if version else None
+        self.memory.system_prompt = version.prompt if version else persona.system_prompt()
 
     @property
     def messages(self) -> list[dict]:

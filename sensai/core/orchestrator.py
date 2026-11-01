@@ -129,7 +129,7 @@ class Review:
             main.config, main.client,
             retriever=main.retriever if with_tools else None,
             tools=main.tools if with_tools else None,
-            guardrails=main.guardrails, persona=persona, approver=main.approver,
+            guardrails=main.guardrails, persona=persona, approver=main.approver, prompts=main.prompts,
         )
         agent.memory.profile = main.memory.profile
         agent.keeps_document = False
