@@ -10,6 +10,14 @@ from datetime import datetime, timedelta, timezone
 from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 
+from sensai.core.adversarial.models import AdversarialError, AttackCase, AttackResult, load_suite
+from sensai.core.adversarial.runner import (
+    AttackSummary,
+    load_attack_report,
+    run_attack_suite,
+    save_attack_report,
+    summarize_attacks,
+)
 from sensai.core.agent import INTERRUPTED, STOPPED, Agent, EmptyInputError
 from sensai.core.approval import Approval
 from sensai.core.cache import CachedAnswer, CacheError, SemanticCache
@@ -82,6 +90,7 @@ from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+ASK_USER = "ask_user"
 POLL_SECONDS = 15
 SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
 SCHEDULE_USAGE = f"Usage: /schedule add WHEN [--allow TOOL,TOOL] TASK, or /schedule remove N. WHEN is {WHEN_FORMS}"
@@ -157,6 +166,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model or updating Sensai's index format)"
     )
     commands.add_parser("status", help="show what the document index contains")
+    attack_parser = commands.add_parser("attack", help="run adversarial attack suite against Sensai")
+    attack_parser.add_argument(
+        "cases", nargs="?", type=Path, default=None, help="path to custom attack suite JSON file"
+    )
+    attack_parser.add_argument(
+        "--category", choices=["jailbreak", "injection", "malformed"], help="filter attacks by category"
+    )
+    attack_parser.add_argument("--out", type=Path, default=None, help="path to save the attack report JSON file")
+    attack_parser.add_argument(
+        "--compare", type=Path, default=None, help="path to earlier attack report JSON to compare with"
+    )
     stats_parser = commands.add_parser("stats", help="show the metrics of the messages logged")
     stats_parser.add_argument("--days", type=int, default=7, metavar="N", help="the last N days (default: 7)")
     eval_parser = commands.add_parser("eval", help="answer a set of questions and score the answers")
@@ -411,6 +431,23 @@ def confirm_cached(cached: CachedAnswer) -> bool:
             return False
 
 
+def ask_question(question: str, options: list[str]) -> str | None:
+    print(f"[{ASK_USER}] {question}")
+    for number, option in enumerate(options, start=1):
+        print(f"  {number}. {option}")
+    label = "Your answer (a number or your own words): " if options else "Your answer: "
+    while True:
+        try:
+            answer = input(label).strip()
+        except EOFError:
+            print()
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        if answer:
+            return answer
+
+
 def prompt(session: Session) -> str:
     persona = session.agent.persona
     return f"\n[{persona.id}] > " if persona else "\n> "
@@ -601,7 +638,8 @@ def show_events(
                 if mid_line:
                     print()
                     mid_line = False
-                print(describe_call(event.call))
+                if event.call.name != ASK_USER:
+                    print(describe_call(event.call))
             elif isinstance(event, ToolResultEvent):
                 if event.result.error:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
@@ -1657,7 +1695,7 @@ def load_schedule(config: Config) -> Schedule | None:
 
 
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
-    tools = build_registry(config, client)
+    tools = build_registry(config, client, ask_question)
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
@@ -1886,6 +1924,91 @@ def run_eval_command(config: Config, path: Path, out: Path | None, compare: Path
     return 0
 
 
+def print_attack_summary(summary: AttackSummary) -> None:
+    print(f"\n{'Category':<15}{'Total':<8}{'Defended':<10}{'Breached':<10}{'Rate':<8}")
+    print("-" * 51)
+    for cat, cat_sum in summary.by_category.items():
+        rate_str = f"{cat_sum.defense_rate * 100:.1f}%"
+        print(f"{cat:<15}{cat_sum.total:<8}{cat_sum.defended:<10}{cat_sum.breached:<10}{rate_str:<8}")
+    print("-" * 51)
+    overall_rate = f"{summary.defense_rate * 100:.1f}%"
+    print(f"{'Overall':<15}{summary.total:<8}{summary.defended:<10}{summary.breached:<10}{overall_rate:<8}")
+
+
+def print_attack_comparison(summary: AttackSummary, previous: dict, compare_path: Path) -> None:
+    prev_summary = previous.get("summary", {})
+    prev_rate = prev_summary.get("defense_rate", 0.0)
+    diff_rate = (summary.defense_rate - prev_rate) * 100
+    sign = "+" if diff_rate >= 0 else ""
+    print(f"\nComparison with {compare_path}:")
+    print(f"  Previous defense rate : {prev_rate * 100:.1f}%")
+    print(f"  Current defense rate  : {summary.defense_rate * 100:.1f}% ({sign}{diff_rate:.1f}%)")
+
+
+def run_attack(config: Config, args: argparse.Namespace) -> int:
+    try:
+        cases = load_suite(args.cases)
+    except AdversarialError as e:
+        error(str(e))
+        return 1
+
+    if args.category:
+        cases = [c for c in cases if c.category == args.category]
+        if not cases:
+            error(f"No attack cases found for category '{args.category}'")
+            return 1
+
+    previous_report = None
+    if args.compare:
+        try:
+            previous_report, _ = load_attack_report(args.compare)
+        except AdversarialError as e:
+            error(str(e))
+            return 1
+
+    client = OllamaClient(config.host, config.ollama_api_key)
+    try:
+        client.ensure_model(config.model)
+    except LLMError as e:
+        error(str(e))
+        return 1
+
+    try:
+        guardrails = load_guardrails(config, client)
+    except GuardrailError as e:
+        error(str(e))
+        return 1
+
+    def make_agent() -> Agent:
+        return Agent(config, client=client, guardrails=guardrails)
+
+    print(f"Running {plural(len(cases), 'adversarial attack')} against {config.model}...\n")
+
+    def on_case(number: int, result: AttackResult) -> None:
+        status_tag = f"[{result.status.upper()}]"
+        pad = 11 - len(status_tag)
+        print(f"[{number:2d}/{len(cases)}] {status_tag}{' ' * pad} ({result.case.category}) {result.case.name}")
+        if result.status == "breached":
+            print(f"         Reason: {result.reason}")
+
+    results = run_attack_suite(make_agent, cases, on_case=on_case)
+    summary = summarize_attacks(results)
+
+    print_attack_summary(summary)
+
+    if previous_report:
+        print_attack_comparison(summary, previous_report, args.compare)
+
+    if args.out:
+        try:
+            save_attack_report(args.out, config, results)
+            print(f"\nAttack report saved to {args.out}")
+        except AdversarialError as e:
+            warning(str(e))
+
+    return 0
+
+
 def print_schedule_news(session: Session) -> None:
     schedule = session.schedule
     if schedule is None:
@@ -2018,6 +2141,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
+    if args.command == "attack":
+        return run_attack(config, args)
     if args.command == "stats":
         return run_stats(config, args.days)
     if args.command == "eval" and args.retrieval:

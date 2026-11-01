@@ -34,6 +34,7 @@ FEATURES = {
     "memory": Feature("let the model save and look up facts about people, companies and places", tool=True),
     # Without a file at mcp_path, no server is started.
     "mcp": Feature("let the model call the tools of the MCP servers listed in the MCP file", tool=True),
+    "questions": Feature("let the model ask you a question when your request is ambiguous", tool=True),
     "sessions": Feature("save every conversation so that it can be resumed"),
     "profile": Feature("send your profile to the model at the start of every conversation"),
     "document": Feature("keep a working document of the established facts, updated after every answer"),

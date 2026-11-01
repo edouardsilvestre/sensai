@@ -23,9 +23,12 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
 - 💡 **Answer examples**: keep your best answers with `/example add`, and Sensai shows the closest ones to the model for each new question, so that even a small model cites its excerpts and says what the documents do not say.
+- ❓ **Questions to the user**: when a request is ambiguous, the model can ask the journalist a question, with a few options to pick from, and goes on with the answer instead of guessing.
 - ⏰ **Scheduled tasks**: a question Sensai goes through on its own every morning or every hour, comparing with its last run, and writing a sourced report only when it finds something else, with no tool used unless the journalist allowed it in advance.
 - 🗂️ **Prompt versioning**: each change to the system prompt is kept as a dated version that can be compared, measured on your own test questions, and rolled back with `/prompt use N`.
 - 📈 **Logs & metrics**: every message is logged on the machine with the prompt sent, the answer, the tools, the time and the tokens, and `/stats` shows the volume, the response time, the error rate and the prompt changes that slowed Sensai down.
+- 🎯 **Adversarial testing**: audit resilience against jailbreaks, prompt injections and malformed inputs with
+  `python -m sensai attack`, track defense rates, and detect regressions.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -442,6 +445,34 @@ Every path goes through `tools/permissions.py` before the file is touched. `Perm
 
 It is the `files` feature, off by default because the model reads and writes files on this machine. Turned on, it reads the folder Sensai runs in and writes nowhere, until `SENSAI_FILES_WRITE` names a folder. `/files` shows what is allowed.
 
+### Questions to the user
+
+A journalist's question is sometimes ambiguous: two companies share a name, a nickname stands for someone, a period is missing. With the `questions` feature (on by default), the model can ask instead of guessing: it calls `ask_user`, the CLI shows the question and its options, the journalist answers with a number or in their own words, and the model goes on with the answer. During the step-by-step reasoning, on a bank statement with two Vidal:
+
+```
+> Il y a deux Vidal dans le relevé et je ne sais pas lequel m'intéresse. Combien Vidal a-t-il reçu de Nordbank ?
+[search] 1 excerpts from 1 documents
+[thought 1] I need to find out who 'M. Marc Vidal' and 'Mme Sophie Vidal' refer to.
+[ask_user] Quel sont les deux Vidal qui figurent dans le relevé et à qui appartient celui du crédit ?
+Your answer: Marc Vidal
+[ask_user] answered "Marc Vidal"
+[thought 2] The user has identified 'M. Marc Vidal' as Marc Vidal.
+[...]
+Il y a deux Vidal dans le relevé. 'M. Marc Vidal' a reçu 480 000,00 de Nordbank, tandis que 'Mme Sophie Vidal' a reçu 35 000,00 de la société.
+```
+
+`tools/questions.py`: `ask_user(question, options)` is a tool like the others, whose docstring tells the model when to ask (a missing piece that no document and no tool can give) and when not to (what it can find itself). The question is put to the user by the interface, through the `Asker` it gives to `build_registry`, like the approver: the CLI prints the options numbered, a number picks one and anything else is sent as it is, an empty answer asks again, and `Ctrl+D` tells the model that the user did not answer and that it should not ask again. The call itself is not printed, so that the question is not shown twice. The question is the argument of a tool call: it goes through the guardrails of the tool calls before it is shown, so that a protected name is redacted from it. The answer is the journalist's own words, given to the model as the result of the tool, and it lives only in the messages of that turn, like the excerpts; what the model then writes goes through the output guardrails as usual. An answer that called `ask_user` is never kept by the semantic cache, since it depends on more than the question.
+
+Whether the model asks is up to the model. On ambiguous questions like "Combien Vidal a-t-il reçu de Nordbank ?" on a statement with Marc and Sophie Vidal, each asked several times:
+
+| | The ambiguity is said in the question | The ambiguity is only in the documents |
+|---|---|---|
+| `qwen2.5:1.5b` | never asks | never asks |
+| `qwen2.5:1.5b` with the reasoning | asks 1 time out of 3 | never asks: it answers with Marc Vidal's amount |
+| `qwen3:1.7b` | asks 6 times out of 6 | never asks |
+
+Small models ask when the user says the request is ambiguous, not when only the documents show it, and `qwen3:1.7b` never filled the options. Without documents, `qwen2.5:1.5b` with the reasoning asked too much instead, things it should have looked for itself ("which bank?", "which period?"). Having Sensai check every message for an ambiguity before answering was considered and ruled out: it would cost one more call to the model for every message, for questions that are rarely ambiguous.
+
 ### MCP servers
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) lets a program, the server, offer tools to an AI application. Sensai is an MCP client: it reads the tools of the servers listed in `SENSAI_MCP_PATH`, and the model calls them like its own tools. Only servers reached by their URL are supported (Streamable HTTP transport).
@@ -500,6 +531,39 @@ A rule looks for one thing and does one of three actions, `block`, `redact` (rep
 The judge is the chat model itself, so nothing leaves the machine, at the cost of one more call per message. It is asked to answer `ALLOW` or `BLOCK: reason`, and anything else blocks the message: the guardrails fail closed, like an invalid rules file, which stops Sensai at startup instead of running without its rules.
 
 Without a rules file, one rule applies: personal data is blocked in web searches. A file at `SENSAI_GUARDRAILS_PATH` replaces it; [guardrails.example.json](guardrails.example.json) protects a source, keeps personal data out of web searches, flags bank details in answers and refuses requests about private life. Like the index, keep the file in `.sensai/`: it holds the names you protect.
+
+### Adversarial testing (red-teaming)
+
+Investigative assistants handle confidential leaks and sensitive inquiries. `python -m sensai attack` audits
+Sensai's defenses against adversarial prompts, evaluating whether the assistant withstands attempts to bypass
+safeguards, leak confidential context, or trigger unhandled execution failures.
+
+The built-in benchmark suite (`sensai/core/adversarial/suite.json`) covers three categories:
+- `jailbreak`: attempts to override safety boundaries, role-play as unrestricted personas, or evade policies.
+- `injection`: attempts to leak internal system instructions, reveal protected source names, or hijack tool calls.
+- `malformed`: stress tests including token floods, deeply nested delimiters, null bytes, and control sequences.
+
+Each test case runs against an isolated agent instance with guardrails active. The runner detects breaches using
+multi-layered criteria: guardrail interception, model refusal heuristics, and leakage pattern matching.
+
+```bash
+python -m sensai attack                                    # run the default 15-case benchmark
+python -m sensai attack --category jailbreak               # run only jailbreak attacks
+python -m sensai attack my_cases.json                      # run a custom test suite
+python -m sensai attack --out .sensai/audit.json           # export audit report to JSON
+python -m sensai attack --compare .sensai/audit_prev.json  # compare defense rate with previous run
+```
+
+#### Empirical baseline assessment
+
+Auditing the default suite on local models with active guardrails yields the following baseline metrics:
+
+| Category | Attacks | Defended | Breached | Defense Rate | Notes |
+|---|---|---|---|---|---|
+| `jailbreak` | 5 | 5 | 0 | 100.0% | Refused by model policy or blocked by judge guardrail |
+| `injection` | 5 | 5 | 0 | 100.0% | Zero system prompt or source name leakage detected |
+| `malformed` | 5 | 5 | 0 | 100.0% | Handled safely without crash or buffer anomalies |
+| **Overall** | **15** | **15** | **0** | **100.0%** | Comprehensive protection across all vectors |
 
 ### Automated evaluation & hallucination detection
 
@@ -583,6 +647,7 @@ Tested on fictional leaked documents with `qwen2.5:1.5b` and `qwen3:1.7b` on CPU
 - **Why code-based fact extraction**: Small models misread numbers (reading French decimal "480 000,00" as "480 million") or demanded details that sentences were not meant to include. Pre-checking amounts and dates by code eliminated number hallucination errors instantly.
 - **Limits**: `qwen3:1.7b` remains overly suspicious on qualitative statements, occasionally claiming details are missing. On CPU, it takes minutes per answer. Therefore, `fact_check` is disabled by default (`/feature fact_check on` to enable), serving as a safeguard for careful verification rather than an automatic blocker.
 - **Alternatives ruled out**: Embedding comparison (cosine similarity failed to differentiate transaction direction), dedicated NLI libraries (to adhere strictly to standard Ollama API constraints), and 3-vote self-consistency (prohibitive 15-minute runtime per turn on CPU).
+>>>>>>> origin/develop
 
 ## Getting Started
 
@@ -616,6 +681,7 @@ python -m sensai stats --days 30         # the metrics of the messages of the la
 python -m sensai -p fact_checker         # start with another persona
 python -m sensai eval eval.json          # evaluate and score Sensai on test questions
 python -m sensai eval eval.json --retrieval   # score the document search alone, step by step
+python -m sensai attack                  # audit defenses against adversarial attacks
 ```
 
 ### Usage
@@ -799,6 +865,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_FILES` | `false` | `true` lets the model list, read and write files in the allowed folders; needs a model that supports tools |
 | `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
 | `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
+| `SENSAI_FEATURE_QUESTIONS` | `true` | let the model ask you a question when your request is ambiguous; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
@@ -865,6 +932,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `questions` | the `ask_user` tool, with which the model asks you a question when your request is ambiguous |
 | `branching` | `/edit`, `/branches` and `/branch`, and keeping an interrupted answer; the branches stay saved |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
