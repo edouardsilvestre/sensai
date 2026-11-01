@@ -40,7 +40,7 @@ Indexing (`python -m sensai ingest`):
 3. `rag/embedder.py` computes one vector per chunk with Ollama (`/api/embed`).
 4. `rag/store.py` saves documents, chunks and vectors in one SQLite file, the vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table.
 
-Files that did not change are skipped on the next run, and deleted files are removed from the index. An index made before the search filters (format v1) is refused with a message: rebuild it with `ingest --rebuild`.
+Files that did not change are skipped on the next run, and deleted files are removed from the index. An index made before the search filters (format v1) is refused with a message: rebuild it with `ingest --rebuild`. An index made before the neighbors gets the `overlap` column when it is opened, at 0: its passages repeat a few sentences between chunks until it is rebuilt.
 
 Answering (`DocumentIndex.search`), for each message:
 
@@ -48,7 +48,7 @@ Answering (`DocumentIndex.search`), for each message:
 2. **Hybrid search** (`hybrid` feature): the `SENSAI_RAG_CANDIDATES` (30) chunks closest to the message by cosine similarity, and the 30 that match its words best in a SQLite [FTS5](https://www.sqlite.org/fts5.html) table by BM25, where a rare word counts more and the header of an email (title, people, attachments) counts half. The two rankings cannot be compared by their scores: `retriever.fuse` merges them by their ranks only ([Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)), and a chunk found by both comes first. The vectors find "the suspicious payments", the keywords find "CH93 0076 2011".
 3. **Reranking** (`rerank` feature): the vectors compare the question and a chunk separately, so a chunk on the same subject that does not answer scores as high as the one that does. `rag/reranker.py` reads the question and each of the 30 chunks together with a cross-encoder ([sentence-transformers](https://sbert.net/docs/cross_encoder/usage/usage.html), `SENSAI_RERANK_MODEL`) and gives it a relevance from 0 to 1. It is too slow to read the whole index, hence the fast search first. The raw score of the model goes through a sigmoid, so that the threshold means the same with any model.
 4. **Threshold**: a chunk under `SENSAI_RERANK_THRESHOLD` percent of relevance is dropped and never reaches the model, like the transfer of May for a question on March; then the `SENSAI_RAG_TOP_K` best are kept. When every chunk is dropped, the model is told that the documents do not answer, instead of getting the question alone and answering from what it knows.
-5. **Neighbors**: a chunk is cut every 1200 characters, and the sentence that answers can be just before the cut. Each excerpt kept comes with the `SENSAI_RAG_NEIGHBORS` chunks before and after it in the same document, joined without their overlap (`chunker.join_chunks`); two excerpts close in a document become one passage. The search stays precise on small chunks, the model reads the whole passage.
+5. **Neighbors**: a chunk is cut every 1200 characters, and the sentence that answers can be just before the cut. Each excerpt kept comes with the `SENSAI_RAG_NEIGHBORS` chunks before and after it in the same document, joined without their overlap: the chunker records how many characters each chunk repeats from the one before (`chunks.overlap`), and `chunker.join_chunks` skips them. Two excerpts close in a document become one passage. The search stays precise on small chunks, the model reads the whole passage.
 
 The excerpts are added to the prompt, numbered, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts. After each search, the CLI tells what happened to the candidates, and `/sources dropped` shows those under the threshold:
 
@@ -79,7 +79,14 @@ The threshold was chosen from the scores the same command prints for thresholds 
 
 Up to 20%, the noise falls from 5 excerpts to 0.7 for the loss of one document that answers; past it, each step loses documents that answer for a few points of precision. Twenty questions on documents written for the test are a small sample: run the evaluation on your own case before changing the threshold.
 
-The default cross-encoder, `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, is multilingual and reads 30 candidates in about 2 s on a laptop CPU, plus about 5 s to load at the first search. `BAAI/bge-reranker-v2-m3`, a common choice, took 24 s per search without a GPU, and did not tell the transfer of May from the one of March better in our test (relevance 3.6% against 0.1%).
+The default cross-encoder, `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, is multilingual and reads 30 candidates in about 2 s on a laptop CPU, plus about 5 s to load at the first search. `BAAI/bge-reranker-v2-m3` (`SENSAI_RERANK_MODEL=BAAI/bge-reranker-v2-m3`) does better on the same evaluation, but takes about 23 s per search without a GPU:
+
+| Cross-encoder | + reranking: Recall@5 / NDCG@10 | + threshold at 20%: Recall@5 / NDCG@10 | Excerpts sent from a document that answers | Excerpts sent for a question without answer | Time per search |
+|---|---|---|---|---|---|
+| `mmarco-mMiniLMv2-L12-H384-v1` (default) | 94% / 0.95 | 91% / 0.92 | 64% | 0.7 | ~2.3 s |
+| `bge-reranker-v2-m3` | 97% / 0.97 | 94% / 0.95 | 68% | 0.3 | ~23 s |
+
+It is worth it with a GPU, or for a batch of questions that can wait; for a chat on a CPU, the default model answers ten times faster.
 
 ### Sessions & profile
 

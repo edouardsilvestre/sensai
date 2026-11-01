@@ -30,6 +30,7 @@ class Document:
 class Chunk:
     text: str
     location: str = ""
+    overlap: int = 0
 
 
 @dataclass

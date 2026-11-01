@@ -89,7 +89,7 @@ def test_joined_chunks_give_back_the_text_without_the_overlap(overlap):
     chunks = Chunker(200, overlap).split(Document("text", [Section(text)]))
     assert len(chunks) > 3
     whole = Chunker(10_000, 0).split(Document("text", [Section(text)]))[0].text
-    joined = join_chunks([chunk.text for chunk in chunks], overlap)
+    joined = join_chunks(chunks)
     if overlap:
         assert joined == whole
     else:
@@ -102,21 +102,37 @@ def test_joined_rows_give_back_the_sheet():
     chunks = Chunker(200, 80).split(Document("spreadsheet", rows))
     assert len(chunks) > 3
     whole = Chunker(10_000, 0).split(Document("spreadsheet", rows))[0]
-    assert join_chunks([chunk.text for chunk in chunks], 80) == whole.text
+    assert join_chunks(chunks) == whole.text
     assert join_locations([chunk.location for chunk in chunks]) == whole.location == "Sheet A, rows 2-29"
 
 
 def test_a_run_of_chunks_in_the_middle_is_joined_too():
     chunks = Chunker(200, 80).split(Document("text", [Section(sentences(40))]))
-    joined = join_chunks([chunk.text for chunk in chunks[2:5]], 80)
+    joined = join_chunks(chunks[2:5])
     assert joined.startswith(chunks[2].text) and joined.endswith(chunks[4].text)
     assert joined.count("Sentence number") == len(set(re.findall(r"Sentence number \d+", joined)))
 
 
+def test_each_chunk_knows_how_much_of_the_previous_one_it_repeats():
+    chunks = Chunker(200, 80).split(Document("text", [Section(sentences(40))]))
+    assert chunks[0].overlap == 0
+    for previous, current in zip(chunks, chunks[1:]):
+        assert 0 < current.overlap <= 80
+        assert previous.text.endswith(current.text[: current.overlap])
+        assert current.text[current.overlap] == " "
+
+
+def test_a_sentence_longer_than_a_chunk_is_joined_without_losing_or_repeating_a_word():
+    text = "Short one. " + " ".join(f"word{i}" for i in range(120)) + ". Last one."
+    chunks = Chunker(100, 40).split(Document("text", [Section(text)]))
+    assert join_chunks(chunks).split() == text.split()
+
+
 def test_chunks_that_do_not_overlap_are_kept_apart():
-    assert join_chunks(["Sheet A rows.", "Sheet B rows."], 100) == "Sheet A rows.\n\nSheet B rows."
-    # A word in common is not an overlap: the overlap is whole sentences.
-    assert join_chunks(["It was paid by Delta", "Delta Holding paid"], 100) == "It was paid by Delta\n\nDelta Holding paid"
+    rows = [Section(f"name: {sheet}", Locator("row", 2, f"Sheet {sheet}"), separator="\n") for sheet in "AB"]
+    chunks = Chunker(1000, 100).split(Document("spreadsheet", rows))
+    assert [chunk.overlap for chunk in chunks] == [0, 0]
+    assert join_chunks(chunks) == "name: A\n\nname: B"
 
 
 @pytest.mark.parametrize(

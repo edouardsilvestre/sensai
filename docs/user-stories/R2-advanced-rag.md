@@ -1,5 +1,35 @@
 # R2 Advanced RAG: user stories
 
+## From R1 to R2
+
+R1 finds the chunks that look like the question; R2 filters the documents, also finds the exact terms, checks that each excerpt answers, and drops the rest.
+
+| | R1 Basic RAG | R2 Advanced RAG |
+|---|---|---|
+| Documents searched | the whole index | the ones of the `/filter` (period, sender, recipient, kind, folder), also when the model searches |
+| How the chunks are found | by meaning: the 5 closest vectors | by meaning and by exact words (FTS5, BM25), 30 of each, merged by their ranks (RRF) |
+| How they are ranked | cosine similarity, question and chunk compared separately | a cross-encoder reads the question with each chunk and scores whether it answers |
+| What reaches the model | always the 5 best, answering or not | only the chunks over the relevance threshold, then the 5 best: possibly none |
+| When the documents do not answer | 5 excerpts on the same subject, that the model may answer from | the model is told that no excerpt answers, and says so |
+| Text of an excerpt | one chunk of about 1200 characters | the chunk with the ones before and after it, as one passage |
+| Shown to the journalist | the excerpts and their similarity | also the candidates kept and dropped (`[rerank]`), the dropped ones in `/sources dropped`, the relevance of each |
+| Measured | not | `sensai eval --retrieval`, step by step |
+
+Measured with `python -m sensai eval eval/questions.json --retrieval` on the fictional case of `eval/corpus/` (21 documents, 20 questions, 3 of them not answered by the documents), with `qwen3-embedding:0.6b` and the default cross-encoder, on a laptop CPU:
+
+| | Recall@5 | NDCG@10 | Excerpts sent from a document that answers | Excerpts sent for a question without answer | Time per search |
+|---|---|---|---|---|---|
+| R1: semantic search | 91% | 0.86 | 24% | 5.0 | ~0.2 s |
+| R2: + hybrid search | 97% | 0.89 | 26% | 5.0 | ~0.2 s |
+| R2: + reranking | 94% | 0.95 | 25% | 5.0 | ~2.3 s |
+| R2: + threshold at 20% | 91% | 0.92 | 64% | 0.7 | ~2.3 s |
+
+The times were measured apart, on a corpus of the same size: `--retrieval` does not time the searches.
+
+R2 sends the model the same share of the documents that answer, but they come first, and two thirds of what it reads now answers, against a quarter. For a question the documents do not answer, it reads 0.7 excerpt instead of 5 on the same subject, the ones it would make an answer from. It costs about 2 s per question, the time of the cross-encoder.
+
+With `SENSAI_RERANK_MODEL=BAAI/bge-reranker-v2-m3`, the threshold at 20% keeps 94% of the documents that answer (NDCG 0.95), 68% of the excerpts sent answer and a question without answer gets 0.3 excerpt, but each search takes about 23 s on a CPU instead of 2.3 s.
+
 ## Search only the documents of a period, a person or a kind
 
 As an investigative journalist working on a leak of several years, I want to limit the search to the documents of a period, of a sender or of a kind, so that a question on June 2023 is not answered from an email of 2021 on the same subject.

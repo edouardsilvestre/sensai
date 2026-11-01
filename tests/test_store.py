@@ -327,3 +327,25 @@ def test_the_chunks_of_a_document_by_position(store):
     assert [chunk.text for chunk in store.chunks_between(1, 1, 2)] == ["one", "two"]
     assert [chunk.location for chunk in store.chunks_between(1, 2, 9)] == ["p. 3", "p. 4"]
     assert store.chunks_between(2, 1, 3) == []
+
+
+def test_the_overlap_of_each_chunk_is_kept(store):
+    store.save_document(
+        record("/a.txt"), [Chunk("One. Two.", "", 0), Chunk("Two. Three.", "", 4)],
+        [FakeClient.vector("one"), FakeClient.vector("three")], "m",
+    )
+    assert [chunk.overlap for chunk in store.chunks_between(1, 0, 1)] == [0, 4]
+
+
+def test_an_index_of_v2_without_the_overlap_gets_it(tmp_path):
+    path = tmp_path / "index.db"
+    VectorStore(path).close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE chunks DROP COLUMN overlap")
+    db.commit()
+    db.close()
+
+    store = VectorStore(path)
+    save(store, "/a.txt", ["one"])
+    assert store.chunks_between(1, 0, 0)[0].overlap == 0
+    store.close()

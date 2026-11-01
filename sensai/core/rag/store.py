@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
     location TEXT NOT NULL DEFAULT '',
-    text TEXT NOT NULL
+    text TEXT NOT NULL,
+    -- The characters at the start of the text that repeat the end of the previous chunk of the document.
+    overlap INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS documents_date ON documents(date);
@@ -138,6 +140,10 @@ class VectorStore:
                     self._db.execute("INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('rank', ?)", (_RANK,))
                     # An index made before the keyword search: its chunks get their words now.
                     self._fill_keywords()
+                if "overlap" not in {row[1] for row in self._db.execute("PRAGMA table_info(chunks)")}:
+                    # An index made before the neighbors: its chunks are joined as if they did not overlap,
+                    # repeating a few sentences, until `ingest --rebuild`.
+                    self._db.execute("ALTER TABLE chunks ADD COLUMN overlap INTEGER NOT NULL DEFAULT 0")
         except sqlite3.DatabaseError as e:
             self._db.close()
             raise StoreError(f"Cannot use {path} as an index: {e}") from e
@@ -213,8 +219,8 @@ class VectorStore:
                 document_id = cursor.lastrowid
             for position, (chunk, vector) in enumerate(zip(chunks, vectors)):
                 cursor = self._db.execute(
-                    "INSERT INTO chunks (document_id, position, location, text) VALUES (?, ?, ?, ?)",
-                    (document_id, position, chunk.location, chunk.text),
+                    "INSERT INTO chunks (document_id, position, location, text, overlap) VALUES (?, ?, ?, ?, ?)",
+                    (document_id, position, chunk.location, chunk.text, chunk.overlap),
                 )
                 self._db.execute(
                     "INSERT INTO vec_chunks (rowid, embedding, document_id) VALUES (?, ?, ?)",
@@ -261,10 +267,11 @@ class VectorStore:
     def chunks_between(self, document_id: int, first: int, last: int) -> list[Chunk]:
         """The chunks of a document from position `first` to `last`, in their order."""
         rows = self._db.execute(
-            "SELECT text, location FROM chunks WHERE document_id = ? AND position BETWEEN ? AND ? ORDER BY position",
+            "SELECT text, location, overlap FROM chunks WHERE document_id = ? AND position BETWEEN ? AND ? "
+            "ORDER BY position",
             (document_id, first, last),
         )
-        return [Chunk(text, location) for text, location in rows]
+        return [Chunk(text, location, overlap) for text, location, overlap in rows]
 
     def is_empty(self) -> bool:
         return self._db.execute("SELECT NOT EXISTS (SELECT 1 FROM chunks)").fetchone()[0] == 1

@@ -192,7 +192,7 @@ class DocumentIndex:
         widened = []
         for passage in passages:
             chunks = self.store.chunks_between(passage.document_id, passage.first, passage.last)
-            text = join_chunks([chunk.text for chunk in chunks], self.config.chunk_overlap)
+            text = join_chunks(chunks)
             location = join_locations([chunk.location for chunk in chunks])
             widened.append(replace(passage.excerpt, text=text, location=location))
         return widened

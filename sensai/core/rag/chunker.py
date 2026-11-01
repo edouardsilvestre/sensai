@@ -28,15 +28,17 @@ class Chunker:
     def split(self, document: Document) -> list[Chunk]:
         chunks: list[Chunk] = []
         window: list[_Unit] = []
+        repeated = 0
         for unit in self._units(document):
             if window and (unit.scope != window[-1].scope or _length(window + [unit]) > self.size):
-                chunks.append(_to_chunk(window))
+                chunks.append(_to_chunk(window, repeated))
                 window = self._overlap(window) if unit.scope == window[-1].scope else []
                 while window and _length(window + [unit]) > self.size:
                     window.pop(0)
+                repeated = len(window)
             window.append(unit)
         if window:
-            chunks.append(_to_chunk(window))
+            chunks.append(_to_chunk(window, repeated))
         return chunks
 
     def _units(self, document: Document):
@@ -86,37 +88,12 @@ class Chunker:
         return tail
 
 
-def join_chunks(texts: list[str], overlap: int) -> str:
-    """
-    The text of consecutive chunks of a document, without their overlap twice: a chunk starts with the last
-    sentences of the previous one, up to `overlap` characters, unless a page of another sheet starts with it.
-    """
-    joined = texts[0]
-    for text in texts[1:]:
-        shared = _shared(joined, text, overlap)
-        joined += text[shared:] if shared else "\n\n" + text
+def join_chunks(chunks: list[Chunk]) -> str:
+    """The text of consecutive chunks of a document, without the start of each one that repeats the previous one."""
+    joined = chunks[0].text
+    for chunk in chunks[1:]:
+        joined += chunk.text[chunk.overlap:] if chunk.overlap else "\n\n" + chunk.text
     return joined
-
-
-def _shared(before: str, after: str, overlap: int) -> int:
-    # The overlap is whole sentences or lines: a name both ends with and starts with is not one.
-    for length in range(min(overlap, len(before), len(after)), 0, -1):
-        if (
-            before.endswith(after[:length])
-            and _is_break(before[:-length], before[-length:])
-            and _is_break(after[:length], after[length:])
-        ):
-            return length
-    return 0
-
-
-def _is_break(left: str, right: str) -> bool:
-    """Whether a sentence or a line ends between `left` and `right`, the separator being at the end of either."""
-    if not left or not right or left.endswith("\n") or right.startswith("\n"):
-        return True
-    if left.endswith(" "):
-        return left.rstrip(" ")[-1:] in tuple(".!?…")
-    return right.startswith(" ") and left[-1] in ".!?…"
 
 
 _LOCATION = re.compile(r"^(?:(?P<scope>.+), )?(?:p\. |(?P<kind>[a-z]+?)s? )(?P<first>\d+)(?:-(?P<last>\d+))?$")
@@ -142,9 +119,10 @@ def _length(units: list[_Unit]) -> int:
     return sum(len(u.text) for u in units) + sum(len(u.separator) for u in units[1:])
 
 
-def _to_chunk(units: list[_Unit]) -> Chunk:
+def _to_chunk(units: list[_Unit], repeated: int = 0) -> Chunk:
     text = units[0].text + "".join(u.separator + u.text for u in units[1:])
-    return Chunk(text, format_location([u.locator for u in units if u.locator]))
+    overlap = _length(units[:repeated]) if repeated else 0
+    return Chunk(text, format_location([u.locator for u in units if u.locator]), overlap)
 
 
 def format_location(locators: list[Locator]) -> str:

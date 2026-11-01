@@ -233,7 +233,7 @@ def story(tmp_path, config):
     folder = tmp_path / "story"
     folder.mkdir()
     (folder / "story.txt").write_text(STORY, encoding="utf-8")
-    return folder, [chunk.text for chunk in Chunker(config.chunk_size, config.chunk_overlap).split(Document("text", [Section(STORY)]))]
+    return folder, Chunker(config.chunk_size, config.chunk_overlap).split(Document("text", [Section(STORY)]))
 
 
 def answers(*texts: str):
@@ -245,10 +245,10 @@ def test_an_excerpt_comes_with_the_chunks_before_and_after_it(index, story, conf
     folder, chunks = story
     assert len(chunks) > 6
     index.ingest([folder])
-    index.reranker = answers(chunks[3])
+    index.reranker = answers(chunks[3].text)
 
     [excerpt] = index.search("what happened?", k=3)
-    assert excerpt.text == join_chunks(chunks[2:5], config.chunk_overlap)
+    assert excerpt.text == join_chunks(chunks[2:5])
     assert excerpt.text in STORY
     assert excerpt.relevance > 0.99
 
@@ -256,45 +256,45 @@ def test_an_excerpt_comes_with_the_chunks_before_and_after_it(index, story, conf
 def test_the_first_chunk_has_no_chunk_before_it(index, story, config):
     folder, chunks = story
     index.ingest([folder])
-    index.reranker = answers(chunks[0])
+    index.reranker = answers(chunks[0].text)
     [excerpt] = index.search("what happened?", k=3)
-    assert excerpt.text == join_chunks(chunks[0:2], config.chunk_overlap)
+    assert excerpt.text == join_chunks(chunks[0:2])
 
 
 def test_close_excerpts_of_a_document_make_one_passage(index, story, config):
     folder, chunks = story
     index.ingest([folder])
-    index.reranker = answers(chunks[3], chunks[5])
+    index.reranker = answers(chunks[3].text, chunks[5].text)
 
     results = index.search("what happened?", k=3)
-    assert [result.text for result in results] == [join_chunks(chunks[2:7], config.chunk_overlap)]
+    assert [result.text for result in results] == [join_chunks(chunks[2:7])]
 
 
 def test_distant_excerpts_stay_apart_in_their_order(index, story, config):
     folder, chunks = story
     index.ingest([folder])
-    scores = {chunks[1]: 3.0, chunks[6]: 5.0}
+    scores = {chunks[1].text: 3.0, chunks[6].text: 5.0}
     index.reranker = Reranker("fake", scorer=lambda pairs: [next((v for c, v in scores.items() if p.endswith(c)), -5.0) for _, p in pairs])
 
     results = index.search("what happened?", k=3)
     assert [result.text for result in results] == [
-        join_chunks(chunks[5:8], config.chunk_overlap), join_chunks(chunks[0:3], config.chunk_overlap)
+        join_chunks(chunks[5:8]), join_chunks(chunks[0:3])
     ]
 
 
 def test_no_neighbors_sends_the_chunk_alone(index, story, config):
     folder, chunks = story
     index.ingest([folder])
-    index.reranker = answers(chunks[3])
+    index.reranker = answers(chunks[3].text)
     config.rag_neighbors = 0
     [excerpt] = index.search("what happened?", k=3)
-    assert excerpt.text == chunks[3]
+    assert excerpt.text == chunks[3].text
 
 
 def test_the_dropped_chunks_are_reported_without_their_neighbors(index, story):
     folder, chunks = story
     index.ingest([folder])
-    index.reranker = answers(chunks[3])
+    index.reranker = answers(chunks[3].text)
     report = SearchReport()
     index.search("what happened?", k=3, report=report)
-    assert all(result.text in chunks for result in report.dropped)
+    assert all(result.text in [chunk.text for chunk in chunks] for result in report.dropped)
