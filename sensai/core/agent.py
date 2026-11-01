@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from collections.abc import Generator, Iterator
 
 from sensai.core.approval import NO_APPROVER_REASON, Approval, Approver, approval_reason, refusal
@@ -7,10 +8,14 @@ from sensai.core.cache import CacheError, CachedAnswer, ConfirmCache, SemanticCa
 from sensai.core.config import Config
 from sensai.core.document.document import DocumentError, Edit, Rejected
 from sensai.core.document.editor import DocumentEditor, model_editor
+from sensai.core.evaluation.judge import check, evidence, sentences
 from sensai.core.examples import ExampleLibrary, examples_message
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
+    CheckEvent,
+    CheckFailedEvent,
+    CheckStartedEvent,
     CacheFailedEvent,
     CacheHitEvent,
     CompactionEvent,
@@ -23,6 +28,7 @@ from sensai.core.events import (
     ExamplesEvent,
     ExamplesFailedEvent,
     GuardrailEvent,
+    LogFailedEvent,
     ReasoningStoppedEvent,
     RerankEvent,
     SourcesEvent,
@@ -33,7 +39,9 @@ from sensai.core.events import (
 )
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall, Usage
 from sensai.core.memory.conversation import ConversationMemory
+from sensai.core.monitoring.log import Interaction, InteractionLog, LogError
 from sensai.core.persona import Persona
+from sensai.core.prompts import PromptStore
 from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
 from sensai.core.rag.prompt import build_no_excerpt_prompt, build_prompt
 from sensai.core.reasoning import Reasoning, ReasoningError, instructions, parse_step, step_schema, tool_messages
@@ -42,6 +50,13 @@ from sensai.core.tools.registry import ToolRegistry, ToolResult
 
 # Ends an answer that a block rule stopped, in the history, so that the model knows it was cut.
 STOPPED = "[answer stopped by a guardrail]"
+# Ends an answer the user interrupted, in the history, so that the model knows it was cut.
+INTERRUPTED = "[answer interrupted by the user]"
+
+
+def cut_answer(text: str) -> str:
+    """What the history keeps of an answer the user interrupted."""
+    return "\n".join(filter(None, [text, INTERRUPTED]))
 
 
 class EmptyInputError(ValueError):
@@ -62,6 +77,8 @@ class Agent:
         cache: SemanticCache | None = None,
         confirm_cache: ConfirmCache | None = None,
         examples: ExampleLibrary | None = None,
+        prompts: PromptStore | None = None,
+        log: InteractionLog | None = None,
     ):
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
@@ -74,17 +91,35 @@ class Agent:
         self.editor = editor or model_editor(self.client, config)
         self.guardrails = guardrails or Guardrails()
         self.examples = examples
+        self.prompts = prompts
         self.reasoning: list[Reasoning] = []
         self.cache = cache
         self.confirm_cache = confirm_cache
-        # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
+        self.log = log
+        self.session_id = ""
+        self.last_input = ""
+        self.last_prompt: list[dict] = []
         self.keeps_document = True
+        # The turn being answered and the text shown so far, for `interrupt`.
+        self.answering: tuple[str, list[SearchResult]] | None = None
+        self.shown: list[str] = []
+        # The last question sent to the model, as the guardrails let it through.
+        self.asked = ""
         self.persona: Persona | None = None
+        if self.prompts is not None:
+            self.prompt_version: int | None = None
+            if self.config.features["prompt_versions"]:
+                version = self.prompts.active()
+                self.prompt_version = version.number if version else None
+                if version is not None:
+                    self.memory.system_prompt = version.prompt
         if persona is not None:
             self.set_persona(persona)
 
     def set_persona(self, persona: Persona) -> None:
         self.persona = persona
+        if self.prompts is not None:
+            self.prompt_version = None
         self.memory.system_prompt = persona.system_prompt()
 
     @property
@@ -94,6 +129,18 @@ class Agent:
     @property
     def active_guardrails(self) -> Guardrails:
         return self.guardrails if self.config.features["guardrails"] else Guardrails()
+
+    def interrupt(self) -> bool:
+        """
+        Call it when `run` was stopped midway. The question and the text already shown go to the history, so that the
+        next message can redirect the answer. The document does not change: a cut answer establishes nothing.
+        """
+        if self.answering is None:
+            return False
+        (user_input, sources), self.answering = self.answering, None
+        text = cut_answer("".join(self.shown).lstrip())
+        self.memory.commit(user_input, text, [source.citation for source in sources])
+        return True
 
     def _approve(self, call: ToolCall, tools: ToolRegistry) -> Approval | None:
         reason = approval_reason(self.config.approval, tools, call)
@@ -121,6 +168,7 @@ class Agent:
             if approval is not None:
                 yield ApprovalEvent(call, approval)
             result = tools.execute(call) if approval is None or approval.approved else refusal(approval)
+        self.shown.append(self._kept_result(call, result, guardrails))
         yield ToolResultEvent(call, result)
         return call, result
 
@@ -210,13 +258,112 @@ class Agent:
         if report:
             yield DocumentEvent(report)
 
+    def _kept_result(self, call: ToolCall, result: ToolResult, guardrails: Guardrails) -> str:
+        """
+        A tool result as an interrupted turn keeps it, for the model to go on from it: unlike an answer,
+        this one reaches the history and the saved session, so it goes through the same rules as an answer.
+        """
+        output = guardrails.output_filter()
+        content = output.feed(result.content) + output.close()
+        return f"\n[{call.name}] {'result withheld by a guardrail' if output.blocked else content}\n"
+
+    def prompt_version(self) -> str:
+        templates = [self.memory.system_prompt, build_prompt("", []), instructions(ToolRegistry())]
+        return hashlib.sha256(json.dumps(templates, ensure_ascii=False).encode()).hexdigest()[:8]
+
+    def _check(self, question: str, answer: str, given: str) -> Iterator[Event]:
+        yield CheckStartedEvent(len(sentences(answer)), self.config.judge_model or self.config.model)
+        try:
+            judgement = check(self.client, self.config, question, answer, given)
+        except LLMError as e:
+            yield CheckFailedEvent(str(e))
+            return
+        yield CheckEvent(judgement)
+
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
+        if self.log is None or not self.config.features["logging"]:
+            try:
+                yield from self._answer(user_input, format)
+            except Exception:
+                self.answering, self.shown = None, []
+                raise
+            return
+        if not user_input.strip():
+            raise EmptyInputError("Empty message")
+        active_version = getattr(self, "prompt_version", None)
+        if callable(active_version):
+            version_str = active_version()
+        elif active_version is not None:
+            version_str = str(active_version)
+        else:
+            templates = [self.memory.system_prompt, build_prompt("", []), instructions(ToolRegistry())]
+            version_str = hashlib.sha256(json.dumps(templates, ensure_ascii=False).encode()).hexdigest()[:8]
+        record = Interaction(
+            self.config.model, "", session_id=self.session_id, persona=self.persona.id if self.persona else "",
+            prompt_version=version_str,
+        )
+        start = time.monotonic()
+        try:
+            for event in self._answer(user_input, format):
+                self._observe(record, event, round(time.monotonic() - start, 3))
+                yield event
+        except GeneratorExit:
+            raise
+        except BaseException as e:
+            record.outcome, record.error = "error", str(e) or type(e).__name__
+            self._write(record, start)
+            self.answering, self.shown = None, []
+            raise
+        failed = self._write(record, start)
+        if failed:
+            yield LogFailedEvent(failed)
+
+    def _observe(self, record: Interaction, event: Event, elapsed: float) -> None:
+        if isinstance(event, TokenEvent) and record.first_token_seconds is None:
+            record.first_token_seconds = elapsed
+        elif isinstance(event, ToolCallEvent):
+            record.tools.append(event.call.name)
+        elif isinstance(event, SourcesEvent):
+            record.sources = len(event.sources)
+        elif isinstance(event, ThoughtEvent):
+            record.reasoning_steps += 1
+        elif isinstance(event, CacheHitEvent):
+            record.outcome = "cached"
+        elif isinstance(event, GuardrailEvent):
+            hit = event.hit
+            if hit.rule not in record.guardrails:
+                record.guardrails.append(hit.rule)
+            if hit.action == "block" and hit.stage in ("input", "output"):
+                record.outcome = "blocked" if hit.stage == "input" else "stopped"
+        elif isinstance(event, DoneEvent):
+            record.answer, record.seconds = event.content, elapsed
+            usage = self.memory.last_usage
+            if usage is not None:
+                record.prompt_tokens, record.completion_tokens = usage.prompt_tokens, usage.completion_tokens
+
+    def _write(self, record: Interaction, start: float) -> str | None:
+        if not record.seconds:
+            record.seconds = round(time.monotonic() - start, 3)
+        if self.config.log_content:
+            record.question, record.prompt = self.last_input, list(self.last_prompt)
+        else:
+            record.answer = ""
+        try:
+            self.log.add(record)
+        except LogError as e:
+            return str(e)
+        return None
+
+    def _answer(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
+        self.answering, self.shown = None, []
         user_input = user_input.strip()
+        self.last_input, self.last_prompt = user_input, []
         if not user_input:
             raise EmptyInputError("Empty message")
 
         guardrails = self.active_guardrails
         checked = guardrails.check_input(user_input)
+        self.last_input = checked.text
         for hit in checked.hits:
             yield GuardrailEvent(hit)
         if checked.blocked:
@@ -255,7 +402,13 @@ class Agent:
             elif report.dropped:
                 prompt = build_no_excerpt_prompt(user_input)
 
+        # A JSON answer cut halfway is of no use to anyone: only a prose answer is kept.
+        # A copy: the reasoning adds the excerpts it finds, and an interrupted turn cites them too.
+        sources = list(sources)
+        self.asked = user_input
+        self.answering = None if format else (user_input, sources)
         pending = self.memory.messages() + [{"role": "user", "content": prompt}]
+        self.last_prompt = pending
         if self.examples is not None and self.config.features["examples"] and format is None:
             try:
                 chosen = self.examples.closest(user_input, self.config.examples_k)
@@ -270,9 +423,9 @@ class Agent:
         # The schema constrains every token of the answer: the model could not call a tool.
         functions = self.tools.tools() if self.config.features["tools"] and format is None else []
         used_tools = False
+        reasoning = None
         if self.config.features["reasoning"] and format is None:
             found = len(sources)
-            sources = list(sources)
             reasoning = yield from self._reason(user_input, pending, options, guardrails, sources)
             if len(sources) > found:
                 yield SourcesEvent(list(sources))
@@ -293,12 +446,14 @@ class Agent:
                 shown = output.feed(chunk)
                 if shown:
                     answer.append(shown)
+                    self.shown.append(shown)
                     yield TokenEvent(shown)
                 if output.blocked:
                     break
             shown = output.close()
             if shown:
                 answer.append(shown)
+                self.shown.append(shown)
                 yield TokenEvent(shown)
             for hit in output.hits.values():
                 yield GuardrailEvent(hit)
@@ -316,6 +471,7 @@ class Agent:
                 pending.append({"role": "tool", "tool_name": call.name, "content": result.content})
 
         content = "".join(answer)
+        self.answering = None
         self.memory.commit(user_input, content, [source.citation for source in sources], usage)
         yield DoneEvent(content)
         if vector is not None and not used_tools and not output.blocked and content.strip():
@@ -325,6 +481,18 @@ class Agent:
                 yield CacheFailedEvent(str(e))
         if self.keeps_document and self.config.features["document"] and content.strip() and not output.blocked:
             yield from self.update_document(user_input, content, guardrails)
+        checks = self.keeps_document and self.config.features["fact_check"] and format is None
+        if checks and sentences(content) and not output.blocked:
+            results = [
+                message["content"] for message in pending
+                if message.get("role") == "tool" and not message["content"].startswith("Error:")
+            ]
+            if reasoning is not None:
+                results += [
+                    step.result.content for step in reasoning.steps
+                    if step.result is not None and not step.result.error and step.action != "search_documents"
+                ]
+            yield from self._check(user_input, content, evidence(sources, results))
 
         # The turn is saved: from here on, a failure only delays the compaction to the next turn.
         if self.memory.needs_compaction(usage.total_tokens):

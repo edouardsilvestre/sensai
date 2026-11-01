@@ -39,9 +39,14 @@ FEATURES = {
     "document": Feature("keep a working document of the established facts, updated after every answer"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
+    "branching": Feature("edit a past message into a new branch, and keep an interrupted answer to redirect it"),
     "reasoning": Feature("reason step by step and show each step before answering", default=False),
     "cache": Feature("reuse the answer to a close question already asked, once you confirm it"),
     "examples": Feature("show the model your answers kept as examples, for similar questions"),
+    "prompt_versions": Feature("keep every version of the system prompt, to compare them and roll back"),
+    "schedule": Feature("run the scheduled tasks and write their reports"),
+    "logging": Feature("log every message with its prompt, answer, tools, time and tokens"),
+    "fact_check": Feature("check each answer against its excerpts and flag what they do not support", default=False),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -75,6 +80,12 @@ class Config:
     mcp_path: Path = Path(".sensai/mcp.json")
     examples_path: Path = Path(".sensai/examples.json")
     examples_k: int = 2
+    prompts_dir: Path = Path(".sensai/prompts")
+    prompt_cases_path: Path = Path(".sensai/prompt_cases.json")
+    schedule_path: Path = Path(".sensai/schedule.json")
+    reports_dir: Path = Path(".sensai/reports")
+    judge_model: str = ""
+    judge_max_tokens: int = 1500
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
@@ -104,6 +115,8 @@ class Config:
     max_tool_rounds: int = 5
     max_review_rounds: int = 2
     approval: str = "critical"
+    log_path: Path = Path(".sensai/logs.db")
+    log_content: bool = True
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -189,6 +202,12 @@ def load_config(path: Path | None = None) -> Config:
         mcp_path=Path(os.getenv("SENSAI_MCP_PATH", str(Config.mcp_path))),
         examples_path=Path(os.getenv("SENSAI_EXAMPLES_PATH", str(Config.examples_path))),
         examples_k=_int_env("SENSAI_EXAMPLES_K", Config.examples_k, minimum=0, maximum=5),
+        prompts_dir=Path(os.getenv("SENSAI_PROMPTS_DIR", str(Config.prompts_dir))),
+        prompt_cases_path=Path(os.getenv("SENSAI_PROMPT_CASES_PATH", str(Config.prompt_cases_path))),
+        schedule_path=Path(os.getenv("SENSAI_SCHEDULE_PATH", str(Config.schedule_path))),
+        reports_dir=Path(os.getenv("SENSAI_REPORTS_DIR", str(Config.reports_dir))),
+        judge_model=os.getenv("SENSAI_JUDGE_MODEL", Config.judge_model).strip(),
+        judge_max_tokens=_int_env("SENSAI_JUDGE_MAX_TOKENS", Config.judge_max_tokens, minimum=200, maximum=8000),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
@@ -211,6 +230,8 @@ def load_config(path: Path | None = None) -> Config:
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
         max_review_rounds=_int_env("SENSAI_MAX_REVIEW_ROUNDS", Config.max_review_rounds, minimum=1, maximum=5),
         approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
+        log_path=Path(os.getenv("SENSAI_LOG_PATH", str(Config.log_path))),
+        log_content=_bool_env("SENSAI_LOG_CONTENT") is not False,
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")
