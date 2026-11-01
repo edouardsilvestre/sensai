@@ -23,6 +23,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
 - 💡 **Answer examples**: keep your best answers with `/example add`, and Sensai shows the closest ones to the model for each new question, so that even a small model cites its excerpts and says what the documents do not say.
+- ⏰ **Scheduled tasks**: a question Sensai goes through on its own every morning or every hour, comparing with its last run, and writing a sourced report only when it finds something else, with no tool used unless the journalist allowed it in advance.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -244,6 +245,49 @@ Measured with `qwen2.5:1.5b` on three documents of a fictional case and five exa
 Without examples, the model made up four answers: the company's address as Marc Vidal's home (twice), "Marc Vidal has no account in Switzerland", and 12 € of bank fees as the company's taxes. With them, only the address was made up, once. But the answers got longer, and twice the model added a wrong detail to a right answer ("a dinner" for a lunch, "an expense report" for a bank statement), and it took twice as long, since the prompt and the answers are longer. An example also only teaches what it shows: an answer kept without a citation does not teach the model to cite. Ten questions asked twice is a small sample, and the model does not always answer the same way.
 
 The other ways to optimize a prompt were considered and ruled out. Rewriting the question before answering it costs one more call to the model per message, and optimizing the prompt against a score, like [DSPy](https://dspy.ai), tries dozens of prompts, hundreds of calls that a CPU cannot afford. Shipping examples with Sensai and keeping the answers approved by the fact-checker of `/review` automatically were ruled out too: an approved answer is not always well written, and the journalist should decide what the model imitates.
+
+### Scheduled tasks
+
+A journalist does not only ask questions, they also watch a case. A task is a question Sensai goes through on its own, at set times, with nobody at the keyboard:
+
+```
+> /schedule add daily 08:00 What is new about Orion Delta in the documents?
+Task 1 added, first run on 2026-11-02 08:00.
+It runs while python -m sensai schedule is running.
+> /schedule add every 6h --allow web_search Any new article about Orion Delta?
+Task 2 added, first run on 2026-11-01 16:12.
+It runs while python -m sensai schedule is running.
+```
+
+`python -m sensai schedule` stays running and runs each task when it is due. `python -m sensai schedule --once` runs what is due and exits, for the task scheduler of the machine (cron, Windows Task Scheduler), with an exit code of 1 when a task failed.
+
+```
+Sensai scheduler - model: qwen3, 2 tasks. Ctrl+C to stop.
+[08:00] What is new about Orion Delta in the documents?
+New report: .sensai/reports/20261102-080000-task-20261101-101200.md
+[10:12] Any new article about Orion Delta?
+Nothing new.
+```
+
+`schedule.py`: `Schedule` keeps the tasks in `SENSAI_SCHEDULE_PATH`, and the chat and the scheduler take a lock on it, then read it again before every change, so nothing is lost when both write and a task added during a run is picked up within 15 seconds. The lock belongs to the system (`msvcrt` on Windows, `flock` elsewhere), which drops it if a process dies, so a crash never leaves the schedule locked. A task moves to its next time before it runs, and from the current time rather than the missed one: a task missed ten times while the machine was off runs once, and a crash in the middle of a run does not make it start again in a loop.
+
+**Each task has its own conversation**, saved like any other in `SENSAI_SESSIONS_DIR` under the id of the task. So the model has its earlier reports in its context, condensed by the same compaction as a chat, and a system message tells it to report what changed. That instruction is in the system prompt, not in the question, so that the document search looks for the question alone. `/resume task-...` continues the conversation of a task to ask a question about a report, and `--resume` alone never picks it.
+
+**The alert is a report**, and it does not depend on the model. Each run keeps a fingerprint of what it found: the text of the excerpts retrieved and the results of the tools, in any order. When the next run finds exactly the same, no report is written, the conversation does not change and the task shows "nothing new", so an hourly check does not bury the report that matters. A new excerpt or any other tool result gives a report, and so does a run that found nothing to compare, since nothing proves that nothing changed.
+
+Letting the model decide was tried first. Asked to answer `NOTHING NEW` when nothing had changed, `granite3.1-moe` did it in 1 try out of 6, and also in 1 try out of 6 when a new fact was there: it could have kept a resignation quiet. A second call asking it whether the new report states a new fact answered yes 12 times out of 12, changed or not. With such a model the prose of two reports always differs, while the evidence does not. The price is a report too many when a web page changes a few words, never a change kept quiet by the model. The model is still called at each run, since the tools it calls are only known once it has answered.
+
+**A report** is a Markdown file in `SENSAI_REPORTS_DIR`, with the question, the date, the answer and the sources it cites, readable without Sensai. `/reports` lists them, `*` marks the unread ones, `/reports N` prints one, and the chat says at startup how many are new and how many tasks failed.
+
+**Nobody is there to approve a tool**, so nothing runs by default: the agent of a run refuses every tool that asks for approval in the chat, and tells the model so. `--allow web_search` gives that approval once and for all when the task is created, for that task and that tool, and `/schedule` shows it. It is a standing decision: a task allowed to use `web_search` sends its query out of the machine at every run. A report says which tools were refused or failed, and such a run always gives a report, since finding the same thing may only mean that the model could not look. With `SENSAI_APPROVAL=off`, nothing is asked in the chat and nothing is refused here either.
+
+The guardrails check the task when it is added, so a name to protect is redacted in the schedule file or the task is refused, and again at each run. The other features apply as in the chat: the profile, the persona (`python -m sensai -p investigator schedule`), the examples, the reasoning. Two do not. The cache would answer a monitoring question with yesterday's answer, and the working document would change without the journalist seeing it: a run uses neither.
+
+A failed run, because Ollama is stopped or a tool crashed for example, does not stop the scheduler: the error is shown by `/schedule`, the chat warns about it at startup, and the task runs again at its next time. Only the start needs Ollama: without it, `python -m sensai schedule` stops with an error, and the tasks stay late until it is started again.
+
+Running the tasks in a thread of the chat was ruled out: the tasks would stop with the chat, and a run would write over the prompt. The cron of the machine alone was ruled out too: it does not work the same on Windows, and it does not tell the journalist that a task is late. `/schedule` does. A library like APScheduler would only replace the computation of the next time, not the catch-up rule, the approvals or the reports.
+
+Limits: tasks run only while the scheduler runs and the machine is on, one at a time, so a long task delays the next one. The times are those of the machine. A task reads the documents already indexed: new files need a `python -m sensai ingest`. If a conversation of a task is continued in the chat during a run, the last one to save it wins, but the report stays.
 
 ### Tools
 
@@ -561,6 +605,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
 | `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
 | `SENSAI_FEATURE_EXAMPLES` | `true` | show the model the answers kept as examples, for the questions close to theirs |
+| `SENSAI_FEATURE_SCHEDULE` | `true` | let `python -m sensai schedule` run the scheduled tasks |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -576,6 +621,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_MCP_PATH` | `.sensai/mcp.json` | URLs of the MCP servers (see `mcp.example.json`); without it, no server is reached |
 | `SENSAI_EXAMPLES_PATH` | `.sensai/examples.json` | the answers kept as examples with `/example add` |
 | `SENSAI_EXAMPLES_K` | `2` | examples shown to the model for each question, the closest ones first (0-5) |
+| `SENSAI_SCHEDULE_PATH` | `.sensai/schedule.json` | the scheduled tasks and the list of their reports |
+| `SENSAI_REPORTS_DIR` | `.sensai/reports` | folder of the reports, in Markdown |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -609,6 +656,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 | `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
 | `examples` | the answers kept as examples shown to the model; they are kept, and `/example add` still works, when it is off |
+| `schedule` | the scheduled tasks and `/reports`; the tasks and the reports are kept when it is off |
 
 The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
