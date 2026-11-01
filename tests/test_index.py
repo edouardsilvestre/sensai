@@ -202,7 +202,7 @@ def test_the_chunks_under_the_threshold_are_dropped_and_reported(index, corpus, 
     assert [result.source for result in results] == ["leak/emails/transfer.txt"]
     assert report.candidates == 3
     assert sorted(result.source for result in report.dropped) == ["leak/accounts.csv", "leak/minutes.md"]
-    assert all(result.relevance < 0.3 for result in report.dropped)
+    assert all(result.relevance < 0.2 for result in report.dropped)
 
 
 def test_a_threshold_of_0_keeps_every_chunk(index, corpus, config):

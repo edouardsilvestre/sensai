@@ -95,7 +95,7 @@ class Config:
     # A multilingual cross-encoder from Hugging Face, small enough to read the candidates in a few seconds on a CPU.
     rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     # Relevance (0-100 %) under which the reranker drops a chunk: it never reaches the model. 0 keeps them all.
-    rerank_threshold: int = 30
+    rerank_threshold: int = 20
     # Chunks added before and after each excerpt kept, from the same document: the sentence that answers can be
     # just before the cut. 0 sends the excerpts alone.
     rag_neighbors: int = 1

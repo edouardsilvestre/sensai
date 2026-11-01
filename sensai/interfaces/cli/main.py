@@ -43,6 +43,7 @@ from sensai.core.events import (
 )
 from sensai.core.document.document import Document, Edit, EditReport
 from sensai.core.evaluation.judge import UNCHECKED, Claim, Judgement
+from sensai.core.evaluation.retrieval import NDCG_K, evaluate_retrieval
 from sensai.core.evaluation.runner import (
     CaseResult,
     EvalError,
@@ -161,6 +162,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     eval_parser.add_argument("cases", type=Path, metavar="FILE", help='the questions: {"cases": [{"question": ...}]}')
     eval_parser.add_argument("--out", type=Path, metavar="FILE", help="write the answers and their scores there")
     eval_parser.add_argument("--compare", type=Path, metavar="FILE", help="compare with results written before")
+    eval_parser.add_argument(
+        "--retrieval", action="store_true",
+        help="score the document search alone, step by step, against the sources of each question (no chat model)",
+    )
     schedule_parser = commands.add_parser("schedule", help="run the scheduled tasks when they are due")
     schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
     return parser.parse_args(argv)
@@ -1948,6 +1953,44 @@ def run_schedule(config: Config, once: bool) -> int:
         if session.index is not None:
             session.index.close()
 
+def run_retrieval_command(config: Config, path: Path) -> int:
+    try:
+        cases = load_cases(path)
+    except EvalError as e:
+        error(str(e))
+        return 1
+    if not config.index_path.exists():
+        error(f"No index at {config.index_path}. Create one with: python -m sensai ingest PATH")
+        return 1
+    try:
+        index = open_index(config, OllamaClient(config.host))
+    except (LLMError, StoreError) as e:
+        error(str(e))
+        return 1
+    answered = sum(bool(case.sources) for case in cases)
+    print(
+        f"Searching {plural(index.stats().documents, 'document')} for {plural(len(cases), 'question')} "
+        f"({answered} answered by the documents)..."
+    )
+    try:
+        scores = evaluate_retrieval(index, config, cases)
+    except (LLMError, StoreError, RerankError) as e:
+        error(str(e))
+        return 1
+    except KeyboardInterrupt:
+        print("\n[interrupted]")
+        return 1
+    finally:
+        index.close()
+    print(f"\n{'':<16}  Recall@{config.rag_top_k}  NDCG@{NDCG_K}  Precision  Noise")
+    for row in scores:
+        ndcg = "-" if row.ndcg is None else f"{row.ndcg:.2f}"
+        noise = "-" if row.noise is None else f"{row.noise:.1f}"
+        current = "  ← SENSAI_RERANK_THRESHOLD" if row.name == f"+ threshold {config.rerank_threshold}%" else ""
+        print(f"{row.name:<16}  {percent(row.recall):>8}  {ndcg:>7}  {percent(row.precision):>9}  {noise:>5}{current}")
+    print("\nNoise: excerpts sent to the model for the questions the documents do not answer.")
+    return 0
+
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
@@ -1965,6 +2008,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_status(config)
     if args.command == "stats":
         return run_stats(config, args.days)
+    if args.command == "eval" and args.retrieval:
+        if args.out or args.compare:
+            error("--retrieval prints its scores: it cannot be used with --out or --compare")
+            return 1
+        return run_retrieval_command(config, args.cases)
     if args.command == "eval":
         return run_eval_command(config, args.cases, args.out, args.compare)
     if args.command == "schedule":

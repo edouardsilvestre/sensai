@@ -23,7 +23,7 @@ def test_the_counts_of_the_reranker_are_shown(config, client, capsys):
     config.rag_top_k = 1
     chat_turn(session(config, client, Retriever(30, [KEPT], [NEAR_MISS] * 9)), "Who approved the transfer of March?")
     assert (
-        "[rerank] 30 candidates: 1 kept, 20 left out after the 1 best, 9 dropped under 30% relevance (/sources dropped)"
+        "[rerank] 30 candidates: 1 kept, 20 left out after the 1 best, 9 dropped under 20% relevance (/sources dropped)"
         in capsys.readouterr().out
     )
 

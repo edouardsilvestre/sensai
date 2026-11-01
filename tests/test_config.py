@@ -68,7 +68,7 @@ def test_the_rerank_model_from_environment(env_file, monkeypatch):
 
 
 def test_the_rerank_threshold_from_environment(env_file, monkeypatch):
-    assert load_config(env_file).rerank_threshold == 30
+    assert load_config(env_file).rerank_threshold == 20
     monkeypatch.setenv("SENSAI_RERANK_THRESHOLD", "0")
     assert load_config(env_file).rerank_threshold == 0
 
