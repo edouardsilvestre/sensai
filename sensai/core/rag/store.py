@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -44,7 +45,17 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS documents_date ON documents(date);
+-- The words of each chunk for the keyword search, with the title, people and attachments of its document.
+-- rowid is the id of the chunk.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, header, tokenize = 'unicode61 remove_diacritics 2');
 """
+
+# The ranking of the keyword search. The header weighs less than the text: a name in the From of an email
+# matters less than in its body. Set as the rank of the table, which FTS5 sorts by faster than by bm25().
+_RANK = "bm25(1.0, 0.5)"
+_HEADER_FIELDS = ("from", "to", "cc", "author", "attachments")
+# More words make a slower query, and add little after the first ones.
+_MAX_QUERY_WORDS = 32
 
 
 class StoreError(Exception):
@@ -116,10 +127,17 @@ class VectorStore:
                     f"{path} uses index format v{version}, expected v{SCHEMA_VERSION}: "
                     f"rebuild it with `python -m sensai ingest --rebuild PATH`"
                 )
+            has_keywords = self._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'"
+            ).fetchone()
             self._db.executescript(_SCHEMA)
-            if version is None:
-                with self._db:
+            with self._db:
+                if version is None:
                     self._set_meta("schema_version", SCHEMA_VERSION)
+                if not has_keywords:
+                    self._db.execute("INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('rank', ?)", (_RANK,))
+                    # An index made before the keyword search: its chunks get their words now.
+                    self._fill_keywords()
         except sqlite3.DatabaseError as e:
             self._db.close()
             raise StoreError(f"Cannot use {path} as an index: {e}") from e
@@ -202,6 +220,10 @@ class VectorStore:
                     "INSERT INTO vec_chunks (rowid, embedding, document_id) VALUES (?, ?, ?)",
                     (cursor.lastrowid, sqlite_vec.serialize_float32(vector), document_id),
                 )
+                self._db.execute(
+                    "INSERT INTO chunks_fts (rowid, text, header) VALUES (?, ?, ?)",
+                    (cursor.lastrowid, chunk.text, _header(record.title, record.metadata)),
+                )
 
     def update_file_info(self, document_id: int, size: int, mtime: float) -> None:
         with self._db:
@@ -216,7 +238,17 @@ class VectorStore:
         ids = [(row[0],) for row in self._db.execute("SELECT id FROM chunks WHERE document_id = ?", (document_id,))]
         if self.dimensions is not None:
             self._db.executemany("DELETE FROM vec_chunks WHERE rowid = ?", ids)
+        self._db.executemany("DELETE FROM chunks_fts WHERE rowid = ?", ids)
         self._db.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+
+    def _fill_keywords(self) -> None:
+        rows = self._db.execute(
+            "SELECT c.id, c.text, d.title, d.metadata FROM chunks c JOIN documents d ON d.id = c.document_id"
+        )
+        self._db.executemany(
+            "INSERT INTO chunks_fts (rowid, text, header) VALUES (?, ?, ?)",
+            [(chunk_id, text, _header(title, json.loads(metadata))) for chunk_id, text, title, metadata in rows],
+        )
 
     def is_empty(self) -> bool:
         return self._db.execute("SELECT NOT EXISTS (SELECT 1 FROM chunks)").fetchone()[0] == 1
@@ -273,17 +305,45 @@ class VectorStore:
             """,
             params,
         ).fetchall()
-        return [
-            SearchResult(
-                chunk_id=chunk_id,
-                text=text,
-                location=location,
-                source=name,
-                description=describe(title, json.loads(metadata)),
-                score=1.0 - distance,
+        return [_result(*row) for row in rows]
+
+    def keyword_search(
+        self, query: str, k: int, vector: list[float], document_ids: list[int] | None = None
+    ) -> list[SearchResult]:
+        """
+        The k chunks that match the words of the query best by BM25: the rarer a word in the index, the more it counts.
+        `vector` is the one of the query, to give each result its similarity like the vector search does.
+        """
+        match = _keyword_query(query)
+        if not match or self.dimensions is None or document_ids == []:
+            return []
+        allowed = ""
+        params: list = [match]
+        if document_ids is not None:
+            allowed = "AND c.document_id IN (SELECT value FROM json_each(?))"
+            params.append(json.dumps(document_ids))
+        params += [k, sqlite_vec.serialize_float32(vector)]
+        # The k best chunks first, then the rest of their columns: a common word matches most of the index,
+        # and reading the vector of every match would take seconds.
+        rows = self._db.execute(
+            f"""
+            WITH best AS (
+                SELECT f.rowid AS id, f.rank AS rank
+                FROM chunks_fts f JOIN chunks c ON c.id = f.rowid
+                WHERE chunks_fts MATCH ? {allowed}
+                ORDER BY f.rank
+                LIMIT ?
             )
-            for chunk_id, text, location, name, title, metadata, distance in rows
-        ]
+            SELECT c.id, c.text, c.location, d.name, d.title, d.metadata, vec_distance_cosine(v.embedding, ?)
+            FROM best
+            JOIN chunks c ON c.id = best.id
+            JOIN documents d ON d.id = c.document_id
+            JOIN vec_chunks v ON v.rowid = c.id
+            ORDER BY best.rank
+            """,
+            params,
+        ).fetchall()
+        return [_result(*row) for row in rows]
 
     def stats(self) -> IndexStats:
         documents, chunks = self._db.execute(
@@ -297,7 +357,7 @@ class VectorStore:
 
     def _drop_tables(self) -> None:
         # Dropped rather than emptied, so that an index of an older format gets the current tables.
-        for table in ("vec_chunks", "chunks", "documents", "meta"):
+        for table in ("vec_chunks", "chunks_fts", "chunks", "documents", "meta"):
             self._db.execute(f"DROP TABLE IF EXISTS {table}")
 
     def close(self) -> None:
@@ -320,3 +380,25 @@ def _filter_columns(metadata: dict[str, str]) -> tuple[str | None, str, str, str
         date = None
     recipients = ", ".join(filter(None, [metadata.get("to"), metadata.get("cc")]))
     return date, metadata.get("author", ""), metadata.get("from", ""), recipients
+
+
+def _result(chunk_id: int, text: str, location: str, name: str, title: str, metadata: str, distance: float) -> SearchResult:
+    return SearchResult(
+        chunk_id=chunk_id,
+        text=text,
+        location=location,
+        source=name,
+        description=describe(title, json.loads(metadata)),
+        score=1.0 - distance,
+    )
+
+
+def _header(title: str, metadata: dict[str, str]) -> str:
+    return " ".join(filter(None, [title, *(metadata.get(key, "") for key in _HEADER_FIELDS)]))
+
+
+def _keyword_query(text: str) -> str:
+    # Each word in quotes, so that nothing in the query is read as FTS5 syntax (AND, NEAR, *, ^, "...").
+    # One-letter words, like the l of "l'entreprise", match too much to help.
+    words = dict.fromkeys(word for word in re.findall(r"\w+", text.casefold()) if len(word) > 1)
+    return " OR ".join(f'"{word}"' for word in list(words)[:_MAX_QUERY_WORDS])

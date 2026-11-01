@@ -239,3 +239,79 @@ def test_a_filter_that_matches_nothing_finds_nothing(leak):
     ids = leak.allowed_documents([SearchFilter(author="nobody")])
     assert ids == []
     assert leak.search(FakeClient.vector("transfer"), 5, ids) == []
+
+
+def save_named(store: VectorStore, path: str, texts: list[str], metadata: dict | None = None) -> None:
+    document = DocumentRecord(path, path.removeprefix("/"), "email", "Virement", metadata or {}, "sha", 1, 1.0)
+    store.save_document(document, [Chunk(text) for text in texts], [FakeClient.vector(text) for text in texts], "m")
+
+
+def keywords(store: VectorStore, query: str, document_ids=None) -> list[str]:
+    return [result.text for result in store.keyword_search(query, 5, FakeClient.vector(query), document_ids)]
+
+
+def test_the_keyword_search_finds_the_exact_words(store):
+    save_named(store, "/a.eml", ["Le virement vers FR7630004000 est validé.", "Réunion du conseil."])
+    save_named(store, "/b.eml", ["Le virement a été annulé."])
+    assert keywords(store, "FR7630004000") == ["Le virement vers FR7630004000 est validé."]
+    # The rarest word weighs the most: the account number comes before the common word.
+    assert keywords(store, "virement FR7630004000")[0] == "Le virement vers FR7630004000 est validé."
+
+
+def test_the_keyword_search_ignores_case_and_accents(store):
+    save_named(store, "/a.eml", ["La Société Générale a reçu les fonds."])
+    assert keywords(store, "societe generale") == ["La Société Générale a reçu les fonds."]
+
+
+def test_the_keyword_search_also_reads_the_header_of_the_document(store):
+    save_named(store, "/a.eml", ["Merci de valider."], {"from": "Jean Dupont"})
+    assert keywords(store, "dupont") == ["Merci de valider."]
+
+
+def test_the_keyword_results_get_their_similarity(store):
+    save_named(store, "/a.eml", ["transfer to delta"])
+    [result] = store.keyword_search("delta", 5, FakeClient.vector("transfer to delta"))
+    assert result.score == pytest.approx(1.0)
+    assert (result.source, result.description) == ("a.eml", "Title: Virement")
+
+
+@pytest.mark.parametrize("query", ['"unbalanced', "NEAR(a b", "a AND OR NOT", "dupont*", "-x", "^", "", "  ", "l'a"])
+def test_any_text_is_a_valid_keyword_query(store, query):
+    save_named(store, "/a.eml", ["Dupont a signé."])
+    store.keyword_search(query, 5, FakeClient.vector("x"))
+
+
+def test_the_keyword_search_keeps_to_the_allowed_documents(store):
+    save_named(store, "/a.eml", ["virement Alvor"])
+    save_named(store, "/b.eml", ["virement Delta"])
+    allowed = [store.get_document("/b.eml").id]
+    assert keywords(store, "virement", allowed) == ["virement Delta"]
+    assert keywords(store, "virement", []) == []
+
+
+def test_replaced_and_deleted_chunks_leave_the_keyword_index(store):
+    save_named(store, "/a.eml", ["ancien texte Alvor"])
+    save_named(store, "/a.eml", ["nouveau texte"])
+    assert keywords(store, "alvor") == []
+    store.delete_document(store.get_document("/a.eml").id)
+    assert keywords(store, "nouveau") == []
+
+
+def test_an_index_without_keyword_table_gets_one_filled(tmp_path):
+    path = tmp_path / "index.db"
+    first = VectorStore(path)
+    save_named(first, "/a.eml", ["virement Alvor"], {"from": "Jean Dupont"})
+    first.close()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE chunks_fts")
+
+    store = VectorStore(path)
+    assert keywords(store, "alvor") == ["virement Alvor"]
+    assert keywords(store, "dupont") == ["virement Alvor"]
+    store.close()
+
+
+def test_a_word_in_the_text_counts_more_than_in_the_header(store):
+    save_named(store, "/a.eml", ["Merci de valider le paiement."], {"from": "Jean Dupont"})
+    save_named(store, "/b.eml", ["Dupont a validé le paiement."], {"from": "Marc Vidal"})
+    assert keywords(store, "dupont") == ["Dupont a validé le paiement.", "Merci de valider le paiement."]

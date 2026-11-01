@@ -145,3 +145,24 @@ def test_a_filter_limits_the_search_to_its_documents(index, corpus, client):
     client.embedded.clear()
     assert index.search("transfer", k=3, filters=[SearchFilter(author="nobody")]) == []
     assert client.embedded == []
+
+
+@pytest.fixture
+def accounts(tmp_path):
+    folder = tmp_path / "accounts"
+    folder.mkdir()
+    (folder / "a.txt").write_text("transfer transfer transfer", encoding="utf-8")
+    (folder / "b.txt").write_text("Account FR7630004000 opened at the Geneva branch for the holding company", encoding="utf-8")
+    (folder / "c.txt").write_text("the transfer was approved", encoding="utf-8")
+    return folder
+
+
+def test_the_hybrid_search_finds_what_the_vectors_miss(config, client, accounts):
+    config.rag_candidates = 2
+    index = DocumentIndex.open(config, client)
+    index.ingest([accounts])
+    assert "accounts/b.txt" in [r.source for r in index.search("FR7630004000 transfer", k=2)]
+
+    config.features["hybrid"] = False
+    assert [r.source for r in index.search("FR7630004000 transfer", k=2)] == ["accounts/a.txt", "accounts/c.txt"]
+    index.close()

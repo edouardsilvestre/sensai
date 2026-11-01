@@ -25,6 +25,7 @@ def test_features_lists_every_feature(session, capsys):
     lines = [line.split(maxsplit=2) for line in capsys.readouterr().out.splitlines()]
     assert lines == [
         ["rag", "on", "answer from the indexed documents"],
+        ["hybrid", "on", "also search the documents by their exact words, like a name, an amount or an account number"],
         ["tools", "on", "let the model call the tools enabled in the configuration"],
         ["web_search", "off", "let the model search the web; the queries are sent to Ollama's web search"],
         ["code_exec", "off", "let the model run Python code in a Docker sandbox"],
@@ -122,7 +123,7 @@ def test_status_shows_the_features(config, capsys):
     run_status(config)
     out = capsys.readouterr().out
     features = (
-        "rag off, tools on, web_search off, code_exec off, files off, memory on, mcp on, sessions on, profile on, "
+        "rag off, hybrid on, tools on, web_search off, code_exec off, files off, memory on, mcp on, sessions on, profile on, "
         "document on"
     )
     assert f"Features: {features}, guardrails on" in out

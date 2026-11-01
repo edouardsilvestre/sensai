@@ -10,6 +10,7 @@ from sensai.core.rag.chunker import Chunker
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.loaders import DocumentLoadError, is_supported, load_document
 from sensai.core.rag.models import SearchFilter, SearchResult
+from sensai.core.rag.retriever import fuse
 from sensai.core.rag.store import DocumentRecord, IndexStats, VectorStore
 
 
@@ -36,10 +37,12 @@ class IngestReport:
 
 
 class DocumentIndex:
-    def __init__(self, store: VectorStore, embedder: Embedder, chunker: Chunker):
+    def __init__(self, store: VectorStore, embedder: Embedder, chunker: Chunker, config: Config):
         self.store = store
         self.embedder = embedder
         self.chunker = chunker
+        # Read at each search, so that /feature hybrid off takes effect at once.
+        self.config = config
 
     @classmethod
     def open(cls, config: Config, client: OllamaClient, rebuild: bool = False) -> "DocumentIndex":
@@ -50,7 +53,7 @@ class DocumentIndex:
             store.close()
             raise
         embedder = Embedder(client, config.embed_model, max_chars=config.chunk_size)
-        return cls(store, embedder, Chunker(config.chunk_size, config.chunk_overlap))
+        return cls(store, embedder, Chunker(config.chunk_size, config.chunk_overlap), config)
 
     def ingest(self, paths: list[Path], on_progress: Callable[[IngestProgress], None] | None = None) -> IngestReport:
         started = time.monotonic()
@@ -129,7 +132,13 @@ class DocumentIndex:
         document_ids = self.store.allowed_documents(filters)
         if document_ids == []:
             return []
-        return self.store.search(self.embedder.embed_query(query), k, document_ids)
+        vector = self.embedder.embed_query(query)
+        candidates = max(self.config.rag_candidates, k)
+        semantic = self.store.search(vector, candidates, document_ids)
+        if not self.config.features["hybrid"]:
+            return semantic[:k]
+        keyword = self.store.keyword_search(query, candidates, vector, document_ids)
+        return fuse([semantic, keyword])[:k]
 
     def count_documents(self, filters: Sequence[SearchFilter]) -> int:
         document_ids = self.store.allowed_documents(filters)

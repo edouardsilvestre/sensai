@@ -10,7 +10,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_SESSIONS_DIR", "SENSAI_PROFILE_PATH", "SENSAI_MEMORY_PATH", "SENSAI_EMBED_MODEL",
     "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
-    "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
+    "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CANDIDATES", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
     "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
@@ -34,7 +34,7 @@ def test_defaults(env_file):
 
 def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
-        "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
+        "rag": True, "hybrid": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
         "orchestration": True, "reasoning": False, "cache": True, "examples": True,
     }
@@ -44,8 +44,10 @@ def test_rag_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_EMBED_MODEL", "bge-m3")
     monkeypatch.setenv("SENSAI_INDEX_PATH", "/tmp/case.db")
     monkeypatch.setenv("SENSAI_RAG_TOP_K", "8")
+    monkeypatch.setenv("SENSAI_RAG_CANDIDATES", "50")
     config = load_config(env_file)
     assert (config.embed_model, config.index_path, config.rag_top_k) == ("bge-m3", Path("/tmp/case.db"), 8)
+    assert config.rag_candidates == 50
 
 
 def test_cache_settings_from_environment(env_file, monkeypatch):
@@ -238,6 +240,8 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
         ("SENSAI_RAG_TOP_K", "five"),
         ("SENSAI_RAG_TOP_K", "0"),
         ("SENSAI_RAG_TOP_K", "5000"),
+        ("SENSAI_RAG_CANDIDATES", "0"),
+        ("SENSAI_RAG_CANDIDATES", "1000"),
         ("SENSAI_RAG_CHUNK_OVERLAP", "5000"),
         ("SENSAI_COMPACT_THRESHOLD", "5"),
         ("SENSAI_COMPACT_THRESHOLD", "100"),
