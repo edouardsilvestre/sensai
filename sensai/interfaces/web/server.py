@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -39,6 +39,8 @@ from sensai.core.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from sensai.core.export.report import FORMATS, ExportError, Publication, render, to_html
+from sensai.core.export.shares import ShareError, public_link
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.rag.models import SearchResult
@@ -47,6 +49,7 @@ from sensai.core.tools.questions import Asker
 from sensai.interfaces.cli.main import (
     ASK_USER,
     Session,
+    blocked_message,
     describe_call,
     describe_edits,
     feature_command,
@@ -58,10 +61,16 @@ from sensai.interfaces.cli.main import (
     name_conversation,
     new_command,
     plural,
+    publication_lines,
+    publication_of,
+    publish,
+    report_of,
     resume,
     save_session,
+    share_refusal,
     start_session,
 )
+from sensai.interfaces.web.public import PAGE_HEADERS
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 # The conversations hold the case and there is no login: only this machine may reach the server.
@@ -71,6 +80,7 @@ POLL_SECONDS = 0.5
 CHARS_PER_TOKEN = 4
 # These change what the CLI commands do (/review, /cache, the scheduler): the page has no switch that would do nothing.
 CLI_FEATURES = ("orchestration", "cache", "schedule")
+Kind = Literal["conversation", "document"]
 
 
 def context_used(memory: ConversationMemory) -> int:
@@ -188,6 +198,8 @@ class WebChat:
                 "condensed_from": int(memory.limit),
             },
             "condensed": bool(memory.summary),
+            "document": not memory.document.is_empty,
+            "sharing": config.features["sharing"],
             "turns": [
                 {
                     "user": turn.user, "assistant": turn.assistant, "sources": cited(turn.citations, turn.assistant),
@@ -305,6 +317,41 @@ class WebChat:
         value = "on" if on else "off"
         feature_command(self.session, f"{name} {value}")
 
+    def export(self, kind: str, suffix: str) -> bytes:
+        memory = self.session.agent.memory
+        if kind == "conversation" and not (memory.turns or memory.summary):
+            raise ExportError("No message to export yet.")
+        return render(report_of(self.session, kind), suffix)
+
+    def public_links(self) -> list[dict]:
+        return [
+            {
+                "token": share.token, "kind": share.kind, "title": share.title,
+                "created": f"{share.created:%Y-%m-%d %H:%M}", "link": public_link(self.session.config, share),
+            }
+            for share in self.session.shares.list()
+        ]
+
+    def _publication(self, kind: str) -> Publication:
+        refusal = share_refusal(self.session, kind)
+        if refusal:
+            raise ShareError(refusal)
+        return publication_of(self.session, kind)
+
+    def publication(self, kind: str) -> dict:
+        publication = self._publication(kind)
+        blocked = blocked_message(publication.blocked) if publication.blocked else None
+        return {"lines": publication_lines(self.session, publication), "blocked": blocked}
+
+    def publication_page(self, kind: str) -> str:
+        return to_html(self._publication(kind).report)
+
+    def publish(self, kind: str) -> dict:
+        publication = self._publication(kind)
+        if publication.blocked:
+            raise ShareError(blocked_message(publication.blocked))
+        return {"link": public_link(self.session.config, publish(self.session, kind, publication))}
+
 
 class Message(BaseModel):
     message: str
@@ -410,6 +457,48 @@ def create_app(chat: WebChat) -> FastAPI:
             raise HTTPException(400, refusal)
         chat.call(chat.set_feature, name, body.on)
         return chat.call(chat.state)
+
+    def while_idle(job: Callable, *args: Any) -> Any:
+        # The thread of the session is taken during an answer, and it may be waiting for a click on this very page.
+        if chat.answering.locked():
+            raise HTTPException(409, "An answer is running: wait for its end or stop it")
+        try:
+            return chat.call(job, *args)
+        except (ExportError, ShareError) as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.get("/api/export/{kind}.{suffix}")
+    def export(kind: Kind, suffix: Literal["md", "json", "pdf", "html"]) -> Response:
+        name = "-".join(filter(None, ["sensai", kind, chat.session.session_id]))
+        headers = {"Content-Disposition": f'attachment; filename="{name}.{suffix}"'}
+        return Response(while_idle(chat.export, kind, f".{suffix}"), media_type=FORMATS[f".{suffix}"], headers=headers)
+
+    # The links are files: they do not wait for the answer, and taking one down never should.
+    @app.get("/api/shares")
+    def shares() -> dict:
+        return {"shares": chat.public_links()}
+
+    @app.get("/api/shares/{kind}")
+    def publication(kind: Kind) -> dict:
+        return while_idle(chat.publication, kind)
+
+    @app.get("/api/shares/{kind}/page")
+    def publication_page(kind: Kind) -> HTMLResponse:
+        return HTMLResponse(while_idle(chat.publication_page, kind), headers=PAGE_HEADERS)
+
+    @app.post("/api/shares/{kind}")
+    def publish_page(kind: Kind) -> dict:
+        return while_idle(chat.publish, kind)
+
+    @app.delete("/api/shares/{token}")
+    def remove_share(token: str) -> dict:
+        try:
+            removed = chat.session.shares.remove(token)
+        except ShareError as e:
+            raise HTTPException(500, str(e)) from None
+        if not removed:
+            raise HTTPException(404, "This link does not exist")
+        return {}
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True))
     return app

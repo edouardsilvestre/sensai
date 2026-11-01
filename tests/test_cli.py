@@ -47,6 +47,7 @@ def test_features_lists_every_feature(session, capsys):
         ["schedule", "on", "run the scheduled tasks and write their reports"],
         ["logging", "on", "log every message with its prompt, answer, tools, time and tokens"],
         ["fact_check", "off", "check each answer against its excerpts and flag what they do not support"],
+        ["sharing", "off", "publish a conversation or the document on a link anyone can open without logging in"],
     ]
 
 

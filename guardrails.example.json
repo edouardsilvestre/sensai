@@ -16,6 +16,12 @@
       "message": "The arguments contain personal data, which must not leave the machine. Search without it."
     },
     {
+      "name": "published-personal-data",
+      "detectors": ["email", "phone", "iban", "card", "nir", "ip"],
+      "on": ["publish"],
+      "action": "redact"
+    },
+    {
       "name": "bank-details",
       "detectors": ["iban", "card"],
       "on": ["output"],

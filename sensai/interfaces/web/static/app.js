@@ -13,12 +13,7 @@ let answering = false;
 let liveTokens = 0;
 let toastTimer = null;
 
-async function post(path, body = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+async function checked(response) {
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(typeof error.detail === "string" ? error.detail : `The server answered ${response.status}`);
@@ -26,9 +21,17 @@ async function post(path, body = {}) {
   return response;
 }
 
+async function post(path, body = {}, method = "POST") {
+  return checked(await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+}
+
 function toast(message) {
   // An open dialog covers the rest of the page.
-  ($("settings").open ? $("settings") : document.body).append($("toast"));
+  (document.querySelector("dialog[open]") ?? document.body).append($("toast"));
   $("toast").textContent = message;
   $("toast").classList.add("visible");
   clearTimeout(toastTimer);
@@ -212,6 +215,7 @@ function applyState(next) {
   showSessions();
   showPersonas();
   showFeatures();
+  showExport();
 }
 
 function setAnswering(value) {
@@ -433,6 +437,123 @@ $("persona").addEventListener("change", async (event) => {
   if (!(await act("/api/persona", { id: event.target.value || null }))) event.target.value = previous;
 });
 
+function chosenKind() {
+  return document.querySelector('input[name="kind"]:checked').value;
+}
+
+function showExport() {
+  const documentChoice = document.querySelector('input[name="kind"][value="document"]');
+  documentChoice.disabled = !state.document;
+  documentChoice.parentElement.classList.toggle("off", !state.document);
+  if (!state.document) document.querySelector('input[name="kind"][value="conversation"]').checked = true;
+  $("share-start").disabled = !state.sharing;
+  $("share-note").textContent = state.sharing
+    ? "A frozen copy, checked by the guardrails. Anyone who gets the link can read it, without logging in."
+    : "Turn on the sharing feature in Settings to create a public link.";
+}
+
+async function download(format) {
+  try {
+    const response = await checked(await fetch(`/api/export/${chosenKind()}.${format}`));
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = response.headers.get("Content-Disposition").match(/filename="(.+)"/)[1];
+    link.click();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function button(text, className, action) {
+  const node = element("button", className, text);
+  node.type = "button";
+  node.addEventListener("click", action);
+  return node;
+}
+
+async function copyLink(link) {
+  await navigator.clipboard.writeText(link).then(() => toast("Link copied"), () => toast("Copy it from the page"));
+}
+
+async function removeShare(token) {
+  try {
+    await post(`/api/shares/${token}`, {}, "DELETE");
+    await showShares();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function showShares() {
+  const list = $("shares");
+  try {
+    const { shares } = await (await checked(await fetch("/api/shares"))).json();
+    list.replaceChildren();
+    for (const share of shares) {
+      const row = element("div", "share");
+      const actions = element("div", "actions");
+      actions.append(button("Copy", "", () => copyLink(share.link)), button("Take down", "", () => removeShare(share.token)));
+      row.append(
+        element("strong", "", share.title), element("span", "", `${share.kind}, ${share.created}`),
+        element("code", "", share.link), actions,
+      );
+      list.append(row);
+    }
+    if (shares.length) list.append(element("p", "settings-note", "The links answer while python -m sensai publish runs."));
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function startShare() {
+  const kind = chosenKind();
+  const preview = $("share-preview");
+  preview.replaceChildren();
+  try {
+    const { lines, blocked } = await (await checked(await fetch(`/api/shares/${kind}`))).json();
+    const card = element("div", "approval");
+    for (const line of lines) card.append(element("p", "", line));
+    if (blocked) card.append(element("p", "warning", blocked));
+    const actions = element("div", "actions");
+    if (!blocked) actions.append(button("Publish", "allow", () => publishPage(kind)));
+    const page = element("a", "", "See the page");
+    page.href = `/api/shares/${kind}/page`;
+    page.target = "_blank";
+    page.rel = "noopener";
+    actions.append(page, button("Cancel", "", () => preview.replaceChildren()));
+    card.append(actions);
+    preview.append(card);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function publishPage(kind) {
+  try {
+    await post(`/api/shares/${kind}`);
+    $("share-preview").replaceChildren();
+    await showShares();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$("open-export").addEventListener("click", () => {
+  $("share-preview").replaceChildren();
+  $("export").showModal();
+  showShares();
+});
+
+for (const choice of document.querySelectorAll('input[name="kind"]')) {
+  choice.addEventListener("change", () => $("share-preview").replaceChildren());
+}
+
+for (const format of document.querySelectorAll("#formats button")) {
+  format.addEventListener("click", () => download(format.dataset.format));
+}
+
+$("share-start").addEventListener("click", startShare);
 $("open-settings").addEventListener("click", () => $("settings").showModal());
 $("toggle-sidebar").addEventListener("click", () => document.body.classList.toggle("open"));
 

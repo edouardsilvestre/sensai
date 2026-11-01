@@ -29,9 +29,13 @@ class SessionInfo:
     title: str
 
 
-def _title(turns: list[Turn]) -> str:
-    text = " ".join(turns[0].user.split()) if turns else "(condensed conversation)"
+def short_title(message: str) -> str:
+    text = " ".join(message.split())
     return text if len(text) <= TITLE_CHARS else text[: TITLE_CHARS - 3].rstrip() + "..."
+
+
+def conversation_title(turns: list[Turn]) -> str:
+    return short_title(turns[0].user) if turns else "(condensed conversation)"
 
 
 def _position(branch: Branch) -> dict:
@@ -67,6 +71,26 @@ def _read_branch(saved: dict) -> Branch:
     )
 
 
+def session_data(
+    session_id: str | None, memory: ConversationMemory, model: str,
+    persona: str | None = None, prompt_version: int | None = None,
+) -> dict:
+    return {
+        "version": FORMAT_VERSION,
+        "id": session_id,
+        "updated": datetime.now().isoformat(timespec="seconds"),
+        "model": model,
+        # Which system prompt the last answers came from: /prompts lists the versions.
+        "persona": persona,
+        "prompt_version": prompt_version if isinstance(prompt_version, int) else None,
+        "summary": memory.summary,
+        "turns": [asdict(turn) for turn in memory.turns],
+        "document": memory.document.markdown(),
+        "branch": _position(memory.branch),
+        "other_branches": [_saved_branch(branch) for branch in memory.other_branches],
+    }
+
+
 class SessionStore:
     """
     One JSON file per conversation, holding the summary and the turns kept verbatim, as the memory has them.
@@ -95,20 +119,7 @@ class SessionStore:
         self, session_id: str, memory: ConversationMemory, model: str,
         persona: str | None = None, prompt_version: int | None = None,
     ) -> None:
-        data = {
-            "version": FORMAT_VERSION,
-            "id": session_id,
-            "updated": datetime.now().isoformat(timespec="seconds"),
-            "model": model,
-            # Which system prompt the last answers came from: /prompts lists the versions.
-            "persona": persona,
-            "prompt_version": prompt_version if isinstance(prompt_version, int) else None,
-            "summary": memory.summary,
-            "turns": [asdict(turn) for turn in memory.turns],
-            "document": memory.document.markdown(),
-            "branch": _position(memory.branch),
-            "other_branches": [_saved_branch(branch) for branch in memory.other_branches],
-        }
+        data = session_data(session_id, memory, model, persona, prompt_version)
         path = self._path(session_id)
         # Written next to the session then renamed, so that a crash never leaves half a conversation.
         temporary = path.with_name(path.name + ".tmp")
@@ -154,7 +165,7 @@ class SessionStore:
                 data = self._read(path)
             except SessionError:
                 continue
-            sessions.append(SessionInfo(path.stem, data["updated"], len(data["turns"]), _title(data["turns"])))
+            sessions.append(SessionInfo(path.stem, data["updated"], len(data["turns"]), conversation_title(data["turns"])))
         return sorted(sessions, key=lambda session: (session.updated, session.id), reverse=True)
 
     def latest(self) -> str | None:
