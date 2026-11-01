@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime
 
 import pytest
@@ -136,6 +137,88 @@ def test_a_task_missed_many_times_runs_once(schedule):
     assert schedule.due(LATER) == []
     assert schedule.tasks[0].next_run == "2026-11-02T19:00:00"
     assert schedule.tasks[0].last_run == "2026-11-02T18:00:00"
+
+
+def in_parallel(work, count: int) -> None:
+    """Runs `work(number)` in `count` threads, each failure failing the test."""
+    failures = []
+
+    def run(number: int) -> None:
+        try:
+            work(number)
+        except Exception as e:
+            failures.append(e)
+
+    threads = [threading.Thread(target=run, args=(number,)) for number in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == []
+
+
+def test_no_task_is_lost_when_several_write_at_once(config, schedule):
+    def add(number: int) -> None:
+        other = Schedule(config.schedule_path, config.reports_dir)
+        for task in range(10):
+            other.add("every 1h", f"{number}-{task}", [], MONDAY)
+
+    in_parallel(add, 6)
+    schedule.reload()
+    assert len({task.question for task in schedule.tasks}) == 60
+    assert len({task.id for task in schedule.tasks}) == 60
+
+
+def test_reading_during_a_write_does_not_stop_the_write(config, schedule):
+    def work(number: int) -> None:
+        other = Schedule(config.schedule_path, config.reports_dir)
+        for task in range(20):
+            other.add("every 1h", "Any news?", [], MONDAY) if number == 0 else other.reload()
+
+    in_parallel(work, 4)
+    schedule.reload()
+    assert len(schedule.tasks) == 20
+
+
+def test_only_one_scheduler_takes_a_task(config, schedule):
+    task = schedule.add("every 1h", "Any news?", [], MONDAY)
+    taken = []
+
+    def claim(number: int) -> None:
+        if Schedule(config.schedule_path, config.reports_dir).claim(task, LATER):
+            taken.append(number)
+
+    in_parallel(claim, 6)
+    assert len(taken) == 1
+
+
+def test_marking_a_report_read_keeps_a_report_added_meanwhile(config, schedule):
+    task = schedule.add("every 1h", "Any news?", [], MONDAY)
+    schedule.finish(task, "report written", report=schedule.write_report(task, Run("Any news?", "First"), MONDAY))
+    chat = Schedule(config.schedule_path, config.reports_dir)
+    original = chat.latest_reports
+
+    def reports_then_a_new_one() -> list:
+        reports = original()
+        schedule.finish(task, "report written", report=schedule.write_report(task, Run("Any news?", "Second"), LATER))
+        return reports
+
+    chat.latest_reports = reports_then_a_new_one
+    chat.read_report(1)
+    assert [report.read for report in schedule.latest_reports()] == [False, True]
+
+
+def test_a_lock_held_too_long_is_reported(config, schedule, monkeypatch):
+    monkeypatch.setattr("sensai.core.schedule.LOCK_SECONDS", 0)
+    with schedule._locked():
+        with pytest.raises(ScheduleError, match="locked by another process"):
+            Schedule(config.schedule_path, config.reports_dir).add("every 1h", "Any news?", [], MONDAY)
+
+
+def test_a_failed_change_leaves_the_lock_free(schedule):
+    with pytest.raises(ScheduleError, match="No task 1"):
+        schedule.remove(1)
+    assert schedule.add("every 1h", "Any news?", [], MONDAY)
 
 
 def test_a_task_taken_by_another_scheduler_runs_once(config, schedule):

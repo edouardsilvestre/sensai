@@ -259,7 +259,7 @@ Task 2 added, first run on 2026-11-01 16:12.
 It runs while python -m sensai schedule is running.
 ```
 
-`python -m sensai schedule` stays running and runs each task when it is due. `python -m sensai schedule --once` runs what is due and exits, for the task scheduler of the machine (cron, Windows Task Scheduler), with an exit code of 1 when a task failed. Use one or the other: two schedulers at the same time could, rarely, run a task twice.
+`python -m sensai schedule` stays running and runs each task when it is due. `python -m sensai schedule --once` runs what is due and exits, for the task scheduler of the machine (cron, Windows Task Scheduler), with an exit code of 1 when a task failed.
 
 ```
 Sensai scheduler - model: qwen3, 2 tasks. Ctrl+C to stop.
@@ -269,7 +269,7 @@ New report: .sensai/reports/20261102-080000-task-20261101-101200.md
 Nothing new.
 ```
 
-`schedule.py`: `Schedule` keeps the tasks in `SENSAI_SCHEDULE_PATH`, and the chat and the scheduler both read it again before every change, so a task added during a run is not lost and is picked up within 15 seconds. A task moves to its next time before it runs, and from the current time rather than the missed one: a task missed ten times while the machine was off runs once, and a crash in the middle of a run does not make it start again in a loop.
+`schedule.py`: `Schedule` keeps the tasks in `SENSAI_SCHEDULE_PATH`, and the chat and the scheduler take a lock on it, then read it again before every change, so nothing is lost when both write and a task added during a run is picked up within 15 seconds. The lock belongs to the system (`msvcrt` on Windows, `flock` elsewhere), which drops it if a process dies, so a crash never leaves the schedule locked. A task moves to its next time before it runs, and from the current time rather than the missed one: a task missed ten times while the machine was off runs once, and a crash in the middle of a run does not make it start again in a loop.
 
 **Each task has its own conversation**, saved like any other in `SENSAI_SESSIONS_DIR` under the id of the task. So the model has its earlier reports in its context, condensed by the same compaction as a chat, and a system message tells it to report what changed. That instruction is in the system prompt, not in the question, so that the document search looks for the question alone. `/resume task-...` continues the conversation of a task to ask a question about a report, and `--resume` alone never picks it.
 
@@ -283,7 +283,7 @@ Letting the model decide was tried first. Asked to answer `NOTHING NEW` when not
 
 The guardrails check the task when it is added, so a name to protect is redacted in the schedule file or the task is refused, and again at each run. The other features apply as in the chat: the profile, the persona (`python -m sensai -p investigator schedule`), the examples, the reasoning. Two do not. The cache would answer a monitoring question with yesterday's answer, and the working document would change without the journalist seeing it: a run uses neither.
 
-A failed run, because Ollama is stopped for example, does not stop the scheduler: the error is shown by `/schedule`, the chat warns about it at startup, and the task runs again at its next time. Only the start needs Ollama: without it, `python -m sensai schedule` stops with an error, and the tasks stay late until it is started again.
+A failed run, because Ollama is stopped or a tool crashed for example, does not stop the scheduler: the error is shown by `/schedule`, the chat warns about it at startup, and the task runs again at its next time. Only the start needs Ollama: without it, `python -m sensai schedule` stops with an error, and the tasks stay late until it is started again.
 
 Running the tasks in a thread of the chat was ruled out: the tasks would stop with the chat, and a run would write over the prompt. The cron of the machine alone was ruled out too: it does not work the same on Windows, and it does not tell the journalist that a task is late. `/schedule` does. A library like APScheduler would only replace the computation of the next time, not the catch-up rule, the approvals or the reports.
 

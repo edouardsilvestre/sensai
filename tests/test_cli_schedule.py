@@ -11,6 +11,7 @@ from sensai.core.memory.sessions import SessionStore
 from sensai.core.rag.models import SearchResult
 from sensai.core.schedule import Schedule
 from sensai.core.tools.registry import ToolRegistry, requires_approval
+from sensai.interfaces.cli import main as main_module
 from sensai.interfaces.cli.main import (
     HELP,
     Session,
@@ -273,6 +274,24 @@ def test_a_failed_run_is_reported_and_the_next_task_still_runs(config, capsys):
     assert [task.failed for task in session.schedule.tasks] == [True, True]
     assert session.schedule.tasks[0].status == "failed: Ollama is not running"
     assert datetime.fromisoformat(session.schedule.tasks[0].next_run) > datetime.now()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("the tool crashed"), OSError("disk full"), RuntimeError()])
+def test_an_unexpected_error_fails_the_task_and_not_the_scheduler(session, client, capsys, monkeypatch, failure):
+    original = main_module.run_task
+
+    def crash_on_the_first(agent, task, *args):
+        if task.question == "First":
+            raise failure
+        return original(agent, task, *args)
+
+    monkeypatch.setattr(main_module, "run_task", crash_on_the_first)
+    due_task(session, "First")
+    due_task(session, "Second")
+    assert watch_schedule(session, once=True) == 1
+    first, second = session.schedule.tasks
+    assert first.failed and first.status == f"failed: {str(failure) or type(failure).__name__}"
+    assert second.status == "report written"
 
 
 def test_a_run_after_a_failure_clears_it(session):

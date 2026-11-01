@@ -1382,9 +1382,11 @@ def run_due_tasks(session: Session) -> bool:
         try:
             run = run_task(session.agent, task, session.store, now)
             report = None if run.nothing_new(task) else schedule.write_report(task, run, now)
-        except (LLMError, StoreError, SessionError, ScheduleError) as e:
-            warning(f"The task failed, it runs again at its next time: {e}")
-            schedule.finish(task, f"failed: {e}", failed=True)
+        except Exception as e:
+            # Whatever a tool raises, nobody is there to restart the scheduler: one task must not stop the others.
+            reason = str(e) or type(e).__name__
+            warning(f"The task failed, it runs again at its next time: {reason}")
+            schedule.finish(task, f"failed: {reason}", failed=True)
             succeeded = False
             continue
         except KeyboardInterrupt:

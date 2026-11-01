@@ -2,6 +2,9 @@ import hashlib
 import json
 import os
 import re
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,11 +17,17 @@ from sensai.core.memory.sessions import TASK_PREFIX, SessionStore
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 WHEN_FORMS = "every 30m, every 6h, every 2d, daily 08:00 or weekly mon 08:00"
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 MINUTES = {"m": 1, "h": 60, "d": 24 * 60}
 MAX_MINUTES = 365 * 24 * 60
 NOT_ALLOWED = "this scheduled task was not allowed to use it when it was created"
+LOCK_SECONDS = 10
 _EVERY = re.compile(r"([0-9]+)([mhd])")
 
 _INSTRUCTIONS = """\
@@ -28,6 +37,23 @@ The earlier reports of this task, if any, are in the conversation: report what c
 
 class ScheduleError(Exception):
     pass
+
+
+def _try_lock(file) -> None:
+    """Raises OSError when another process holds the lock. The system drops it if that process dies."""
+    if os.name == "nt":
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(file) -> None:
+    if os.name == "nt":
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(file, fcntl.LOCK_UN)
 
 
 def _at(text: str, moment: datetime) -> datetime:
@@ -131,8 +157,46 @@ class Schedule:
         self.reports: list[Report] = []
         self.reload()
 
-    def reload(self) -> None:
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        # Reading too: on Windows, a file open in another process cannot be replaced.
+        path = self.path.with_name(self.path.name + ".lock")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            file = path.open("a+b")
+        except OSError as e:
+            raise ScheduleError(f"Cannot lock the schedule {self.path}: {e}") from None
+        with file:
+            deadline = time.monotonic() + LOCK_SECONDS
+            while True:
+                try:
+                    _try_lock(file)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise ScheduleError(f"The schedule {self.path} is locked by another process") from None
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                _unlock(file)
+
+    @contextmanager
+    def _changing(self) -> Iterator[None]:
         # Another process may have changed the file: every change starts from what it holds now.
+        with self._locked():
+            self._read()
+            yield
+            self._save()
+
+    def reload(self) -> None:
+        if not self.path.exists():
+            self.tasks, self.reports = [], []
+            return
+        with self._locked():
+            self._read()
+
+    def _read(self) -> None:
         if not self.path.exists():
             self.tasks, self.reports = [], []
             return
@@ -157,24 +221,21 @@ class Schedule:
         return next((task for task in self.tasks if task.id == task_id), None)
 
     def add(self, when: str, question: str, allow: list[str], now: datetime) -> Task:
-        self.reload()
         first = next_run(when, now)
-        task_id, number = f"{TASK_PREFIX}{now:%Y%m%d-%H%M%S}", 2
-        base = task_id
-        while self._task(task_id):
-            task_id, number = f"{base}-{number}", number + 1
-        task = Task(task_id, " ".join(when.lower().split()), question, first.isoformat(timespec="seconds"), allow)
-        self.tasks.append(task)
-        self._save()
+        with self._changing():
+            task_id, number = f"{TASK_PREFIX}{now:%Y%m%d-%H%M%S}", 2
+            base = task_id
+            while self._task(task_id):
+                task_id, number = f"{base}-{number}", number + 1
+            task = Task(task_id, " ".join(when.lower().split()), question, first.isoformat(timespec="seconds"), allow)
+            self.tasks.append(task)
         return task
 
     def remove(self, number: int) -> Task:
-        self.reload()
-        if not 1 <= number <= len(self.tasks):
-            raise ScheduleError(f"No task {number}: the schedule has {len(self.tasks)}")
-        task = self.tasks.pop(number - 1)
-        self._save()
-        return task
+        with self._changing():
+            if not 1 <= number <= len(self.tasks):
+                raise ScheduleError(f"No task {number}: the schedule has {len(self.tasks)}")
+            return self.tasks.pop(number - 1)
 
     def due(self, now: datetime) -> list[Task]:
         self.reload()
@@ -182,28 +243,26 @@ class Schedule:
 
     def claim(self, task: Task, now: datetime) -> bool:
         """Moves the task to its next time before it runs. False when it was removed or taken in the meantime."""
-        self.reload()
-        current = self._task(task.id)
-        if current is None or datetime.fromisoformat(current.next_run) > now:
-            return False
-        # From now, not from the missed time: a task missed ten times runs once.
-        current.next_run = next_run(current.when, now).isoformat(timespec="seconds")
-        current.last_run = now.isoformat(timespec="seconds")
-        self._save()
-        return True
+        with self._changing():
+            current = self._task(task.id)
+            if current is None or datetime.fromisoformat(current.next_run) > now:
+                return False
+            # From now, not from the missed time: a task missed ten times runs once.
+            current.next_run = next_run(current.when, now).isoformat(timespec="seconds")
+            current.last_run = now.isoformat(timespec="seconds")
+            return True
 
     def finish(
         self, task: Task, status: str, failed: bool = False, report: Report | None = None, evidence: str | None = None,
     ) -> None:
-        self.reload()
-        current = self._task(task.id)
-        if current is not None:
-            current.status, current.failed = status, failed
-            if evidence is not None:
-                current.evidence = evidence
-        if report is not None:
-            self.reports.append(report)
-        self._save()
+        with self._changing():
+            current = self._task(task.id)
+            if current is not None:
+                current.status, current.failed = status, failed
+                if evidence is not None:
+                    current.evidence = evidence
+            if report is not None:
+                self.reports.append(report)
 
     def write_report(self, task: Task, run: Run, now: datetime) -> Report:
         name = f"{now:%Y%m%d-%H%M%S}-{task.id}.md"
@@ -228,8 +287,10 @@ class Schedule:
             text = (self.reports_dir / report.file).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             raise ScheduleError(f"Cannot read the report {report.file}: {e}") from None
-        report.read = True
-        self._save()
+        with self._changing():
+            for kept in self.reports:
+                if kept.file == report.file:
+                    kept.read = True
         return text
 
 
