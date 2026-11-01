@@ -60,6 +60,7 @@ from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
 POLL_SECONDS = 15
+DEFAULT_WEB_PORT = 8000
 SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
 SCHEDULE_USAGE = f"Usage: /schedule add WHEN [--allow TOOL,TOOL] TASK, or /schedule remove N. WHEN is {WHEN_FORMS}"
 ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
@@ -129,6 +130,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     commands.add_parser("status", help="show what the document index contains")
     schedule_parser = commands.add_parser("schedule", help="run the scheduled tasks when they are due")
     schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
+    web_parser = commands.add_parser("web", help="chat in a browser page")
+    web_parser.add_argument("--port", type=int, default=DEFAULT_WEB_PORT, help=f"default: {DEFAULT_WEB_PORT}")
     return parser.parse_args(argv)
 
 
@@ -328,17 +331,28 @@ def describe_call(call: ToolCall) -> str:
 WHERE = {"input": "your message", "output": "the answer", "tools": "a tool call"}
 
 
-def print_guardrail(hit: Hit) -> None:
+def guardrail_message(hit: Hit) -> str | None:
     where, found = WHERE[hit.stage], f" ({hit.found})" if hit.found else ""
     if hit.action == "redact":
-        print(f"[guardrail] {hit.rule}: {plural(hit.count, 'passage')} redacted in {where}{found}")
-    elif hit.action == "warn":
-        warning(f"guardrail {hit.rule}: found in {where}{found}" + (f". {hit.message}" if hit.message else ""))
-    elif hit.stage == "input":
-        warning(f"Message blocked by the guardrail {hit.rule}: {hit.message or hit.found}. Nothing was sent to the model.")
-    elif hit.stage == "output":
-        warning(f"Answer stopped by the guardrail {hit.rule}{found}" + (f": {hit.message}" if hit.message else ""))
+        return f"[guardrail] {hit.rule}: {plural(hit.count, 'passage')} redacted in {where}{found}"
+    if hit.action == "warn":
+        return f"guardrail {hit.rule}: found in {where}{found}" + (f". {hit.message}" if hit.message else "")
+    if hit.stage == "input":
+        return f"Message blocked by the guardrail {hit.rule}: {hit.message or hit.found}. Nothing was sent to the model."
+    if hit.stage == "output":
+        return f"Answer stopped by the guardrail {hit.rule}{found}" + (f": {hit.message}" if hit.message else "")
     # A blocked tool call is reported by its result, which the model also gets.
+    return None
+
+
+def print_guardrail(hit: Hit) -> None:
+    message = guardrail_message(hit)
+    if message is None:
+        return
+    if hit.action == "redact":
+        print(message)
+    else:
+        warning(message)
 
 
 def chat_turn(session: Session, line: str) -> None:
@@ -811,6 +825,12 @@ def list_features(session: Session) -> None:
         print(f"  {name:<{width}}  {state:<3}  {feature.description}")
 
 
+def feature_refusal(config: Config, name: str, value: str) -> str | None:
+    if name == "web_search" and value == "on" and not config.ollama_api_key:
+        return f"web_search needs OLLAMA_API_KEY in .env: {API_KEY_HELP}"
+    return None
+
+
 def feature_command(session: Session, argument: str) -> None:
     name, _, value = argument.lower().partition(" ")
     value = value.strip()
@@ -818,8 +838,9 @@ def feature_command(session: Session, argument: str) -> None:
         error(f"Usage: /feature NAME on|off, with NAME among: {', '.join(FEATURES)}")
         return
     config = session.config
-    if name == "web_search" and value == "on" and not config.ollama_api_key:
-        error(f"web_search needs OLLAMA_API_KEY in .env: {API_KEY_HELP}")
+    refusal = feature_refusal(config, name, value)
+    if refusal:
+        error(refusal)
         return
     config.features[name] = value == "on"
     print(f"{name} is {value}.")
@@ -1455,6 +1476,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_status(config)
     if args.command == "schedule":
         return run_schedule(config, args.once)
+    if args.command == "web":
+        # Here: the web interface is built on this module.
+        from sensai.interfaces.web.server import run_web
+
+        return run_web(config, args.port)
     return run_chat(config, args.resume)
 
 

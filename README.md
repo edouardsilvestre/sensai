@@ -8,6 +8,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 
 ### Key features
 
+- 🖥️ **Web UI**: `python -m sensai web` opens the same conversations in a simple page on this machine, with streaming, the context used, the personas, the features and approval buttons, and nothing loaded from the internet.
 - 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
 - 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
 - 🌿 **Branches & interruption**: `/edit` tries another question from any point of the conversation without losing the first version, and Ctrl+C stops an answer to redirect it.
@@ -44,7 +45,7 @@ Answering: the message is embedded, the closest chunks are added to the prompt a
 
 ### Sessions & profile
 
-- `memory/sessions.py`: `SessionStore` writes each conversation to its own JSON file in `SENSAI_SESSIONS_DIR` after every answered message: the summary of older turns and the turns kept verbatim, with the sources each answer cited, exactly as `ConversationMemory` holds them. Resuming puts them back in the memory, so the model gets the same context as before the restart. A file is written next to the session then renamed, so a crash never leaves half a conversation, and an unreadable file is skipped instead of stopping Sensai.
+- `memory/sessions.py`: `SessionStore` writes each conversation to its own JSON file in `SENSAI_SESSIONS_DIR` after every answered message: the summary of older turns and the turns kept verbatim, with the sources each answer cited and a short record of its tool calls, exactly as `ConversationMemory` holds them. Resuming puts them back in the memory, so the model gets the same context as before the restart. A file is written next to the session then renamed, so a crash never leaves half a conversation, and an unreadable file is skipped instead of stopping Sensai.
 - `memory/profile.py`: `Profile` reads `SENSAI_PROFILE_PATH`, a plain text file with one instruction per line, that `/profile add` and `/profile remove` edit and that can also be edited by hand. `ConversationMemory` sends it in the system message, after the system prompt and before the summary, so every conversation starts with it, new or resumed, and it is never condensed by the compaction.
 
 Sessions and the profile are two features (`SENSAI_FEATURE_SESSIONS`, `SENSAI_FEATURE_PROFILE`). Like the index, they stay in `.sensai/` on the machine: delete `.sensai/sessions/` to erase every saved conversation.
@@ -121,6 +122,8 @@ A persona sets the agent's name, role, tone and scope: it is the system message 
 
 `name`, `role`, `tone` and `scope` are required; a file with a missing field or invalid JSON stops the startup with an error naming the file. Switching persona (`/persona ID`) only replaces the system message: the turns and the summary of older turns are kept, so the fact-checker knows what the investigator established.
 
+The scope is sent as work that can be asked for (`When the user asks for it, you can help with this work: ...`), after `Answer the user's message and nothing else.`, and not as a `Scope:` line. With `Scope:`, `granite3.1-moe` took it for a task and started by itself: asked to just say OK, the investigator went on to analyse leaked documents it had never seen. Measured on six tries for each case, the answers to that message at the start of a conversation became about twice as short, and an ordinary question went from 853 to 172 characters, while the answers on a real excerpt still named the right person six times out of six. It is not enough for this model: it still does not stop at OK, and after a change of persona it imitates the form of its earlier answers, since the history is kept. A rule in the prompt, a reminder just before the message and turning the history into a note changed nothing. The model matters more than the prompt: in the same conversation, `qwen2.5:1.5b`, half the size on disk (1 GB against 2 GB), said OK six times out of six without borrowing anything from the earlier answers, and it really calls tools, where `granite3.1-moe` writes its calls as text.
+
 ### Multi-agent review
 
 `/review QUESTION` has the three personas work on the same question, one after the other, instead of switching them by hand:
@@ -182,7 +185,7 @@ Question 1: Qui dirige Orion Delta Consulting, et cette personne a-t-elle reçu 
     [...]
 ```
 
-`/reasoning` lists the questions of the conversation, `/reasoning N` shows the thoughts, the tool calls and the full results of question N, so that the journalist can check what a conclusion rests on. The reasoning is never sent back to the model: only the question and the answer are kept in the history, plus the tool results of a turn the user interrupts. `/new` and `/resume` clear it.
+`/reasoning` lists the questions of the conversation, `/reasoning N` shows the thoughts, the tool calls and the full results of question N, so that the journalist can check what a conclusion rests on. The reasoning is never sent back to the model: only the question, the answer and a short record of the tool calls are kept in the history, plus the tool results of a turn the user interrupts. `/new` and `/resume` clear it.
 
 `reasoning.py` and `Agent._reason`: at each step, the model replies with a JSON object `{"thought", "action", "arguments"}` that Ollama is forced to follow (the `format` option of the chat API). The schema has one form per tool, with the arguments of that tool, plus `answer`: the model cannot invent a tool or an argument. A tool chosen by the model goes through the guardrails and the approval like any tool call, and its result is given back to the model for the next step; the thoughts go through the output guardrails before they are shown. Once the model picks `answer`, the final answer is streamed from the steps and their results, without tools. With indexed documents and the `rag` feature on, the reasoning can also call `search_documents`, which searches the documents again with the model's own words to follow a lead (the manager found in the statutes, then his transfers). The excerpts it finds are numbered after those of the first search, so that the answer can cite them, and they are listed with the sources and in `/sources`. As the actions come from the schema, the reasoning also works with models that cannot call tools, like `llama3`.
 
@@ -311,7 +314,9 @@ def web_search(query: str) -> ToolResult:
 
 A tool returns the text sent to the model, or a `ToolResult(content, summary)` when the CLI should also show a short summary (`[web_search] 5 results: ...`). A tool that needs settings is a method of a class that holds them: `catalog.py` registers `WebSearch(backend, max_results).web_search`, and Ollama only sees the `query` parameter.
 
-Like the excerpts, tool calls and results are only sent for the current message: the history keeps the question and the final answer.
+Like the excerpts, the full results are only sent for the current message. The history keeps the final answer and a short record of each call: the tool, its arguments and the summary of its result, each cut to 200 characters and passed through the rules of an answer, since they reach the saved session. A call blocked by a guardrail is not kept: its arguments are what the rule stopped.
+
+With the answer alone, a model that finds a request already answered with text imitates that text instead of calling the tool. Measured with `qwen2.5:1.5b` on real files, ten tries each, for a second request to write a file in a conversation: without the record, the file reached the disk once, and six times the model said it was saved when nothing had been written; with it, ten files out of ten and no false claim. The record has to be real tool messages: writing the same thing in the text of the answer, or adding a reminder, changed nothing. Keeping the start of the results instead of their summary did not help either. The memory tools weigh on this model: with their six descriptions in the prompt it invents paths like `/home/user/drafts/note.md`, and only four writes out of ten succeed. The permission error is shown and nothing false is claimed, but `SENSAI_FEATURE_MEMORY=false` is better with it.
 
 Tools need a model that supports them (`qwen3`, `llama3.1`, `mistral`...). With a model that does not, like `llama3`, Sensai warns at startup and chats without tools.
 
@@ -398,6 +403,27 @@ The judge is the chat model itself, so nothing leaves the machine, at the cost o
 
 Without a rules file, one rule applies: personal data is blocked in web searches. A file at `SENSAI_GUARDRAILS_PATH` replaces it; [guardrails.example.json](guardrails.example.json) protects a source, keeps personal data out of web searches, flags bank details in answers and refuses requests about private life. Like the index, keep the file in `.sensai/`: it holds the names you protect.
 
+### Web UI
+
+`python -m sensai web` serves a page on `http://127.0.0.1:8000` (`--port` to change it): the same conversations, tools and guardrails as the CLI, in a browser.
+
+The page shows the answer as it is generated, with the searches, the tool calls and the thoughts above it and the sources cited below it. The sidebar lists the saved conversations, shared with the CLI, and `New chat` starts another one. The composer has the persona list and a gauge of the tokens used out of `SENSAI_NUM_CTX`, which turns orange when the oldest turns are about to be condensed. `Settings` turns the features on or off for this run, the stop button ends an answer and keeps what was written, and a tool that needs approval shows `Allow`, `Always this session` and `Deny`.
+
+The backend does not change: `sensai/interfaces/web/server.py` is an interface like `cli/main.py`, it reads the events of `Agent.run` and reuses the functions of the CLI to start a session, save it and resume it.
+
+- **One thread for the session.** An SQLite connection only works on the thread that opened it, and the index, the memory and the cache each hold one. `WebChat` runs everything that touches the session on a single thread: the server only puts the events in a queue and reads them back.
+- **Streaming.** `POST /api/chat` answers with a stream of [server-sent events](https://developer.mozilla.org/docs/Web/API/Server-sent_events), one JSON object per event of the agent, read with `fetch`. The stream only goes one way: the clicks are ordinary requests (`/api/stop`, `/api/approval`), so a WebSocket would add nothing.
+- **Approvals.** `WebChat.approve` is the approver of the agent: it sends the question to the page and blocks the thread of the session until the click. Stopping the answer or closing the page refuses the call, so a tool never runs on a question nobody saw.
+- **Stopping** works like Ctrl+C: the generator of `Agent.run` is closed, which closes the connection to Ollama, and `Agent.interrupt` keeps what was written. A closed or reloaded page stops the answer too.
+- **Only this machine.** There is no login, and a conversation holds the case: the server only listens on `127.0.0.1`. That is not enough on its own, since any site open in the browser can send requests to localhost: a request with another `Origin` is refused, and so is another `Host`, which stops a DNS rebinding attack.
+- **The content of a document never runs.** The answers of the model can quote a leaked document, so the small Markdown renderer of `app.js` escapes everything before adding its own tags, and it creates neither links nor images.
+
+The page is three static files in `sensai/interfaces/web/static/`, without a build step or a framework. It loads nothing from the internet, as Sensai has to work on an air-gapped machine: no CDN, no web font. Its design follows the Claude web interface: a sidebar, one centered column, a rounded composer, serif text for the answers, and a light and a dark theme that follow the system.
+
+[Rich](https://github.com/Textualize/rich) was considered first, but it draws in a terminal: it does not make a web frontend. Textual can show a terminal application in a browser with `textual serve`, which is still not a frontend decoupled from the backend. React or Vue were ruled out because a build step and hundreds of packages are out of proportion for one page, on a project that has to be installed offline.
+
+Limits: there is one conversation at a time and one user, so two tabs share the same conversation. The stop button acts at the next event: it cannot cut a tool that is running, nor a model that has not written its first word yet. The gauge counts each piece of the stream as one token until Ollama gives the exact count at the end, and it is an estimate after a stop or a resume. The page has the chat, not all the commands: `/review`, `/json`, `/ingest`, `/edit`, `/schedule` and the other commands stay in the CLI, and the semantic cache is not offered, since confirming a cached answer has no screen yet. A model that writes its tool calls as text instead of using tool calling, like `granite3.1-moe` in our tests, never reaches the approval screen.
+
 ## Getting Started
 
 ### Installation
@@ -421,6 +447,8 @@ SENSAI_MODEL=qwen3.8 python -m sensai   # override the model for one run
 python -m sensai -e other.env    # use another env file
 python -m sensai --resume        # continue the last conversation
 python -m sensai --resume 20261027-153012   # continue a given one (/sessions lists them)
+python -m sensai web             # chat in a browser page on http://127.0.0.1:8000
+python -m sensai web --port 9000 # on another port
 
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
