@@ -17,75 +17,80 @@ def store(tmp_path) -> PromptStore:
 
 
 def test_first_snapshot_is_version_1_and_active(store):
-    version = store.snapshot("editor", "Be clear.")
+    version = store.snapshot("Be clear.")
     assert (version.number, version.prompt) == (1, "Be clear.")
-    assert store.active("editor") == version and version.created_at
+    assert store.active() == version and version.created_at
 
 
 def test_same_prompt_makes_no_new_version(store):
-    store.snapshot("editor", "Be clear.")
-    assert store.snapshot("editor", "Be clear.") is None
-    assert len(store.history("editor").versions) == 1
+    store.snapshot("Be clear.")
+    assert store.snapshot("Be clear.") is None
+    assert len(store.history().versions) == 1
 
 
 def test_changed_prompt_becomes_the_active_version(store):
-    store.snapshot("editor", "Be clear.")
-    store.snapshot("editor", "Be short.")
-    store.activate("editor", 1)
-    assert store.snapshot("editor", "Be precise.").number == 3
-    assert store.active("editor").prompt == "Be precise."
+    store.snapshot("Be clear.")
+    store.snapshot("Be short.")
+    store.activate(1)
+    assert store.snapshot("Be precise.").number == 3
+    assert store.active().prompt == "Be precise."
 
 
 def test_rollback_survives_a_restart(store):
-    store.snapshot("editor", "Be clear.")
-    store.snapshot("editor", "Be short.")
-    store.activate("editor", 1)
+    store.snapshot("Be clear.")
+    store.snapshot("Be short.")
+    store.activate(1)
 
     restarted = PromptStore(store.directory)
-    assert restarted.snapshot("editor", "Be short.") is None
-    assert restarted.active("editor").prompt == "Be clear."
+    assert restarted.snapshot("Be short.") is None
+    assert restarted.active().prompt == "Be clear."
 
 
 def test_unknown_version_is_refused(store):
-    store.snapshot("editor", "Be clear.")
-    with pytest.raises(PromptError, match="No version 3 of editor: it has 1"):
-        store.activate("editor", 3)
+    store.snapshot("Be clear.")
+    with pytest.raises(PromptError, match="No version 3 of system prompt: it has 1"):
+        store.activate(3)
 
 
-def test_persona_without_versions(store):
-    assert store.active("legal") is None and store.history("legal").versions == []
+def test_store_without_versions(store):
+    assert store.active() is None and store.history().versions == []
 
 
 def test_invalid_file_names_the_file(store):
     store.directory.mkdir()
-    (store.directory / "editor.json").write_text('{"versions": [], "active": 1}', encoding="utf-8")
-    with pytest.raises(PromptError, match="editor.json"):
-        store.active("editor")
-
-
-def test_ids_cannot_leave_the_folder(store):
-    with pytest.raises(PromptError, match="Invalid persona id"):
-        store.snapshot("../editor", "Be clear.")
+    (store.directory / "system.json").write_text('{"versions": [], "active": 1}', encoding="utf-8")
+    with pytest.raises(PromptError, match="system.json"):
+        store.active()
 
 
 def test_diff_shows_the_changed_lines():
-    text = diff(PromptVersion(1, "You are Ana.\nBe clear.", ""), PromptVersion(2, "You are Ana.\nBe short.", ""))
-    assert "--- version 1" in text and "-Be clear." in text and "+Be short." in text and " You are Ana." in text
+    text = diff(PromptVersion(1, "You are Sensai.\nBe clear.", ""), PromptVersion(2, "You are Sensai.\nBe short.", ""))
+    assert "--- version 1" in text and "-Be clear." in text and "+Be short." in text and " You are Sensai." in text
 
 
 def test_agent_uses_the_active_version(config, client, store):
-    store.snapshot("editor", EDITOR.system_prompt())
-    store.snapshot("editor", "Old prompt kept on purpose.")
-    store.activate("editor", 2)
-    agent = Agent(config, client, persona=EDITOR, prompts=store)
+    store.snapshot("Default system prompt.")
+    store.snapshot("Old prompt kept on purpose.")
+    store.activate(2)
+    agent = Agent(config, client, prompts=store)
     assert agent.prompt_version == 2
     assert agent.messages[0] == {"role": "system", "content": "Old prompt kept on purpose."}
 
 
-def test_agent_uses_the_file_when_the_feature_is_off(config, client, store):
-    store.snapshot("editor", "Old prompt kept on purpose.")
+def test_agent_uses_config_prompt_when_feature_is_off(config, client, store):
+    store.snapshot("Old prompt kept on purpose.")
     config.features["prompt_versions"] = False
-    agent = Agent(config, client, persona=EDITOR, prompts=store)
+    config.system_prompt = "Config system prompt"
+    agent = Agent(config, client, prompts=store)
+    assert agent.prompt_version is None
+    assert agent.messages[0]["content"] == "Config system prompt"
+
+
+def test_persona_resets_prompt_version(config, client, store):
+    store.snapshot("System prompt v1.")
+    agent = Agent(config, client, prompts=store)
+    assert agent.prompt_version == 1
+    agent.set_persona(EDITOR)
     assert agent.prompt_version is None
     assert agent.messages[0]["content"] == EDITOR.system_prompt()
 
@@ -96,7 +101,8 @@ def write_cases(path, cases):
 
 
 def test_cases_are_loaded(tmp_path):
-    path = write_cases(tmp_path / "cases.json", [{"question": "Who?", "must_contain": ["Vidal"]}, {"question": "When?"}])
+    cases = [{"question": "Who?", "must_contain": ["Vidal"]}, {"question": "When?"}]
+    path = write_cases(tmp_path / "cases.json", cases)
     assert load_cases(path) == [Case("Who?", ["Vidal"]), Case("When?")]
 
 
@@ -114,7 +120,8 @@ def test_missing_cases_file_points_to_the_example(tmp_path):
 def test_check_ignores_the_case():
     case = Case("Who?", must_contain=["Marc Vidal", "[1]"], must_not_contain=["sources say"])
     assert check(case, "MARC VIDAL signed [1].") == []
-    assert check(case, "Sources say someone signed.") == ['missing "Marc Vidal"', 'missing "[1]"', 'contains "sources say"']
+    expected = ['missing "Marc Vidal"', 'missing "[1]"', 'contains "sources say"']
+    assert check(case, "Sources say someone signed.") == expected
 
 
 def test_score_asks_each_case_with_the_prompt_alone(config, client):
@@ -144,7 +151,8 @@ def test_compare_scores_every_version_on_the_same_cases(config, client):
     scores = compare(client, config, versions)
 
     assert [result.version for result in scores] == [1, 2]
-    assert [messages[0]["content"] for messages in client.summaries] == ["Be clear.", "Be clear.", "Be short.", "Be short."]
+    expected_prompts = ["Be clear.", "Be clear.", "Be short.", "Be short."]
+    assert [messages[0]["content"] for messages in client.summaries] == expected_prompts
 
 
 def test_compare_without_cases_asks_nothing(config, client):

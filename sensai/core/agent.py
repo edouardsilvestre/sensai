@@ -74,24 +74,24 @@ class Agent:
         self.guardrails = guardrails or Guardrails()
         self.examples = examples
         self.prompts = prompts
-        # The version of the persona prompt in use, None for the prompt of the persona file.
         self.prompt_version: int | None = None
         self.reasoning: list[Reasoning] = []
         self.cache = cache
         self.confirm_cache = confirm_cache
-        # False for the agents of a review: only the text the review keeps goes to the document of the main agent.
         self.keeps_document = True
         self.persona: Persona | None = None
+        if self.prompts is not None and self.config.features["prompt_versions"]:
+            version = self.prompts.active()
+            self.prompt_version = version.number if version else None
+            if version is not None:
+                self.memory.system_prompt = version.prompt
         if persona is not None:
             self.set_persona(persona)
 
     def set_persona(self, persona: Persona) -> None:
         self.persona = persona
-        version = None
-        if self.prompts is not None and self.config.features["prompt_versions"]:
-            version = self.prompts.active(persona.id)
-        self.prompt_version = version.number if version else None
-        self.memory.system_prompt = version.prompt if version else persona.system_prompt()
+        self.prompt_version = None
+        self.memory.system_prompt = persona.system_prompt()
 
     @property
     def messages(self) -> list[dict]:

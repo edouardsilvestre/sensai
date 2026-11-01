@@ -2,7 +2,6 @@ import difflib
 import hashlib
 import json
 import os
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,11 +11,7 @@ from pathlib import Path
 from sensai.core.config import Config
 from sensai.core.llm.ollama import OllamaClient, Usage
 
-# Same answer for the same prompt and question: only the prompt differs between two versions compared.
 COMPARE_OPTIONS = {"temperature": 0, "seed": 42}
-
-# Persona ids are file names: nothing that could point outside the prompts folder.
-_ID = re.compile(r"^[\w-]+$")
 
 
 class PromptError(Exception):
@@ -59,62 +54,57 @@ def _parse(data: object) -> PromptHistory:
 
 
 class PromptStore:
-    """One JSON file per persona: every version of its system prompt, the active one and the comparisons run."""
-
     def __init__(self, directory: Path):
         self.directory = directory
-        self._histories: dict[str, PromptHistory] = {}
+        self._history: PromptHistory | None = None
 
-    def _path(self, persona_id: str) -> Path:
-        if not _ID.match(persona_id):
-            raise PromptError(f"Invalid persona id '{persona_id}'")
-        return self.directory / f"{persona_id}.json"
+    @property
+    def path(self) -> Path:
+        return self.directory / "system.json"
 
-    def history(self, persona_id: str) -> PromptHistory:
-        if persona_id not in self._histories:
-            path = self._path(persona_id)
-            if not path.exists():
+    def history(self) -> PromptHistory:
+        if self._history is None:
+            if not self.path.exists():
                 return PromptHistory()
             try:
-                self._histories[persona_id] = _parse(json.loads(path.read_text(encoding="utf-8")))
+                self._history = _parse(json.loads(self.path.read_text(encoding="utf-8")))
             except (OSError, UnicodeDecodeError) as e:
-                raise PromptError(f"Cannot read the prompt versions {path}: {e}") from None
+                raise PromptError(f"Cannot read the prompt versions {self.path}: {e}") from None
             except ValueError as e:
-                raise PromptError(f"Invalid prompt versions file {path}: {e}") from None
-        return self._histories[persona_id]
+                raise PromptError(f"Invalid prompt versions file {self.path}: {e}") from None
+        return self._history
 
-    def snapshot(self, persona_id: str, prompt: str) -> PromptVersion | None:
-        """Keeps the prompt as a new active version when it differs from the last one. Returns it, or None."""
-        history = self.history(persona_id)
+    def snapshot(self, prompt: str) -> PromptVersion | None:
+        history = self.history()
         if history.versions and history.versions[-1].prompt == prompt:
             return None
-        version = PromptVersion(len(history.versions) + 1, prompt, datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        # An edited persona file is what the user wants now, even after a rollback.
-        self._save(persona_id, PromptHistory(history.versions + [version], version.number, history.comparisons))
+        created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        version = PromptVersion(len(history.versions) + 1, prompt, created)
+        self._save(PromptHistory(history.versions + [version], version.number, history.comparisons))
         return version
 
-    def version(self, persona_id: str, number: int) -> PromptVersion:
-        versions = self.history(persona_id).versions
+    def version(self, number: int) -> PromptVersion:
+        versions = self.history().versions
         if not 1 <= number <= len(versions):
-            raise PromptError(f"No version {number} of {persona_id}: it has {len(versions)}")
+            raise PromptError(f"No version {number} of system prompt: it has {len(versions)}")
         return versions[number - 1]
 
-    def active(self, persona_id: str) -> PromptVersion | None:
-        history = self.history(persona_id)
+    def active(self) -> PromptVersion | None:
+        history = self.history()
         return history.versions[history.active - 1] if history.versions else None
 
-    def activate(self, persona_id: str, number: int) -> PromptVersion:
-        version = self.version(persona_id, number)
-        history = self.history(persona_id)
-        self._save(persona_id, PromptHistory(history.versions, number, history.comparisons))
+    def activate(self, number: int) -> PromptVersion:
+        version = self.version(number)
+        history = self.history()
+        self._save(PromptHistory(history.versions, number, history.comparisons))
         return version
 
-    def record(self, persona_id: str, comparison: dict) -> None:
-        history = self.history(persona_id)
-        self._save(persona_id, PromptHistory(history.versions, history.active, history.comparisons + [comparison]))
+    def record(self, comparison: dict) -> None:
+        history = self.history()
+        self._save(PromptHistory(history.versions, history.active, history.comparisons + [comparison]))
 
-    def _save(self, persona_id: str, history: PromptHistory) -> None:
-        path = self._path(persona_id)
+    def _save(self, history: PromptHistory) -> None:
+        path = self.path
         temporary = path.with_name(path.name + ".tmp")
         data = {
             "active": history.active,
@@ -127,7 +117,7 @@ class PromptStore:
             os.replace(temporary, path)
         except OSError as e:
             raise PromptError(f"Cannot save the prompt versions {path}: {e}") from None
-        self._histories[persona_id] = history
+        self._history = history
 
 
 def diff(old: PromptVersion, new: PromptVersion) -> str:
@@ -150,7 +140,6 @@ class CaseResult:
     answer: str
     seconds: float
     tokens: int
-    # The checks the answer failed, like 'missing "Alvor"'.
     failed: list[str]
 
 
@@ -220,7 +209,6 @@ def score(
     client: OllamaClient, config: Config, version: PromptVersion, cases: list[Case],
     clock: Callable[[], float] = time.perf_counter,
 ) -> VersionScore:
-    """Asks every case with this prompt alone: no history, documents or tools, which would differ between runs."""
     options = {"num_ctx": config.num_ctx, **COMPARE_OPTIONS}
     results = []
     for case in cases:
@@ -233,7 +221,6 @@ def score(
 
 
 def compare(client: OllamaClient, config: Config, versions: list[PromptVersion]) -> list[VersionScore]:
-    """Loads the test cases once, so that every version is scored on the same ones, then asks them with each version."""
     cases = load_cases(config.prompt_cases_path)
     return [score(client, config, version, cases) for version in versions]
 
