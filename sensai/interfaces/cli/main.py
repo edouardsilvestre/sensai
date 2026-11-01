@@ -1,11 +1,13 @@
 import argparse
 import json
+import re
 import shlex
 import sys
 import textwrap
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from collections.abc import Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 from sensai.core.adversarial.models import AdversarialError, AttackCase, AttackResult, load_suite
@@ -16,7 +18,7 @@ from sensai.core.adversarial.runner import (
     save_attack_report,
     summarize_attacks,
 )
-from sensai.core.agent import STOPPED, Agent, EmptyInputError
+from sensai.core.agent import INTERRUPTED, STOPPED, Agent, EmptyInputError
 from sensai.core.approval import Approval
 from sensai.core.cache import CachedAnswer, CacheError, SemanticCache
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
@@ -42,7 +44,7 @@ from sensai.core.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from sensai.core.document.document import Document, Edit, EditReport
+from sensai.core.document.document import Edit, EditReport
 from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
@@ -52,11 +54,13 @@ from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
+from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, compare, comparison, diff
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
+from sensai.core.schedule import WHEN_FORMS, Schedule, ScheduleError, run_task
 from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.mcp import MCPConfigError
@@ -64,6 +68,9 @@ from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+POLL_SECONDS = 15
+SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
+SCHEDULE_USAGE = f"Usage: /schedule add WHEN [--allow TOOL,TOOL] TASK, or /schedule remove N. WHEN is {WHEN_FORMS}"
 ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
 ALWAYS_ANSWERS = {"a", "always"}
 REFUSE_ANSWERS = {"n", "no", "non"}
@@ -72,6 +79,7 @@ APPROVAL_DESCRIPTIONS = {
     "all": "asks before every tool call",
     "off": "never asks",
 }
+SHORT_TEXT = 70
 HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
@@ -82,6 +90,10 @@ Commands:
   /sessions               list the saved conversations
   /resume [ID]            continue a saved conversation (the last one without ID)
   /new                    start a new conversation, the current one stays saved
+  /history                list the messages of this branch with their numbers
+  /edit N [TEXT]          replace message N in a new branch; the original conversation stays in its branch
+  /branches               list the branches of this conversation
+  /branch N               continue branch N
   /profile                show the instructions the model gets about you
   /profile add TEXT       add an instruction to your profile
   /profile remove N       remove instruction N from your profile
@@ -100,7 +112,16 @@ Commands:
   /cache [clear]          show the answers kept to reuse, or remove them all
   /examples               list the answers kept as examples, * marks those shown for the last answer
   /example add|remove N   keep the last answer as an example for similar questions, or remove example N
-  /exit, /quit            leave (or press Ctrl+D)"""
+  /prompts                list the versions of the system prompt, * marks the one in use
+  /prompt show|use N      read version N of the system prompt, or use it from now on (roll back)
+  /prompt diff N M        show what changed between versions N and M
+  /prompt compare N M     ask the test cases with versions N and M, and compare the answers, time and tokens
+  /schedule               list the tasks run on their own by python -m sensai schedule
+  /schedule add WHEN TASK add a task: every 6h, daily 08:00 or weekly mon 08:00, --allow TOOL for a critical tool
+  /schedule remove N      remove task N, its reports stay
+  /reports [N]            list the reports of the scheduled tasks, or read report N
+  /exit, /quit            leave (or press Ctrl+D)
+Ctrl+C during an answer stops it: what was written is kept, and your next message redirects it."""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -130,6 +151,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     attack_parser.add_argument(
         "--compare", type=Path, default=None, help="path to earlier attack report JSON to compare with"
     )
+    schedule_parser = commands.add_parser("schedule", help="run the scheduled tasks when they are due")
+    schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
     return parser.parse_args(argv)
 
 
@@ -244,6 +267,8 @@ class Session:
     examples: ExampleLibrary | None = None
     examples_used: list[Example] = field(default_factory=list)
     answered: tuple[Turn, list[SearchResult]] | None = None
+    prompts: PromptStore | None = None
+    schedule: Schedule | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -353,7 +378,12 @@ def chat_turn(session: Session, line: str) -> None:
         session.answered = (turns[-1], list(session.last_sources))
 
 
-def show_events(session: Session, events: Iterator[Event], structured: bool = False) -> None:
+def show_events(
+    session: Session,
+    events: Generator[Event, None, None],
+    structured: bool = False,
+    interrupt: Callable[[], bool] | None = None,
+) -> None:
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -435,7 +465,12 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
         print()
         error(str(e))
     except KeyboardInterrupt:
-        print("\n[interrupted]")
+        # Closes the connection too: Ollama stops generating.
+        events.close()
+        if session.config.features["branching"] and (interrupt or session.agent.interrupt)():
+            print("\n[interrupted] What was written is kept: tell the model how to go on, or /edit to change the question.")
+        else:
+            print("\n[interrupted]")
     save_session(session)
 
 
@@ -465,7 +500,11 @@ def save_session(session: Session) -> None:
     if session.session_id is None:
         session.session_id = session.store.new_id()
     try:
-        session.store.save(session.session_id, memory, session.config.model)
+        persona = session.agent.persona
+        session.store.save(
+            session.session_id, memory, session.config.model,
+            persona.id if persona else None, session.agent.prompt_version,
+        )
     except SessionError as e:
         warning(f"The conversation is not saved: {e}")
 
@@ -508,6 +547,9 @@ def resume(session: Session, session_id: str) -> bool:
     session.answered = (memory_turns[-1], []) if memory_turns else None
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
     print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
+    branches = session.agent.memory.branches()
+    if len(branches) > 1:
+        print(f"On branch {session.agent.memory.branch.number} of {len(branches)}: /branches lists them.")
     return True
 
 
@@ -518,16 +560,100 @@ def resume_command(session: Session, argument: str) -> None:
 
 
 def new_command(session: Session) -> None:
-    memory = session.agent.memory
     previous = session.session_id
-    memory.summary, memory.turns, memory.last_usage = "", [], None
-    memory.document = Document()
+    session.agent.memory.clear()
     session.session_id = None
     session.last_sources = []
     session.agent.reasoning.clear()
     session.answered = None
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
     print(f"New conversation.{saved}")
+
+
+def shorten(text: str) -> str:
+    return textwrap.shorten(text, width=SHORT_TEXT, placeholder="...")
+
+
+def history_command(session: Session) -> None:
+    memory = session.agent.memory
+    if not memory.turns:
+        print("No message kept verbatim on this branch." if memory.summary else "No message yet.")
+        return
+    print(f"Branch {memory.branch.number}:")
+    for number, turn in enumerate(memory.turns, start=1):
+        print(f"  {number}. {shorten(turn.user)}")
+        print(f"     {shorten(turn.assistant)}")
+    print("/edit N to try another message instead of one of them.")
+
+
+def branching_enabled(session: Session) -> bool:
+    if not session.config.features["branching"]:
+        print("The branching feature is off: /feature branching on to edit past messages and switch branches.")
+    return session.config.features["branching"]
+
+
+def edit_command(session: Session, argument: str) -> None:
+    if not branching_enabled(session):
+        return
+    memory = session.agent.memory
+    number, _, text = argument.partition(" ")
+    if not number.isdecimal():
+        error("Usage: /edit N [TEXT], /history gives the numbers")
+        return
+    if not 1 <= int(number) <= len(memory.turns):
+        error(f"No message {number} on this branch: /history lists them.")
+        return
+    number = int(number)
+    if not text.strip():
+        print(f"Message {number}: {memory.turns[number - 1].user}")
+        try:
+            text = input("New message (empty to cancel): ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not text.strip():
+            return
+    previous = memory.branch.number
+    memory.fork(number)
+    print(f"[branch] Branch {memory.branch.number}, from message {number} of branch {previous}, which stays as it was.")
+    forked = memory.turns
+    chat_turn(session, text)
+    if memory.turns is forked:
+        # Blocked by a guardrail, or the model failed: the edit gave nothing to keep.
+        memory.discard_branch()
+        save_session(session)
+        print(f"[branch] Nothing was answered: back on branch {previous}.")
+
+
+def branches_command(session: Session) -> None:
+    if not branching_enabled(session):
+        return
+    memory = session.agent.memory
+    for branch in memory.branches():
+        marker = "*" if branch.number == memory.branch.number else " "
+        origin = "original" if branch.parent is None else f"from message {branch.turn} of branch {branch.parent}"
+        label = f": {shorten(branch.label)}" if branch.label else ""
+        print(f"{marker} {branch.number}  {plural(len(branch.turns), 'turn'):>9}  {origin}{label}")
+    print("/branch N to continue one of them, /edit N to start another.")
+
+
+def branch_command(session: Session, argument: str) -> None:
+    if not branching_enabled(session):
+        return
+    memory = session.agent.memory
+    if not argument:
+        print(f"On branch {memory.branch.number}. /branches lists them.")
+    elif not argument.isdecimal():
+        error("Usage: /branch N, /branches gives the numbers")
+    elif int(argument) == memory.branch.number:
+        print(f"Already on branch {argument}.")
+    elif not memory.switch(int(argument)):
+        error(f"No branch {argument}: /branches lists them.")
+    else:
+        session.last_sources = []
+        save_session(session)
+        last = f" Last answer: {shorten(memory.turns[-1].assistant)}" if memory.turns else ""
+        print(f"On branch {argument}, {plural(len(memory.turns), 'turn')}.{last}")
 
 
 def profile_command(session: Session, argument: str) -> None:
@@ -541,7 +667,7 @@ def profile_command(session: Session, argument: str) -> None:
             profile.add(value)
             print(f"Added as instruction {len(profile.entries)}.")
         elif action == "remove":
-            if not value.strip().isdigit():
+            if not value.strip().isdecimal():
                 error("Usage: /profile remove N")
                 return
             print(f"Removed: {profile.remove(int(value))}")
@@ -739,6 +865,19 @@ def feature_command(session: Session, argument: str) -> None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
     if name == "examples" and value == "on" and session.examples is None:
         session.examples = session.agent.examples = load_examples(config, session.agent.client)
+    if name == "prompt_versions":
+        if value == "on" and session.prompts is None:
+            session.prompts = session.agent.prompts = load_prompts(config)
+        if value == "on" and session.prompts is not None and session.agent.persona is None:
+            active = session.prompts.active()
+            if active:
+                session.agent.prompt_version = active.number
+                session.agent.memory.system_prompt = active.prompt
+        elif value == "off" and session.agent.persona is None:
+            session.agent.prompt_version = None
+            session.agent.memory.system_prompt = config.system_prompt
+    if name == "schedule" and value == "on" and session.schedule is None:
+        session.schedule = load_schedule(config)
 
 
 def reload_tools(session: Session) -> None:
@@ -795,7 +934,7 @@ def review_command(session: Session, argument: str) -> None:
         error(f"{e} (in {session.config.personas_dir}).")
         return
     session.last_sources = []
-    show_events(session, review.run(argument))
+    show_events(session, review.run(argument), interrupt=review.interrupt)
 
 
 def reasoning_command(session: Session, argument: str) -> None:
@@ -881,6 +1020,9 @@ def add_example(session: Session) -> None:
     if STOPPED in turn.assistant:
         error("An answer stopped by a guardrail cannot be kept as an example.")
         return
+    if INTERRUPTED in turn.assistant:
+        error("An interrupted answer cannot be kept as an example.")
+        return
     try:
         example = make_example(turn.user, turn.assistant, sources)
         session.examples.add(example)
@@ -911,6 +1053,110 @@ def example_command(session: Session, argument: str) -> None:
     print(f'Example {number} removed: "{removed.question}"')
 
 
+def created_on(version: PromptVersion) -> str:
+    if not version.created_at:
+        return "-"
+    return f"{datetime.fromisoformat(version.created_at).astimezone():%Y-%m-%d %H:%M}"
+
+
+def list_prompts(session: Session) -> None:
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the system prompt.")
+        return
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return
+    try:
+        history = session.prompts.history()
+    except PromptError as e:
+        error(str(e))
+        return
+    if not history.versions:
+        print("No version of the system prompt yet: it is kept at the next start.")
+        return
+    print("Versions of the system prompt (* in use):")
+    for version in reversed(history.versions):
+        mark = "*" if version.number == history.active else " "
+        size = plural(len(version.prompt), "char")
+        print(f"  {mark} {version.number}. {created_on(version)}  {version.hash}  {size}")
+    if history.comparisons:
+        last = history.comparisons[-1]
+        scores = ", ".join(f"version {s['version']} {s['passed']}/{s['cases']}" for s in last["scores"])
+        print(f"Last comparison ({last['model']}): {scores}.")
+    print("/prompt show N to read one, /prompt use N to roll back to it.")
+
+
+def print_scores(scores: list[VersionScore]) -> None:
+    print(f"\n{'Version':<9}{'Passed':<9}{'Avg time':<10}Avg tokens")
+    for version in scores:
+        passed = f"{version.passed}/{len(version.results)}"
+        print(f"{version.version:<9}{passed:<9}{version.seconds:<10.2f}{version.tokens:.0f}")
+    for version in scores:
+        for number, result in enumerate(version.results, start=1):
+            if result.failed:
+                failed = ", ".join(result.failed)
+                print(f"  version {version.version}, case {number} ({result.case.question}): {failed}")
+
+
+def compare_prompts(session: Session, versions: list[PromptVersion]) -> None:
+    config = session.config
+    numbers = " and ".join(str(version.number) for version in versions)
+    print(f"Comparing versions {numbers} on the test cases with {config.model}...")
+    try:
+        scores = compare(session.agent.client, config, versions)
+    except (PromptError, LLMError) as e:
+        error(str(e))
+        return
+    except KeyboardInterrupt:
+        print("\n[interrupted] The comparison is not kept.")
+        return
+    print_scores(scores)
+    try:
+        session.prompts.record(comparison(config.model, scores))
+    except PromptError as e:
+        warning(f"The comparison is not kept: {e}")
+
+
+PROMPT_USAGE = "Usage: /prompt show|use N, or /prompt diff|compare N M"
+
+
+def prompt_command(session: Session, argument: str) -> None:
+    words = argument.split()
+    action, numbers = (words[0], words[1:]) if words else ("", [])
+    count = {"show": 1, "use": 1, "diff": 2, "compare": 2}.get(action)
+    if count is None or len(numbers) != count or not all(n.isdecimal() for n in numbers):
+        error(PROMPT_USAGE)
+        return
+    if not session.config.features["prompt_versions"]:
+        print("The prompt_versions feature is off: /feature prompt_versions on to keep the system prompt.")
+        return
+    if session.prompts is None:
+        print("The prompt versions could not be loaded: /feature prompt_versions on to try again.")
+        return
+    try:
+        versions = [session.prompts.version(int(number)) for number in numbers]
+    except PromptError as e:
+        error(str(e))
+        return
+    if action == "show":
+        print(f"Version {versions[0].number} of the system prompt ({created_on(versions[0])}):")
+        print(textwrap.indent(versions[0].prompt, "  "))
+    elif action == "diff":
+        print(diff(*versions) or f"Versions {versions[0].number} and {versions[1].number} are identical.")
+    elif action == "compare":
+        compare_prompts(session, versions)
+    else:
+        try:
+            session.prompts.activate(versions[0].number)
+        except PromptError as e:
+            error(str(e))
+            return
+        agent = session.agent
+        agent.prompt_version = versions[0].number
+        agent.memory.system_prompt = versions[0].prompt
+        print(f"Sensai uses version {versions[0].number} of its system prompt from now on.")
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -920,6 +1166,102 @@ def print_structured(answer: str, sources: list[SearchResult]) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
     if sources:
         print_sources(sources, cited_sources(data))
+
+
+def run_time(value: str) -> str:
+    return f"{datetime.fromisoformat(value):%Y-%m-%d %H:%M}"
+
+
+def add_task(session: Session, text: str) -> None:
+    match = SCHEDULE_ADD.fullmatch(" ".join(text.split()))
+    if match is None or match[3].startswith("--"):
+        error(SCHEDULE_USAGE)
+        return
+    allow = [name for name in (match[2] or "").split(",") if name]
+    unknown = sorted(set(allow) - set(session.agent.tools.names()))
+    if unknown:
+        error(f"Cannot allow {', '.join(unknown)}: /tools lists the tools enabled.")
+        return
+    checked = session.agent.active_guardrails.check_input(match[3])
+    for hit in checked.hits:
+        print_guardrail(hit)
+    if checked.blocked:
+        print_guardrail(checked.blocked)
+        return
+    task = session.schedule.add(match[1], checked.text, allow, datetime.now())
+    print(f"Task {len(session.schedule.tasks)} added, first run on {run_time(task.next_run)}.")
+    print("It runs while python -m sensai schedule is running.")
+
+
+def show_schedule(session: Session) -> None:
+    session.schedule.reload()
+    tasks = session.schedule.tasks
+    if not tasks:
+        print("No scheduled task. For example: /schedule add daily 08:00 What is new about Orion Delta?")
+        return
+    now = datetime.now()
+    late = False
+    print("Scheduled tasks:")
+    for number, task in enumerate(tasks, start=1):
+        overdue = datetime.fromisoformat(task.next_run) <= now
+        late = late or overdue
+        last = f"last run {run_time(task.last_run)}: {task.status or 'running'}" if task.last_run else "not run yet"
+        allowed = f", allowed: {', '.join(task.allow)}" if task.allow else ""
+        print(f"  {number}. {task.question}")
+        print(f"     {task.when}, next run {run_time(task.next_run)}{' (late)' if overdue else ''}, {last}{allowed}")
+    if late:
+        print("Late tasks run as soon as python -m sensai schedule is started.")
+
+
+def schedule_ready(session: Session) -> bool:
+    if not session.config.features["schedule"]:
+        print("The schedule feature is off: /feature schedule on to run tasks on their own.")
+        return False
+    if session.schedule is None:
+        print("The schedule could not be read: fix the file, then /feature schedule on.")
+        return False
+    return True
+
+
+def schedule_command(session: Session, argument: str) -> None:
+    if not schedule_ready(session):
+        return
+    action, _, value = argument.partition(" ")
+    value = value.strip()
+    try:
+        if action == "add":
+            add_task(session, value)
+        elif action == "remove" and value.isdecimal():
+            print(f"Removed: {session.schedule.remove(int(value)).question}")
+        elif action:
+            error(SCHEDULE_USAGE)
+        else:
+            show_schedule(session)
+    except (ScheduleError, LLMError) as e:
+        error(str(e))
+
+
+def reports_command(session: Session, argument: str) -> None:
+    if not schedule_ready(session):
+        return
+    try:
+        if argument:
+            if not argument.isdecimal():
+                error("Usage: /reports [N]")
+                return
+            print(session.schedule.read_report(int(argument)).rstrip())
+            return
+        reports = session.schedule.latest_reports()
+    except ScheduleError as e:
+        error(str(e))
+        return
+    if not reports:
+        print("No report yet: a report is written when a scheduled task finds something new.")
+        return
+    print("Reports (* not read yet):")
+    for number, report in enumerate(reports, start=1):
+        print(f"  {' ' if report.read else '*'} {number}. {run_time(report.at)}  {report.question}")
+    print("/reports N to read one.")
 
 
 def json_command(session: Session, argument: str) -> None:
@@ -953,6 +1295,14 @@ def handle_command(session: Session, line: str) -> bool:
         resume_command(session, argument)
     elif name == "/new":
         new_command(session)
+    elif name == "/history":
+        history_command(session)
+    elif name == "/edit":
+        edit_command(session, argument)
+    elif name == "/branches":
+        branches_command(session)
+    elif name == "/branch":
+        branch_command(session, argument)
     elif name == "/profile":
         profile_command(session, argument)
     elif name == "/document":
@@ -969,6 +1319,14 @@ def handle_command(session: Session, line: str) -> bool:
         list_examples(session)
     elif name == "/example":
         example_command(session, argument.lower())
+    elif name == "/prompts":
+        list_prompts(session)
+    elif name == "/prompt":
+        prompt_command(session, argument)
+    elif name == "/schedule":
+        schedule_command(session, argument)
+    elif name == "/reports":
+        reports_command(session, argument)
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -1018,6 +1376,27 @@ def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None
     return examples
 
 
+def load_prompts(config: Config) -> PromptStore | None:
+    prompts = PromptStore(config.prompts_dir)
+    try:
+        if config.system_prompt:
+            version = prompts.snapshot(config.system_prompt)
+            if version is not None and version.number > 1:
+                print(f"System prompt changed: kept as version {version.number}. /prompts to list them.")
+    except PromptError as e:
+        warning(f"Prompt versions disabled: {e}")
+        return None
+    return prompts
+
+
+def load_schedule(config: Config) -> Schedule | None:
+    try:
+        return Schedule(config.schedule_path, config.reports_dir)
+    except ScheduleError as e:
+        warning(f"Schedule disabled: {e}")
+        return None
+
+
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     tools = build_registry(config, client)
     if tools and not client.can_call_tools(config.model):
@@ -1063,28 +1442,38 @@ def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
     return personas, personas[config.persona]
 
 
-def run_chat(config: Config, resume_id: str | None = None) -> int:
+def start_session(config: Config) -> Session | None:
+    """The model checked, then the tools, the rules, the documents, the examples. None when Sensai cannot start."""
     try:
         personas, persona = load_persona(config)
     except PersonaError as e:
         error(str(e))
-        return 1
-    agent = Agent(config, persona=persona)
+        return None
+    prompts = load_prompts(config) if config.features["prompt_versions"] else None
+    agent = Agent(config, persona=persona, prompts=prompts)
     try:
         agent.client.ensure_model(config.model)
         agent.tools = load_tools(config, agent.client)
         agent.guardrails = load_guardrails(config, agent.client)
     except (LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
-        return 1
+        return None
 
-    session = Session(config, agent, personas=personas)
+    session = Session(config, agent, personas=personas, prompts=prompts)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
+    session.examples = agent.examples = load_examples(config, agent.client)
+    return session
+
+
+def run_chat(config: Config, resume_id: str | None = None) -> int:
+    session = start_session(config)
+    if session is None:
+        return 1
+    agent = session.agent
     if config.features["cache"]:
         session.cache = agent.cache = load_cache(config, agent.client)
-    session.examples = agent.examples = load_examples(config, agent.client)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     agent.confirm_cache = confirm_cached
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
@@ -1105,10 +1494,14 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
-        print(f"Persona: {agent.persona.name}. /personas to list them, /persona ID to switch.")
+        version = f" (prompt version {agent.prompt_version})" if agent.prompt_version else ""
+        print(f"Persona: {agent.persona.name}{version}. /personas to list them, /persona ID to switch.")
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
     load_memory(session, resume_id)
+    if config.features["schedule"]:
+        session.schedule = load_schedule(config)
+        print_schedule_news(session)
 
     try:
         while True:
@@ -1214,6 +1607,86 @@ def run_attack(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def print_schedule_news(session: Session) -> None:
+    schedule = session.schedule
+    if schedule is None:
+        return
+    unread = sum(not report.read for report in schedule.reports)
+    failed = sum(task.failed for task in schedule.tasks)
+    if unread:
+        print(f"[schedule] {plural(unread, 'new report')}. /reports to read them.")
+    if failed:
+        warning(f"{plural(failed, 'scheduled task')} failed on the last run: /schedule to see why.")
+
+
+def run_due_tasks(session: Session) -> bool:
+    """Runs the tasks that are due, one after the other. False when one failed: the next ones still run."""
+    schedule, succeeded = session.schedule, True
+    for task in schedule.due(datetime.now()):
+        now = datetime.now()
+        if not schedule.claim(task, now):
+            continue
+        print(f"[{now:%H:%M}] {task.question}", flush=True)
+        try:
+            run = run_task(session.agent, task, session.store, now)
+            report = None if run.nothing_new(task) else schedule.write_report(task, run, now)
+        except Exception as e:
+            # Whatever a tool raises, nobody is there to restart the scheduler: one task must not stop the others.
+            reason = str(e) or type(e).__name__
+            warning(f"The task failed, it runs again at its next time: {reason}")
+            schedule.finish(task, f"failed: {reason}", failed=True)
+            succeeded = False
+            continue
+        except KeyboardInterrupt:
+            schedule.finish(task, "failed: interrupted", failed=True)
+            raise
+        for failed in run.failed_tools:
+            warning(f"A tool could not run, {failed}")
+        if report is None:
+            schedule.finish(task, "nothing new", evidence=run.evidence)
+            print("Nothing new.", flush=True)
+        else:
+            schedule.finish(task, "report written", report=report, evidence=run.evidence)
+            print(f"New report: {schedule.reports_dir / report.file}", flush=True)
+    return succeeded
+
+
+def watch_schedule(session: Session, once: bool) -> int:
+    try:
+        while True:
+            try:
+                succeeded = run_due_tasks(session)
+            except ScheduleError as e:
+                error(str(e))
+                succeeded = False
+            if once:
+                return 0 if succeeded else 1
+            time.sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        print("\n[interrupted] The scheduler stopped: late tasks run when it starts again.")
+        return 0
+
+
+def run_schedule(config: Config, once: bool) -> int:
+    if not config.features["schedule"]:
+        error("The schedule feature is off: SENSAI_FEATURE_SCHEDULE=true to run the tasks.")
+        return 1
+    session = start_session(config)
+    if session is None:
+        return 1
+    load_memory(session, None)
+    session.schedule = load_schedule(config)
+    try:
+        if session.schedule is None:
+            return 1
+        tasks = plural(len(session.schedule.tasks), "task")
+        print(f"Sensai scheduler - model: {config.model}, {tasks}." + ("" if once else " Ctrl+C to stop."), flush=True)
+        return watch_schedule(session, once)
+    finally:
+        if session.index is not None:
+            session.index.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -1230,6 +1703,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_status(config)
     if args.command == "attack":
         return run_attack(config, args)
+    if args.command == "schedule":
+        return run_schedule(config, args.once)
     return run_chat(config, args.resume)
 
 
