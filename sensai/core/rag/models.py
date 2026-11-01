@@ -83,7 +83,6 @@ class SearchFilter:
 
     after: str = ""
     before: str = ""
-    # The author or the sender, like the recipient: any part of the name, whatever the case.
     author: str = ""
     recipient: str = ""
     kind: str = ""

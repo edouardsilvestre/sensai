@@ -86,7 +86,8 @@ class RerankingRetriever(FakeRetriever):
         self.dropped = dropped
 
     def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
-        report.candidates, report.dropped = len(self.results) + len(self.dropped), list(self.dropped)
+        report.candidates, report.kept = len(self.results) + len(self.dropped), len(self.results)
+        report.dropped = list(self.dropped)
         return super().search(query, k, filters)
 
 

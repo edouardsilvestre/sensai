@@ -11,7 +11,7 @@ class Retriever:
         self.candidates, self.kept, self.dropped = candidates, kept, dropped
 
     def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
-        report.candidates, report.dropped = self.candidates, list(self.dropped)
+        report.candidates, report.kept, report.dropped = self.candidates, len(self.kept), list(self.dropped)
         return list(self.kept)
 
 

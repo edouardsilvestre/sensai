@@ -84,7 +84,6 @@ class Agent:
         self.config = config
         self.client = client or OllamaClient(config.host, config.ollama_api_key)
         self.retriever = retriever
-        # Set by the user: every search, automatic or by the model, keeps to it.
         self.search_filter = SearchFilter()
         self.tools = tools or ToolRegistry()
         self.approver = approver

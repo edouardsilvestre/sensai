@@ -155,20 +155,17 @@ class DocumentIndex:
         found = self.store.search(vector, candidates, document_ids)
         if self.config.features["hybrid"]:
             keyword = self.store.keyword_search(query, candidates, vector, document_ids)
-            # Up to twice as many chunks when the searches found different ones: the reranker reads the best only.
             found = fuse([found, keyword])[:candidates]
         if self.config.features["rerank"] and not self.rerank_error:
             try:
                 found = self.reranker.rerank(query, found)
             except RerankError as e:
-                # Searching without the reranker beats failing every message, like without sentence-transformers.
                 self.rerank_error = str(e)
             else:
                 threshold = self.config.rerank_threshold / 100
                 if report is not None:
                     report.candidates = len(found)
                     report.dropped = [result for result in found if result.relevance < threshold]
-                # A chunk on the subject that does not answer, like the transfer of May for a question on March.
                 found = [result for result in found if result.relevance >= threshold]
         if self.config.features["rerank"] and self.rerank_error and report is not None:
             report.rerank_error = self.rerank_error
@@ -198,7 +195,6 @@ class DocumentIndex:
             if not touching:
                 passages.append(new)
                 continue
-            # The passages are in the order of their excerpts: the first one touched is the most relevant.
             kept, merged = touching[0], touching[1:]
             kept.first = min(p.first for p in touching + [new])
             kept.last = max(p.last for p in touching + [new])
