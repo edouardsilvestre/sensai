@@ -36,9 +36,12 @@ def test_features_lists_every_feature(session, capsys):
         ["document", "on", "keep a working document of the established facts, updated after every answer"],
         ["guardrails", "on", "check the messages, the answers and the tool calls against the guardrail rules"],
         ["orchestration", "on", "let /review have the answer checked by the fact-checker and written by the editor"],
+        ["branching", "on", "edit a past message into a new branch, and keep an interrupted answer to redirect it"],
         ["reasoning", "off", "reason step by step and show each step before answering"],
         ["cache", "on", "reuse the answer to a close question already asked, once you confirm it"],
         ["examples", "on", "show the model your answers kept as examples, for similar questions"],
+        ["prompt_versions", "on", "keep every version of the system prompt, to compare them and roll back"],
+        ["schedule", "on", "run the scheduled tasks and write their reports"],
         ["logging", "on", "log every message with its prompt, answer, tools, time and tokens"],
     ]
 

@@ -1,7 +1,7 @@
 import json
 from collections.abc import Generator, Iterator
 
-from sensai.core.agent import Agent
+from sensai.core.agent import Agent, cut_answer
 from sensai.core.events import AgentStartedEvent, DoneEvent, Event, ReviewDoneEvent, SourcesEvent, ToolResultEvent
 from sensai.core.persona import Persona
 from sensai.core.rag.models import SearchResult
@@ -103,7 +103,7 @@ class Review:
 
     Each agent has its own memory: the fact-checker and the editor only get the text they work on.
     Only the question and the final text go to the history of the main agent, and only an approved text to its
-    working document.
+    working document. A review the user interrupts keeps the question and the last text written.
     """
 
     def __init__(self, agent: Agent, personas: dict[str, Persona]):
@@ -122,6 +122,10 @@ class Review:
         self.investigator.memory.document = agent.memory.document
         self.sources: dict[int, SearchResult] = {}
         self.tool_results: list[str] = []
+        # What `interrupt` needs: the agent at work, the question and the last complete answer of the investigator.
+        self.running: Agent | None = None
+        self.question = ""
+        self.answer = ""
 
     def _agent(self, persona: Persona, with_tools: bool = False) -> Agent:
         main = self.agent
@@ -129,17 +133,35 @@ class Review:
             main.config, main.client,
             retriever=main.retriever if with_tools else None,
             tools=main.tools if with_tools else None,
-            guardrails=main.guardrails, persona=persona, approver=main.approver, log=main.log,
+            guardrails=main.guardrails, persona=persona, approver=main.approver, prompts=main.prompts, log=main.log,
         )
         agent.memory.profile = main.memory.profile
         agent.session_id = main.session_id
         agent.keeps_document = False
         return agent
 
+    def interrupt(self) -> bool:
+        """
+        Call it when `run` was stopped midway, instead of `Agent.interrupt`: the main agent keeps the question and the
+        text being written, or the answer of the investigator when the agent at work had written nothing that can be read.
+        The document does not change: nothing here was approved.
+        """
+        question = self.question or self.investigator.asked
+        if self.running is None or not question:
+            return False
+        # The fact-checker writes JSON for the review, not a text for the journalist.
+        written = "" if self.running is self.fact_checker else "".join(self.running.shown).lstrip()
+        self.agent.memory.commit(question, cut_answer(written or self.answer))
+        self.running = None
+        return True
+
     def run(self, question: str) -> Iterator[Event]:
         answer = yield from self._ask(self.investigator, question)
         if answer is None:
             return
+        # From here on, the question as the guardrails let it through: the history gets this one too.
+        question = self.question = self.investigator.asked
+        self.answer = answer
         max_rounds = self.agent.config.max_review_rounds
         for round_number in range(1, max_rounds + 1):
             check = CHECK_PROMPT.format(question=question, evidence=self._evidence(), answer=answer)
@@ -156,10 +178,12 @@ class Review:
                 answer = yield from self._ask(self.investigator, FIX_PROMPT.format(verdict=remarks(verdict)))
                 if answer is None:
                     return
+                self.answer = answer
         yield from self._finish(question, False, answer, max_rounds)
 
     def _ask(self, agent: Agent, message: str, format: dict | None = None) -> Generator[Event, None, str | None]:
         """Relays the events of the agent and returns its answer, or None when a guardrail blocked the message."""
+        self.running = agent
         yield AgentStartedEvent(agent.persona)
         content = None
         for event in agent.run(message, format):
@@ -183,6 +207,7 @@ class Review:
 
     def _finish(self, question: str, is_approved: bool, content: str, rounds: int) -> Iterator[Event]:
         self.agent.memory.commit(question, content)
+        self.running = None
         yield ReviewDoneEvent(is_approved, content, rounds)
         # A text the fact-checker did not approve is not an established fact.
         if is_approved and self.agent.config.features["document"] and content.strip():

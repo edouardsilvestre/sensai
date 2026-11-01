@@ -6,10 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 from sensai.core.document.document import Document
-from sensai.core.memory.conversation import ConversationMemory, Turn
+from sensai.core.memory.conversation import Branch, ConversationMemory, Turn
 
 FORMAT_VERSION = 1
 TITLE_CHARS = 60
+# The conversations of the scheduled tasks: they are listed, but are never "the last conversation".
+TASK_PREFIX = "task-"
 
 # Ids are file names: nothing that could point outside the sessions folder.
 _ID = re.compile(r"^[\w-]+$")
@@ -32,8 +34,36 @@ def _title(turns: list[Turn]) -> str:
     return text if len(text) <= TITLE_CHARS else text[: TITLE_CHARS - 3].rstrip() + "..."
 
 
+def _position(branch: Branch) -> dict:
+    return {"number": branch.number, "parent": branch.parent, "turn": branch.turn, "label": branch.label}
+
+
+def _saved_branch(branch: Branch) -> dict:
+    return _position(branch) | {
+        "summary": branch.summary, "turns": [asdict(turn) for turn in branch.turns], "document": branch.document.markdown(),
+    }
+
+
+def _read_turns(saved: list[dict]) -> list[Turn]:
+    return [
+        Turn(turn["user"], turn["assistant"], list(turn.get("citations", [])), str(turn.get("document", "")))
+        for turn in saved
+    ]
+
+
+def _read_branch(saved: dict) -> Branch:
+    parent = saved["parent"]
+    return Branch(
+        int(saved["number"]), None if parent is None else int(parent), int(saved["turn"]), str(saved["label"]),
+        str(saved.get("summary", "")), _read_turns(saved.get("turns", [])), Document(saved.get("document", "")),
+    )
+
+
 class SessionStore:
-    """One JSON file per conversation, holding the summary and the turns kept verbatim, as the memory has them."""
+    """
+    One JSON file per conversation, holding the summary and the turns kept verbatim, as the memory has them.
+    The top level is the active branch, and `other_branches` the others.
+    """
 
     def __init__(self, directory: Path):
         self.directory = directory
@@ -43,6 +73,9 @@ class SessionStore:
             raise SessionError(f"Invalid session id '{session_id}'")
         return self.directory / f"{session_id}.json"
 
+    def exists(self, session_id: str) -> bool:
+        return self._path(session_id).exists()
+
     def new_id(self) -> str:
         base = datetime.now().strftime("%Y%m%d-%H%M%S")
         session_id, number = base, 2
@@ -50,15 +83,23 @@ class SessionStore:
             session_id, number = f"{base}-{number}", number + 1
         return session_id
 
-    def save(self, session_id: str, memory: ConversationMemory, model: str) -> None:
+    def save(
+        self, session_id: str, memory: ConversationMemory, model: str,
+        persona: str | None = None, prompt_version: int | None = None,
+    ) -> None:
         data = {
             "version": FORMAT_VERSION,
             "id": session_id,
             "updated": datetime.now().isoformat(timespec="seconds"),
             "model": model,
+            # Which system prompt the last answers came from: /prompts lists the versions.
+            "persona": persona,
+            "prompt_version": prompt_version if isinstance(prompt_version, int) else None,
             "summary": memory.summary,
             "turns": [asdict(turn) for turn in memory.turns],
             "document": memory.document.markdown(),
+            "branch": _position(memory.branch),
+            "other_branches": [_saved_branch(branch) for branch in memory.other_branches],
         }
         path = self._path(session_id)
         # Written next to the session then renamed, so that a crash never leaves half a conversation.
@@ -73,12 +114,15 @@ class SessionStore:
     def _read(self, path: Path) -> dict:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            turns = [Turn(turn["user"], turn["assistant"], list(turn.get("citations", []))) for turn in data["turns"]]
+            turns = _read_turns(data["turns"])
             # Sessions saved before the document existed start with an empty one.
             document = Document(data["document"]) if isinstance(data.get("document"), str) else Document()
             return {
                 "summary": str(data.get("summary", "")), "turns": turns, "document": document,
                 "updated": datetime.fromisoformat(data["updated"]),
+                # Sessions saved before the branches have only one.
+                "branch": _read_branch(data["branch"]) if "branch" in data else Branch(),
+                "other_branches": [_read_branch(branch) for branch in data.get("other_branches", [])],
             }
         except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
             raise SessionError(f"Cannot read the conversation {path.name}: {e}") from None
@@ -91,6 +135,7 @@ class SessionStore:
         data = self._read(path)
         memory.summary, memory.turns, memory.last_usage = data["summary"], data["turns"], None
         memory.document = data["document"]
+        memory.branch, memory.other_branches = data["branch"], data["other_branches"]
         return len(data["turns"])
 
     def list(self) -> list[SessionInfo]:
@@ -105,5 +150,4 @@ class SessionStore:
         return sorted(sessions, key=lambda session: (session.updated, session.id), reverse=True)
 
     def latest(self) -> str | None:
-        sessions = self.list()
-        return sessions[0].id if sessions else None
+        return next((session.id for session in self.list() if not session.id.startswith(TASK_PREFIX)), None)
