@@ -21,6 +21,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
+- 📈 **Logs & metrics**: every message is logged on the machine with the prompt sent, the answer, the tools, the time and the tokens, and `/stats` shows the volume, the response time, the error rate and the prompt changes that slowed Sensai down.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
 
@@ -196,6 +197,35 @@ With `qwen2.5:1.5b`, an answer took 8.1 seconds and its reuse 0.6 seconds, the t
 
 Serving the closest answer automatically above the threshold was considered and ruled out. With `qwen3-embedding:0.6b`, rephrasings of the same question scored between 0.911 and 0.974, but different questions scored up to 0.970: "Quel montant Nordbank a-t-elle viré à Marc Vidal ?" and "Quel montant Marc Vidal a-t-il viré à Nordbank ?" are 0.970 close, with opposite answers, and asking when instead of how much still scored 0.946. No threshold separates them, so the journalist decides, with the question kept and its similarity in front of them.
 
+### Logs & metrics
+
+With the `logging` feature (on by default), every message is logged in `SENSAI_LOG_PATH`, a SQLite file that stays on the machine: the date, the conversation, the model, the persona, the version of the prompt, the question, the prompt sent (the exact messages given to the model: the system prompt, the history, the excerpts, the tool results), the answer, the outcome (answered, from the cache, blocked, stopped or error, with its message), the time of the answer and of its first word, the tokens sent and received, the tools called, the excerpts found, the guardrails hit and the steps of the reasoning. `/stats` and `python -m sensai stats` turn it into metrics:
+
+```
+$ python -m sensai stats --days 1
+Last 1 day: 9 messages in 9 conversations, 0 errors (0%).
+Answers: 8.6 s on average, 28.6 s for the slowest 5% (p95), first word after 5.3 s.
+Tokens: 400 sent and 66 received per answer.
+Outcomes: 9 answered.
+
+By day:
+  2026-11-01  9 messages: 9 answers, 8.6 s, p95 28.6 s
+
+By prompt version:
+  fa5fa4cc  since 2026-11-01 01:29: 3 answers, 6.7 s, p95 8.7 s
+  e5ea938d  since 2026-11-01 01:29: 3 answers, 5.9 s, p95 9.3 s
+  44fd7587  since 2026-11-01 01:30: 3 answers, 13.1 s, p95 28.6 s  [drift] +124% slower than e5ea938d on qwen2.5:1.5b
+[...]
+```
+
+These are real runs with `qwen2.5:1.5b`: the same three questions asked with the default prompt, then with a system prompt asking for detailed answers, which the small model ignored (the answers did not get longer, nor slower), then with one asking to copy each excerpt and explain it before answering. That last one doubled the time of the answers: one of them took 28.6 seconds for 316 tokens.
+
+`monitoring/log.py`: `Agent.run` watches the events of each message and logs it once it is over, even when it fails (Ollama not running, Ctrl+C): the error is logged, then raised as before. A log that cannot be written is a warning, never a reason to stop an answer. The agents of `/review` are logged too, each with its persona, so that the slowest step of a review shows up. The question, the prompt and the answer are logged as they are after the guardrails: a rule that redacts the name of a source redacts it in the log too. `SENSAI_LOG_CONTENT=false` keeps only the measures, without any text; `/stats clear` empties the log.
+
+`monitoring/metrics.py`: `summarize` computes the metrics of a period, without printing them, so that another interface can show them. The times are those of the answers of the model: an answer from the cache or a blocked message would make them look faster. The p95 is the time 95% of the answers stay under: an average hides the few very slow answers. The first word is the first one shown, after the output guardrails, which hold back the end of the text to find a name cut in two: on a short answer, it comes with the last one. The version of the prompt is a hash of the system prompt (the persona or `SENSAI_SYSTEM_PROMPT`) and of the instructions written in the code for the documents and the reasoning: any change to them is a new version. A version whose answers are at least 50% slower than those of the previous one, on the same model and with at least three answers on each side, is flagged as a drift. With three answers, one long answer is enough to raise it, as above: the more answers, the more the alert can be trusted.
+
+A graphical dashboard was left for later: `/stats` already shows what the metrics are for, and `summarize` keeps them apart from their display. Observability tools like [Langfuse](https://langfuse.com) were ruled out: even self-hosted, they run as a web service with its own database, a lot to install next to a CLI that works offline, when one SQLite file next to the index is enough.
+
 ### Tools
 
 The model can call tools with [Ollama's tool calling](https://docs.ollama.com/capabilities/tool-calling). A tool is a plain Python function: the Ollama SDK builds the description sent to the model from its type hints and its docstring (`Args:`, `Returns:`). The model answers with tool calls instead of text, Sensai runs them and sends the results back, and the model continues with them. A turn allows up to `SENSAI_MAX_TOOL_ROUNDS` rounds of calls, then the model has to answer.
@@ -332,6 +362,7 @@ python -m sensai --resume 20261027-153012   # continue a given one (/sessions li
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
 python -m sensai status                  # what the index contains
+python -m sensai stats --days 30         # the metrics of the messages of the last 30 days
 python -m sensai -p fact_checker         # start with another persona
 ```
 
@@ -379,6 +410,7 @@ Sources:
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/reasoning [N]` | list the questions reasoned about in this conversation, or show the steps of question N |
 | `/cache [clear]` | show how many answers the cache keeps and how often they were reused, or remove them all |
+| `/stats [DAYS\|clear]` | show the metrics of the messages of the last DAYS days (7 by default), or empty the log |
 | `/help` | list the commands |
 
 Long conversations do not overflow the model's context window. Sensai estimates the size of each message before sending it and counts the tokens used once it is answered (as reported by Ollama); once they reach `SENSAI_COMPACT_THRESHOLD` percent of `SENSAI_NUM_CTX`, the oldest turns are condensed into a summary that keeps names, amounts, dates, sources and open leads, while the last `SENSAI_KEEP_RECENT_TURNS` turns stay verbatim. The summary takes about an eighth of the context window:
@@ -505,6 +537,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
 | `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
+| `SENSAI_FEATURE_LOGGING` | `true` | log every message with its prompt, answer, tools, time and tokens |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_SESSIONS_DIR` | `.sensai/sessions` | folder where conversations are saved |
@@ -532,6 +565,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FILES_DENY` | empty | name patterns never readable nor writable inside these folders, like `sources,*.key`; `.env`, `.sensai` and `.git` always are |
 | `SENSAI_MAX_TOOL_ROUNDS` | `5` | rounds of tool calls allowed per message before the model has to answer (1-20) |
 | `SENSAI_APPROVAL` | `critical` | when to ask before running a tool: `critical` (tools that send data out or run code), `all`, `off` |
+| `SENSAI_LOG_PATH` | `.sensai/logs.db` | SQLite file holding the log of every message |
+| `SENSAI_LOG_CONTENT` | `true` | `false` logs only the measures: no question, prompt nor answer |
 
 ### Features
 
@@ -548,6 +583,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 | `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
+| `logging` | the log of every message; the log is kept, and `python -m sensai stats` still reads it, when it is off |
 
 The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
