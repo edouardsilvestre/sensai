@@ -6,8 +6,8 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from collections.abc import Callable, Generator
+from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 
 from sensai.core.agent import INTERRUPTED, STOPPED, Agent, EmptyInputError
@@ -31,6 +31,7 @@ from sensai.core.events import (
     ExamplesEvent,
     ExamplesFailedEvent,
     GuardrailEvent,
+    LogFailedEvent,
     ReasoningStoppedEvent,
     ReviewDoneEvent,
     SourcesEvent,
@@ -50,7 +51,7 @@ from sensai.core.evaluation.runner import (
     load_results,
     run_eval,
     save_results,
-    summarize,
+    summarize as summarize_eval,
 )
 from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
@@ -59,6 +60,8 @@ from sensai.core.memory.conversation import Turn
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
+from sensai.core.monitoring.log import InteractionLog, LogError
+from sensai.core.monitoring.metrics import Group, Report, Timing, summarize
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, compare, comparison, diff
@@ -119,6 +122,7 @@ Commands:
   /cache [clear]          show the answers kept to reuse, or remove them all
   /examples               list the answers kept as examples, * marks those shown for the last answer
   /example add|remove N   keep the last answer as an example for similar questions, or remove example N
+  /stats [DAYS|clear]     show the metrics of the last DAYS days (7 by default), or clear the log
   /prompts                list the versions of the system prompt, * marks the one in use
   /prompt show|use N      read version N of the system prompt, or use it from now on (roll back)
   /prompt diff N M        show what changed between versions N and M
@@ -147,6 +151,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model)"
     )
     commands.add_parser("status", help="show what the document index contains")
+    stats_parser = commands.add_parser("stats", help="show the metrics of the messages logged")
+    stats_parser.add_argument("--days", type=int, default=7, metavar="N", help="the last N days (default: 7)")
     eval_parser = commands.add_parser("eval", help="answer a set of questions and score the answers")
     eval_parser.add_argument("cases", type=Path, metavar="FILE", help='the questions: {"cases": [{"question": ...}]}')
     eval_parser.add_argument("--out", type=Path, metavar="FILE", help="write the answers and their scores there")
@@ -251,6 +257,87 @@ def run_status(config: Config) -> int:
     return 0
 
 
+OUTCOME_LABELS = {
+    "answered": "answered", "cached": "from the cache", "blocked": "blocked", "stopped": "stopped", "error": "errors",
+}
+
+
+def seconds(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f} s"
+
+
+def describe_timing(timing: Timing | None) -> str:
+    if timing is None:
+        return "no answer"
+    return f"{plural(timing.answers, 'answer')}, {seconds(timing.average)}, p95 {seconds(timing.p95)}"
+
+
+def print_groups(title: str, groups: list[Group], label=lambda group: group.name) -> None:
+    print(f"\n{title}:")
+    width = max(len(label(group)) for group in groups)
+    for group in groups:
+        errors = f", {plural(group.errors, 'error')}" if group.errors else ""
+        messages = plural(group.messages, "message")
+        print(f"  {label(group):<{width}}  {messages}{errors}: {describe_timing(group.timing)}")
+
+
+def print_stats(report: Report, days: int) -> None:
+    if not report.messages:
+        print(f"No messages logged in the last {plural(days, 'day')}.")
+        return
+    print(
+        f"Last {plural(days, 'day')}: {plural(report.messages, 'message')} in "
+        f"{plural(report.conversations, 'conversation')}, {plural(report.errors, 'error')} ({report.error_rate:.0%})."
+    )
+    timing = report.timing
+    if timing is not None:
+        first = f", first word after {seconds(timing.first_word)}" if timing.first_word is not None else ""
+        print(
+            f"Answers: {seconds(timing.average)} on average, {seconds(timing.p95)} for the slowest 5% (p95){first}."
+        )
+        print(f"Tokens: {report.prompt_tokens} sent and {report.completion_tokens} received per answer.")
+    outcomes = [f"{count} {OUTCOME_LABELS[outcome]}" for outcome, count in report.outcomes.items() if count]
+    print(f"Outcomes: {', '.join(outcomes)}.")
+    print_groups("By day", report.days)
+    drifts = {drift.version: drift for drift in report.drifts}
+    print("\nBy prompt version:")
+    for group in report.versions:
+        drift = drifts.get(group.name)
+        alert = f"  [drift] {drift.change:+.0%} slower than {drift.previous} on {drift.model}" if drift else ""
+        since = f"{group.since.astimezone():%Y-%m-%d %H:%M}"
+        print(f"  {group.name or '-'}  since {since}: {describe_timing(group.timing)}{alert}")
+    print_groups("By model", report.models)
+    print_groups("By persona", report.personas, lambda group: group.name or "no persona")
+    if report.tools:
+        print(f"\nTools: {', '.join(f'{name} {count}' for name, count in report.tools)}.")
+
+
+def logged_since(log: InteractionLog, days: int) -> Report:
+    return summarize(log.since(datetime.now(timezone.utc) - timedelta(days=days)))
+
+
+def run_stats(config: Config, days: int) -> int:
+    if days < 1:
+        error("--days must be at least 1")
+        return 1
+    if not config.log_path.exists():
+        print(f"No log at {config.log_path} yet: chat with Sensai, every message is logged.")
+        return 0
+    try:
+        log = InteractionLog(config.log_path)
+    except LogError as e:
+        error(str(e))
+        return 1
+    try:
+        print_stats(logged_since(log, days), days)
+    except LogError as e:
+        error(str(e))
+        return 1
+    finally:
+        log.close()
+    return 0
+
+
 @dataclass
 class Session:
     config: Config
@@ -269,6 +356,7 @@ class Session:
     answered: tuple[Turn, list[SearchResult]] | None = None
     prompts: PromptStore | None = None
     schedule: Schedule | None = None
+    log: InteractionLog | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -402,12 +490,21 @@ def chat_turn(session: Session, line: str) -> None:
         session.answered = (turns[-1], list(session.last_sources))
 
 
+def name_conversation(session: Session) -> None:
+    agent = session.agent
+    if session.session_id is not None:
+        agent.session_id = session.session_id
+    elif not agent.session_id and session.store is not None:
+        agent.session_id = session.store.new_id()
+
+
 def show_events(
     session: Session,
-    events: Generator[Event, None, None],
+    events: Generator[Event, None, None] | Iterator[Event],
     structured: bool = False,
     interrupt: Callable[[], bool] | None = None,
 ) -> None:
+    name_conversation(session)
     sources: list[SearchResult] = []
     mid_line = False
     try:
@@ -428,6 +525,8 @@ def show_events(
                 print(f"[examples] {plural(len(event.examples), 'example')}: {questions}")
             elif isinstance(event, ExamplesFailedEvent):
                 warning(f"No examples were shown to the model: {event.message}")
+            elif isinstance(event, LogFailedEvent):
+                warning(f"This message was not logged: {event.message}")
             elif isinstance(event, CheckStartedEvent):
                 print(
                     f"[check] Checking {plural(event.sentences, 'sentence')} with {event.model}, "
@@ -531,12 +630,13 @@ def save_session(session: Session) -> None:
     if session.store is None or not session.config.features["sessions"] or not (memory.turns or memory.summary):
         return
     if session.session_id is None:
-        session.session_id = session.store.new_id()
+        session.session_id = session.agent.session_id or session.store.new_id()
     try:
         persona = session.agent.persona
+        prompt_ver = session.agent.prompt_version if isinstance(session.agent.prompt_version, int) else None
         session.store.save(
             session.session_id, memory, session.config.model,
-            persona.id if persona else None, session.agent.prompt_version,
+            persona.id if persona else None, prompt_ver,
         )
     except SessionError as e:
         warning(f"The conversation is not saved: {e}")
@@ -596,6 +696,7 @@ def new_command(session: Session) -> None:
     previous = session.session_id
     session.agent.memory.clear()
     session.session_id = None
+    session.agent.session_id = ""
     session.last_sources = []
     session.agent.reasoning.clear()
     session.answered = None
@@ -898,6 +999,8 @@ def feature_command(session: Session, argument: str) -> None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
     if name == "examples" and value == "on" and session.examples is None:
         session.examples = session.agent.examples = load_examples(config, session.agent.client)
+    if name == "logging" and value == "on" and session.log is None:
+        session.log = session.agent.log = load_log(config)
     if name == "prompt_versions":
         if value == "on" and session.prompts is None:
             session.prompts = session.agent.prompts = load_prompts(config)
@@ -961,6 +1064,7 @@ def review_command(session: Session, argument: str) -> None:
     if not argument:
         error("Usage: /review QUESTION")
         return
+    name_conversation(session)
     try:
         review = Review(session.agent, session.personas)
     except ReviewError as e:
@@ -1084,6 +1188,27 @@ def example_command(session: Session, argument: str) -> None:
         error(str(e))
         return
     print(f'Example {number} removed: "{removed.question}"')
+
+
+def stats_command(session: Session, argument: str) -> None:
+    if argument and argument != "clear" and not (argument.isdecimal() and int(argument) >= 1):
+        error("Usage: /stats [DAYS|clear], with DAYS at least 1")
+        return
+    log = session.log
+    if log is None:
+        if session.config.features["logging"]:
+            print("The log could not be opened: /feature logging on to try again.")
+        else:
+            print("The logging feature is off: /feature logging on to log the messages and see their metrics.")
+        return
+    try:
+        if argument == "clear":
+            print(f"Log cleared: {plural(log.clear(), 'message')} removed.")
+            return
+        days = int(argument or 7)
+        print_stats(logged_since(log, days), days)
+    except LogError as e:
+        error(str(e))
 
 
 def created_on(version: PromptVersion) -> str:
@@ -1352,6 +1477,8 @@ def handle_command(session: Session, line: str) -> bool:
         list_examples(session)
     elif name == "/example":
         example_command(session, argument.lower())
+    elif name == "/stats":
+        stats_command(session, argument.lower())
     elif name == "/prompts":
         list_prompts(session)
     elif name == "/prompt":
@@ -1407,6 +1534,14 @@ def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None
         warning(f"Examples disabled: {e}")
         return None
     return examples
+
+
+def load_log(config: Config) -> InteractionLog | None:
+    try:
+        return InteractionLog(config.log_path)
+    except LogError as e:
+        warning(f"Logging disabled: {e}")
+        return None
 
 
 def load_prompts(config: Config) -> PromptStore | None:
@@ -1507,6 +1642,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     agent = session.agent
     if config.features["cache"]:
         session.cache = agent.cache = load_cache(config, agent.client)
+    if config.features["logging"]:
+        session.log = agent.log = load_log(config)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     agent.confirm_cache = confirm_cached
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
@@ -1527,7 +1664,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:
-        version = f" (prompt version {agent.prompt_version})" if agent.prompt_version else ""
+        version = f" (prompt version {agent.prompt_version})" if isinstance(agent.prompt_version, int) else ""
         print(f"Persona: {agent.persona.name}{version}. /personas to list them, /persona ID to switch.")
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
@@ -1553,6 +1690,8 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             session.index.close()
         if session.cache is not None:
             session.cache.close()
+        if session.log is not None:
+            session.log.close()
 
 
 def percent(value: float | None) -> str:
@@ -1600,7 +1739,7 @@ def change(name: str, before: float | None, after: float | None, unit: str) -> s
 
 
 def print_comparison(path: Path, before: dict, old: list[CaseResult], results: list[CaseResult]) -> None:
-    previous, current = summarize(old), summarize(results)
+    previous, current = summarize_eval(old), summarize_eval(results)
     print(f"\nCompared with {path} ({before.get('date', '?')[:10]}, {before.get('model', '?')}):")
     for name, unit in (("expected", "%"), ("faithfulness", "%"), ("relevance", "/5"), ("coherence", "/5")):
         print(change(name, getattr(previous, name), getattr(current, name), unit))
@@ -1643,7 +1782,7 @@ def run_eval_command(config: Config, path: Path, out: Path | None, compare: Path
     finally:
         if index is not None:
             index.close()
-    print_summary(summarize(results))
+    print_summary(summarize_eval(results))
     if compare:
         print_comparison(compare, before, old, results)
     if out:
@@ -1750,6 +1889,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
+    if args.command == "stats":
+        return run_stats(config, args.days)
     if args.command == "eval":
         return run_eval_command(config, args.cases, args.out, args.compare)
     if args.command == "schedule":

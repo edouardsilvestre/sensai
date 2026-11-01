@@ -11,7 +11,7 @@ VARIABLES = [
     "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
-    "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
+    "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD", "SENSAI_LOG_PATH", "SENSAI_LOG_CONTENT",
     "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K", "SENSAI_SCHEDULE_PATH", "SENSAI_REPORTS_DIR",
     "SENSAI_PROMPTS_DIR", "SENSAI_PROMPT_CASES_PATH", "SENSAI_JUDGE_MODEL", "SENSAI_JUDGE_MAX_TOKENS",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
@@ -38,7 +38,7 @@ def test_features_have_their_default(env_file):
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
         "orchestration": True, "branching": True, "reasoning": False, "cache": True, "examples": True,
-        "prompt_versions": True, "schedule": True, "fact_check": False,
+        "prompt_versions": True, "schedule": True, "logging": True, "fact_check": False,
     }
 
 
@@ -86,6 +86,17 @@ def test_memory_files_from_environment(env_file, monkeypatch):
 def test_memory_path_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_MEMORY_PATH", "/cases/alvor/memory.db")
     assert load_config(env_file).memory_path == Path("/cases/alvor/memory.db")
+
+
+def test_log_settings_from_environment(env_file, monkeypatch):
+    config = load_config(env_file)
+    assert (config.log_path, config.log_content) == (Path(".sensai/logs.db"), True)
+    monkeypatch.setenv("SENSAI_LOG_PATH", "/cases/alvor/logs.db")
+    monkeypatch.setenv("SENSAI_LOG_CONTENT", "false")
+    config = load_config(env_file)
+    assert (config.log_path, config.log_content) == (Path("/cases/alvor/logs.db"), False)
+
+
 def test_guardrails_path_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_GUARDRAILS_PATH", "/cases/alvor/guardrails.json")
     assert load_config(env_file).guardrails_path == Path("/cases/alvor/guardrails.json")
@@ -244,6 +255,8 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
     ("name", "value"),
     [
         ("SENSAI_THINK", "maybe"),
+        ("SENSAI_FEATURE_LOGGING", "maybe"),
+        ("SENSAI_LOG_CONTENT", "maybe"),
         ("SENSAI_FEATURE_RAG", "maybe"),
         ("SENSAI_FEATURE_TOOLS", "maybe"),
         ("SENSAI_RAG_TOP_K", "five"),

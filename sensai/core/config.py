@@ -43,6 +43,7 @@ FEATURES = {
     "examples": Feature("show the model your answers kept as examples, for similar questions"),
     "prompt_versions": Feature("keep every version of the system prompt, to compare them and roll back"),
     "schedule": Feature("run the scheduled tasks and write their reports"),
+    "logging": Feature("log every message with its prompt, answer, tools, time and tokens"),
     "fact_check": Feature("check each answer against its excerpts and flag what they do not support", default=False),
 }
 APPROVAL_MODES = ("critical", "all", "off")
@@ -103,6 +104,8 @@ class Config:
     max_tool_rounds: int = 5
     max_review_rounds: int = 2
     approval: str = "critical"
+    log_path: Path = Path(".sensai/logs.db")
+    log_content: bool = True
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -212,6 +215,8 @@ def load_config(path: Path | None = None) -> Config:
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
         max_review_rounds=_int_env("SENSAI_MAX_REVIEW_ROUNDS", Config.max_review_rounds, minimum=1, maximum=5),
         approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
+        log_path=Path(os.getenv("SENSAI_LOG_PATH", str(Config.log_path))),
+        log_content=_bool_env("SENSAI_LOG_CONTENT") is not False,
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")

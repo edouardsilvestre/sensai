@@ -68,6 +68,11 @@ class ExamplesFailedEvent:
 
 
 @dataclass
+class LogFailedEvent:
+    message: str
+
+
+@dataclass
 class CheckStartedEvent:
     sentences: int
     model: str
@@ -154,6 +159,7 @@ Event = (
     | ExamplesEvent
     | ExamplesFailedEvent
     | DoneEvent
+    | LogFailedEvent
     | CheckStartedEvent
     | CheckEvent
     | CheckFailedEvent
