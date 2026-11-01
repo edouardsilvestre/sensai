@@ -141,7 +141,7 @@ def test_compare_scores_both_versions_and_keeps_the_result(session, client, caps
     )
     handle_command(session, "/prompt compare 1 2")
     out = capsys.readouterr().out
-    assert "Version 1: asking 2 cases to chat-model..." in out
+    assert "Comparing versions 1 and 2 on the test cases with chat-model..." in out
     rows = [line.split()[:2] for line in out.splitlines() if line[:1].isdigit()]
     assert rows == [["1", "1/2"], ["2", "2/2"]]
     assert 'version 1, case 2 (Rumours?): contains "rumour"' in out

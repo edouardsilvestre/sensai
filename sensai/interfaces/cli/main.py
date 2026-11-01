@@ -44,7 +44,7 @@ from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
-from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, comparison, diff, load_cases, score
+from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, compare, comparison, diff
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
@@ -972,17 +972,11 @@ def print_scores(scores: list[VersionScore]) -> None:
 
 def compare_prompts(session: Session, persona_id: str, versions: list[PromptVersion]) -> None:
     config = session.config
+    numbers = " and ".join(str(version.number) for version in versions)
+    print(f"Comparing versions {numbers} on the test cases with {config.model}...")
     try:
-        cases = load_cases(config.prompt_cases_path)
-    except PromptError as e:
-        error(str(e))
-        return
-    scores = []
-    try:
-        for version in versions:
-            print(f"Version {version.number}: asking {plural(len(cases), 'case')} to {config.model}...")
-            scores.append(score(session.agent.client, config, version, cases))
-    except LLMError as e:
+        scores = compare(session.agent.client, config, versions)
+    except (PromptError, LLMError) as e:
         error(str(e))
         return
     except KeyboardInterrupt:

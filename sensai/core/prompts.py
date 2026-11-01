@@ -232,6 +232,12 @@ def score(
     return VersionScore(version.number, results)
 
 
+def compare(client: OllamaClient, config: Config, versions: list[PromptVersion]) -> list[VersionScore]:
+    """Loads the test cases once, so that every version is scored on the same ones, then asks them with each version."""
+    cases = load_cases(config.prompt_cases_path)
+    return [score(client, config, version, cases) for version in versions]
+
+
 def comparison(model: str, scores: list[VersionScore]) -> dict:
     return {
         "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),

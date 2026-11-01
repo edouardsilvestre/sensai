@@ -5,7 +5,7 @@ import pytest
 from sensai.core.agent import Agent
 from sensai.core.persona import Persona
 from sensai.core.prompts import (
-    COMPARE_OPTIONS, Case, PromptError, PromptStore, PromptVersion, check, diff, load_cases, score,
+    COMPARE_OPTIONS, Case, PromptError, PromptStore, PromptVersion, check, compare, diff, load_cases, score,
 )
 
 EDITOR = Persona("editor", "Editor", "an editor.", "clear.", "write drafts.")
@@ -136,3 +136,18 @@ def test_score_fixes_the_sampling(config, client):
     client.chat = lambda model, messages, opts=None, think=None, usage=None: options.append(opts) or ""
     score(client, config, PromptVersion(1, "Be clear.", ""), [Case("Who?")])
     assert options == [{"num_ctx": config.num_ctx, **COMPARE_OPTIONS}]
+
+
+def test_compare_scores_every_version_on_the_same_cases(config, client):
+    write_cases(config.prompt_cases_path, [{"question": "Who?"}, {"question": "When?"}])
+    versions = [PromptVersion(1, "Be clear.", ""), PromptVersion(2, "Be short.", "")]
+    scores = compare(client, config, versions)
+
+    assert [result.version for result in scores] == [1, 2]
+    assert [messages[0]["content"] for messages in client.summaries] == ["Be clear.", "Be clear.", "Be short.", "Be short."]
+
+
+def test_compare_without_cases_asks_nothing(config, client):
+    with pytest.raises(PromptError, match="No test cases"):
+        compare(client, config, [PromptVersion(1, "Be clear.", "")])
+    assert client.summaries == []
