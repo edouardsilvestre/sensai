@@ -451,6 +451,8 @@ class Agent:
                 pending.insert(-1, {"role": "system", "content": examples_message(chosen)})
         usage = Usage()
         options = {"num_ctx": self.config.num_ctx}
+        if self.config.temperature is not None:
+            options["temperature"] = self.config.temperature
         # The schema constrains every token of the answer: the model could not call a tool.
         functions = self.tools.tools() if self.config.features["tools"] and format is None else []
         used_tools = False
