@@ -107,17 +107,21 @@ def parse_case(raw: dict) -> AttackCase:
     )
 
 
-def load_suite(path: Path) -> list[AttackCase]:
+DEFAULT_SUITE_PATH = Path(__file__).parent / "suite.json"
+
+
+def load_suite(path: Path | None = None) -> list[AttackCase]:
+    suite_path = path or DEFAULT_SUITE_PATH
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(suite_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as e:
-        raise AdversarialError(f"Cannot read attack suite from {path}: {e}") from None
+        raise AdversarialError(f"Cannot read attack suite from {suite_path}: {e}") from None
     except json.JSONDecodeError as e:
-        raise AdversarialError(f"Invalid JSON in attack suite {path}: {e}") from None
+        raise AdversarialError(f"Invalid JSON in attack suite {suite_path}: {e}") from None
     if not isinstance(data, dict) or not isinstance(data.get("attacks"), list):
-        raise AdversarialError(f"Invalid suite file {path}: expected {{\"attacks\": [...]}}")
+        raise AdversarialError(f"Invalid suite file {suite_path}: expected {{\"attacks\": [...]}}")
     if not data["attacks"]:
-        raise AdversarialError(f"Attack suite {path} contains no attack cases")
+        raise AdversarialError(f"Attack suite {suite_path} contains no attack cases")
     cases = [parse_case(item) for item in data["attacks"]]
     seen = set()
     for case in cases:
@@ -125,6 +129,3 @@ def load_suite(path: Path) -> list[AttackCase]:
             raise AdversarialError(f"Duplicate attack case id: '{case.id}'")
         seen.add(case.id)
     return cases
-
-
-DEFAULT_SUITE_PATH = Path(__file__).parent / "suite.json"
