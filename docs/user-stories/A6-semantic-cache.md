@@ -16,7 +16,7 @@ As an investigative journalist about to publish an amount, I want to decide myse
 
 Acceptance criteria:
 - An answer kept is never shown without my confirmation: `n`, `Ctrl+D` or an interface that cannot ask lets the model answer, and an empty or unclear reply asks again.
-- Only the questions asked in the same context are compared: the same model, the same conversation so far (persona, profile, earlier turns), the same indexed documents, the same guardrail rules and the same `rag`, `tools` and `reasoning` features. A follow-up question, another persona, a changed document or a new rule gets a new answer, so a name protected by a new rule never shows up in an answer kept before it.
+- Only the questions asked in the same context are compared: the same model, the same conversation so far (persona, profile, earlier turns), the same indexed documents, the same guardrail rules, the same answers kept as examples and the same `rag`, `tools` and `reasoning` features. A follow-up question, another persona, a changed document, a new rule or a new example gets a new answer, so a name protected by a new rule never shows up in an answer kept before it.
 - An answer that called a tool, that a guardrail stopped, that is empty or in JSON is not kept, and a message blocked by a guardrail never reaches the cache.
 
 ## Remove the answers I no longer trust

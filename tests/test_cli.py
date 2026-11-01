@@ -38,6 +38,7 @@ def test_features_lists_every_feature(session, capsys):
         ["orchestration", "on", "let /review have the answer checked by the fact-checker and written by the editor"],
         ["reasoning", "off", "reason step by step and show each step before answering"],
         ["cache", "on", "reuse the answer to a close question already asked, once you confirm it"],
+        ["examples", "on", "show the model your answers kept as examples, for similar questions"],
     ]
 
 
