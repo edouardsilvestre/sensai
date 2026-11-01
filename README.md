@@ -938,6 +938,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_PERSONAS_DIR` | `personas/` of the repository | folder of the persona files |
 | `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation when no persona is active |
 | `SENSAI_NUM_CTX` | `16384` | context window of the chat model, in tokens |
+| `SENSAI_TEMPERATURE` | model default | temperature of the chat model (0-2), lower for steadier answers |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
 | `SENSAI_FEATURE_HYBRID` | `true` | also search the documents by their exact words (FTS5, BM25), merged with the semantic search |

@@ -68,6 +68,7 @@ class Config:
     host: str = "http://localhost:11434"
     system_prompt: str = ""
     num_ctx: int = 16384
+    temperature: float | None = None
     think: bool | None = None
     persona: str = ""
     personas_dir: Path = DEFAULT_PERSONAS_DIR
@@ -136,6 +137,19 @@ def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) 
     return value
 
 
+def _temperature_env(name: str) -> float | None:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"{name} must be a number, got '{raw}'") from None
+    if not 0 <= value <= 2:
+        raise ConfigError(f"{name} must be between 0 and 2, got {value}")
+    return value
+
+
 def _bool_env(name: str) -> bool | None:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
@@ -192,6 +206,7 @@ def load_config(path: Path | None = None) -> Config:
         host=os.getenv("OLLAMA_HOST", Config.host),
         system_prompt=os.getenv("SENSAI_SYSTEM_PROMPT", Config.system_prompt),
         num_ctx=_int_env("SENSAI_NUM_CTX", Config.num_ctx, minimum=512),
+        temperature=_temperature_env("SENSAI_TEMPERATURE"),
         think=_bool_env("SENSAI_THINK"),
         persona=os.getenv("SENSAI_PERSONA", Config.persona).strip(),
         personas_dir=Path(os.getenv("SENSAI_PERSONAS_DIR", "").strip() or Config.personas_dir),
