@@ -4,6 +4,7 @@ import shlex
 import sys
 import textwrap
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.monitoring.log import InteractionLog, LogError
+from sensai.core.monitoring.metrics import Group, Report, Timing, summarize
 from sensai.core.orchestrator import Review, ReviewError
 from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.rag.embedder import Embedder
@@ -87,6 +89,7 @@ Commands:
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /reasoning [N]          list the questions reasoned about, or show the steps of question N
   /cache [clear]          show the answers kept to reuse, or remove them all
+  /stats [DAYS|clear]     show the metrics of the last DAYS days (7 by default), or clear the log
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
@@ -106,6 +109,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model)"
     )
     commands.add_parser("status", help="show what the document index contains")
+    stats_parser = commands.add_parser("stats", help="show the metrics of the messages logged")
+    stats_parser.add_argument("--days", type=int, default=7, metavar="N", help="the last N days (default: 7)")
     return parser.parse_args(argv)
 
 
@@ -201,6 +206,87 @@ def run_status(config: Config) -> int:
     print(f"Documents: {stats.documents}, chunks: {stats.chunks}")
     if stats.embed_model and stats.embed_model != config.embed_model:
         warning(f"SENSAI_EMBED_MODEL is '{config.embed_model}': search is disabled until it matches the index.")
+    return 0
+
+
+OUTCOME_LABELS = {
+    "answered": "answered", "cached": "from the cache", "blocked": "blocked", "stopped": "stopped", "error": "errors",
+}
+
+
+def seconds(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f} s"
+
+
+def describe_timing(timing: Timing | None) -> str:
+    if timing is None:
+        return "no answer"
+    return f"{plural(timing.answers, 'answer')}, {seconds(timing.average)}, p95 {seconds(timing.p95)}"
+
+
+def print_groups(title: str, groups: list[Group], label=lambda group: group.name) -> None:
+    print(f"\n{title}:")
+    width = max(len(label(group)) for group in groups)
+    for group in groups:
+        errors = f", {plural(group.errors, 'error')}" if group.errors else ""
+        messages = plural(group.messages, "message")
+        print(f"  {label(group):<{width}}  {messages}{errors}: {describe_timing(group.timing)}")
+
+
+def print_stats(report: Report, days: int) -> None:
+    if not report.messages:
+        print(f"No messages logged in the last {plural(days, 'day')}.")
+        return
+    print(
+        f"Last {plural(days, 'day')}: {plural(report.messages, 'message')} in "
+        f"{plural(report.conversations, 'conversation')}, {plural(report.errors, 'error')} ({report.error_rate:.0%})."
+    )
+    timing = report.timing
+    if timing is not None:
+        first = f", first word after {seconds(timing.first_word)}" if timing.first_word is not None else ""
+        print(
+            f"Answers: {seconds(timing.average)} on average, {seconds(timing.p95)} for the slowest 5% (p95){first}."
+        )
+        print(f"Tokens: {report.prompt_tokens} sent and {report.completion_tokens} received per answer.")
+    outcomes = [f"{count} {OUTCOME_LABELS[outcome]}" for outcome, count in report.outcomes.items() if count]
+    print(f"Outcomes: {', '.join(outcomes)}.")
+    print_groups("By day", report.days)
+    drifts = {drift.version: drift for drift in report.drifts}
+    print("\nBy prompt version:")
+    for group in report.versions:
+        drift = drifts.get(group.name)
+        alert = f"  [drift] {drift.change:+.0%} slower than {drift.previous} on {drift.model}" if drift else ""
+        since = f"{group.since.astimezone():%Y-%m-%d %H:%M}"
+        print(f"  {group.name or '-'}  since {since}: {describe_timing(group.timing)}{alert}")
+    print_groups("By model", report.models)
+    print_groups("By persona", report.personas, lambda group: group.name or "no persona")
+    if report.tools:
+        print(f"\nTools: {', '.join(f'{name} {count}' for name, count in report.tools)}.")
+
+
+def logged_since(log: InteractionLog, days: int) -> Report:
+    return summarize(log.since(datetime.now(timezone.utc) - timedelta(days=days)))
+
+
+def run_stats(config: Config, days: int) -> int:
+    if days < 1:
+        error("--days must be at least 1")
+        return 1
+    if not config.log_path.exists():
+        print(f"No log at {config.log_path} yet: chat with Sensai, every message is logged.")
+        return 0
+    try:
+        log = InteractionLog(config.log_path)
+    except LogError as e:
+        error(str(e))
+        return 1
+    try:
+        print_stats(logged_since(log, days), days)
+    except LogError as e:
+        error(str(e))
+        return 1
+    finally:
+        log.close()
     return 0
 
 
@@ -818,6 +904,27 @@ def cache_command(session: Session, argument: str) -> None:
         print("The cache feature is off: /feature cache on to reuse them.")
 
 
+def stats_command(session: Session, argument: str) -> None:
+    if argument and argument != "clear" and not (argument.isdigit() and int(argument) >= 1):
+        error("Usage: /stats [DAYS|clear], with DAYS at least 1")
+        return
+    log = session.log
+    if log is None:
+        if session.config.features["logging"]:
+            print("The log could not be opened: /feature logging on to try again.")
+        else:
+            print("The logging feature is off: /feature logging on to log the messages and see their metrics.")
+        return
+    try:
+        if argument == "clear":
+            print(f"Log cleared: {plural(log.clear(), 'message')} removed.")
+            return
+        days = int(argument or 7)
+        print_stats(logged_since(log, days), days)
+    except LogError as e:
+        error(str(e))
+
+
 def print_structured(answer: str, sources: list[SearchResult]) -> None:
     try:
         data = parse_answer(answer)
@@ -872,6 +979,8 @@ def handle_command(session: Session, line: str) -> bool:
         reasoning_command(session, argument)
     elif name == "/cache":
         cache_command(session, argument.lower())
+    elif name == "/stats":
+        stats_command(session, argument.lower())
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -1042,6 +1151,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
+    if args.command == "stats":
+        return run_stats(config, args.days)
     return run_chat(config, args.resume)
 
 
