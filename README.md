@@ -9,7 +9,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 ### Key features
 
 - 🖥️ **Web UI**: `python -m sensai web` opens the same conversations in a simple page on this machine, with streaming, the context used, the personas, the features and approval buttons, and nothing loaded from the internet.
-- 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search is opt-in, and every query is shown before it is sent.
+- 🔒 **Fully offline by default**: no network access, no cloud, no data ever leaves the machine. Web search and public links are opt-in, and every query or page is shown before it leaves.
 - 💾 **Sessions & profile**: every conversation is saved and can be resumed days later, and a profile of standing instructions (the case, the language, what must never be written) is given to the model at the start of every conversation.
 - 🌿 **Branches & interruption**: `/edit` tries another question from any point of the conversation without losing the first version, and Ctrl+C stops an answer to redirect it.
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
@@ -18,7 +18,8 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), filtered by date, sender or kind, reranked so that only the excerpts that answer reach the model, and every answer cited to its source.
 - 🕸️ **Entity graph memory**: the model saves what is established about people, companies and places, and who is linked to whom, in a local database it reads and corrects across sessions.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
-- 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
+- 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported.
+- 📤 **Export & publication**: the conversation and the document go to Markdown, PDF, HTML or JSON, and, when turned on, to a frozen public page, checked by the guardrails and served apart from the chat, that a colleague opens without an account and that one command takes down.
 - 📊 **Code execution for financial analysis**: Sensai writes and runs code to analyze spreadsheets and trace money flows.
 - 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
@@ -523,6 +524,7 @@ Any other server is one more entry with its URL. It is the `mcp` feature, on by 
 - `input`: the message, before anything is searched or sent to the model. A blocked message is not answered and not kept in the history.
 - `tools`: the text arguments of each tool call, before it runs. A blocked call is not run: the model gets the reason as the tool's result, so it can call it again without the blocked data. `tools` limits a rule to some tools, like `web_search`, the only one that reaches the network.
 - `output`: the answer, while it is streamed. The last 80 characters are held back until the next chunk, so that a name split across two chunks is still found and a match is never shown in two pieces; the redacted answer is the one shown, kept and saved.
+- `publish`: a public page, before it is published. The rules on `input` and `output` apply to it too: see [Export & publication](#export--publication).
 
 A rule looks for one thing and does one of three actions, `block`, `redact` (replaced by `[NAME]` or its `replacement`) or `warn`:
 
@@ -541,7 +543,7 @@ Without a rules file, one rule applies: personal data is blocked in web searches
 
 `python -m sensai web` serves a page on `http://127.0.0.1:8000` (`--port` to change it): the same conversations, tools and guardrails as the CLI, in a browser.
 
-The page shows the answer as it is generated, with the searches, the tool calls, the thoughts and the result of `fact_check` above it and the sources cited below it. The sidebar lists the saved conversations, shared with the CLI, and `New chat` starts another one. The composer has the persona list and a gauge of the tokens used out of `SENSAI_NUM_CTX`, which turns orange when the oldest turns are about to be condensed. `Settings` turns the features on or off for this run, the stop button ends an answer and keeps what was written, and a tool that needs approval shows `Allow`, `Always this session` and `Deny`.
+The page shows the answer as it is generated, with the searches, the tool calls, the thoughts and the result of `fact_check` above it and the sources cited below it. The sidebar lists the saved conversations, shared with the CLI, and `New chat` starts another one. The composer has the persona list and a gauge of the tokens used out of `SENSAI_NUM_CTX`, which turns orange when the oldest turns are about to be condensed. `Settings` turns the features on or off for this run, `Export & share` downloads the conversation or the document and creates public links, the stop button ends an answer and keeps what was written, and a tool that needs approval shows `Allow`, `Always this session` and `Deny`.
 
 The backend does not change: `sensai/interfaces/web/server.py` is an interface like `cli/main.py`, it reads the events of `Agent.run` and reuses the functions of the CLI to start a session, save it and resume it.
 
@@ -558,6 +560,53 @@ The page is three static files in `sensai/interfaces/web/static/`, without a bui
 [Rich](https://github.com/Textualize/rich) was considered first, but it draws in a terminal: it does not make a web frontend. Textual can show a terminal application in a browser with `textual serve`, which is still not a frontend decoupled from the backend. React or Vue were ruled out because a build step and hundreds of packages are out of proportion for one page, on a project that has to be installed offline.
 
 Limits: there is one conversation at a time and one user, so two tabs share the same conversation. The stop button acts at the next event: it cannot cut a tool that is running, nor a model that has not written its first word yet. The gauge counts each piece of the stream as one token until Ollama gives the exact count at the end, and it is an estimate after a stop or a resume. The page has the chat, not all the commands: `/review`, `/json`, `/ingest`, `/edit`, `/schedule` and the other commands stay in the CLI, and the semantic cache is not offered, since confirming a cached answer has no screen yet. A model that writes its tool calls as text instead of using tool calling, like `granite3.1-moe` in our tests, never reaches the approval screen.
+
+### Export & publication
+
+A case does not stay in the chat: it is archived, sent to an editor, read by a colleague who has no Sensai. `/export PATH` writes the conversation and `/document export PATH` the working document; the end of the name says the format. The page has the same in `Export & share`.
+
+| Format | What it is for | What it holds |
+|---|---|---|
+| `.md` | reading and editing the text | the active branch, with the summary of the older messages and the sources cited |
+| `.pdf` | archiving and sending | the same, with numbered pages |
+| `.html` | one file to open or to host anywhere | the same, in the page used for the links |
+| `.json` | another tool, or an archive | the conversation as it is saved, with all its branches and tool calls: copied into `SENSAI_SESSIONS_DIR`, it can be resumed |
+
+A local export is a faithful copy: what goes in the archive of a case must not be changed, so the guardrails do not touch it.
+
+A public link is a different thing, because a journalist's first duty is not to give a source away. It is off by default, like everything that lets data leave the machine. With `SENSAI_FEATURE_SHARING=true` in `.env`, start the server next to the chat:
+
+```bash
+python -m sensai publish
+```
+
+```text
+> /share conversation
+Page: Who approved the transfer to Orion? (4 messages)
+Rule 'source': 3 redacted (SOURCE).
+Rule 'published-personal-data': 1 redacted (EMAIL).
+Sources named: mail_004.eml; releve_avril.pdf, page 3
+Anyone who gets the link can read this page, without logging in.
+Publish? [y]es / [n]o: y
+Published: http://192.168.1.20:8765/shared/5fbeea46937d32afbf3715a89d111e3e
+The page stays as it is now: the next messages are not added. The links answer while python -m sensai publish runs.
+```
+
+`/share conversation` publishes the active branch, `/share document` the working document, `/share` lists the links and `/share remove N` takes one down at once, without restarting anything. `Create a link` on the page shows the same preview, with `See the page` to read it before publishing.
+
+`sensai/core/export/`: `report.py` turns a conversation or the document into a `Report`, the same for every format, and `markdown.py` reads the Markdown once for the HTML of `page.py` and the PDF of `pdf.py`, the way the web page reads it.
+
+- **A second server.** The chat stays on `127.0.0.1`, without a login, because a conversation holds the case. `python -m sensai publish` (`interfaces/web/public.py`) is another process, which faces the network and only holds the folder of the pages: it starts without the model, does not load the chat, and answers `/shared/<link>` and a 404 for anything else. A route in the chat server would have put the case one bad check away from the network.
+- **A frozen copy.** The page is written once, as one file in `SENSAI_SHARES_DIR`: nothing in it follows the conversation, and the server has no access to the sessions. Removing the file takes the link down.
+- **The rules.** Publishing is the most outward thing Sensai does, so a page answers to every rule on `input` and `output`, plus the new `publish` stage. `redact` redacts, `warn` is reported in the preview, and `block` stops the publication. By default, `published-personal-data` redacts the personal data of a page. A `tools` rule is about one tool, and a `judge` rule about what the user may ask: neither applies.
+- **What is published.** The messages, the summary and the sources cited, nothing else: not the tool calls, the profile or the system prompt. Sources only keep their file name, since a folder can name the case. A file name goes through the rules with its `_`, `.` and `-` read as spaces, as `claire_benoit.eml` would not match the term `Claire Benoit`; if a rule finds something, the page says `[source hidden by a rule]`. The title is cut from the redacted message: cut first, a protected name would leave a piece no rule can find.
+- **The link is the only secret.** It holds 128 random bits, so it cannot be guessed. The server keeps no access log, the page has no script and loads nothing, and its headers keep it out of search engines and caches and keep the link from reaching the next site.
+
+Without configuration, the links use the address of this machine on its network, which is enough for a colleague on the same Wi-Fi. For anyone else, publish through a tunnel or a reverse proxy and set `SENSAI_PUBLIC_URL`: the chat writes the links, and it cannot know the address the world sees.
+
+For the PDF, [reportlab](https://www.reportlab.com/opensource/) does the layout: cutting paragraphs, code and lists across pages is its job, and its Vera fonts come with it. fpdf2 was ruled out because it has no Unicode font of its own, which would have added a binary to the repository. WeasyPrint needs GTK libraries, which is a lot to install offline on Windows, and printing from the browser would have left the CLI without a PDF. It is imported only when a PDF is asked for, so that a missing reportlab costs the PDF and nothing else.
+
+Limits: a public link is public. Anyone who gets it can read the page and pass it on, and a page already read or copied cannot be taken back. The rules only find what they were told to look for: a name that no rule knows stays in the page, which is why the preview comes first. The fonts of the PDF cover Western European languages: other alphabets and emojis are shown as `?`, and the PDF says how many, while the Markdown, the HTML and the JSON keep them. Tables stay as plain Markdown text, as they do on the web page. The page is served by this machine: it stops answering when `python -m sensai publish` stops, and there is no expiry date or view count.
 
 ### Adversarial testing (red-teaming)
 
@@ -701,6 +750,7 @@ python -m sensai --resume        # continue the last conversation
 python -m sensai --resume 20261027-153012   # continue a given one (/sessions lists them)
 python -m sensai web             # chat in a browser page on http://127.0.0.1:8000
 python -m sensai web --port 9000 # on another port
+python -m sensai publish         # serve the pages published with /share, to whoever has their link
 
 python -m sensai ingest ~/leak/          # index a folder (or files) for document search
 python -m sensai ingest --rebuild ~/leak/   # start over, e.g. after changing the embedding model
@@ -756,7 +806,12 @@ Sources:
 | `/profile [add TEXT\|remove N]` | show, add or remove the instructions sent to the model about you |
 | `/document` | show the working document |
 | `/document undo` | undo the changes made to the document by the last answer |
-| `/document export PATH` | write the document to a Markdown file |
+| `/document export PATH` | write the document to a `.md`, `.json`, `.pdf` or `.html` file |
+| `/export PATH` | write the conversation to a `.md`, `.json`, `.pdf` or `.html` file |
+| `/share` | list the public links |
+| `/share conversation` | publish a frozen copy of this conversation on a link anyone can open, after a preview |
+| `/share document` | publish a frozen copy of the document on a link anyone can open, after a preview |
+| `/share remove N` | take link N down |
 | `/json QUESTION` | answer in JSON that follows a schema: the answer, its claims with their excerpts, the entities and the events |
 | `/guardrails` | list the rules checking the messages, the answers and the tool calls |
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
@@ -900,6 +955,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
 | `SENSAI_FEATURE_EXAMPLES` | `true` | show the model the answers kept as examples, for the questions close to theirs |
 | `SENSAI_FEATURE_SCHEDULE` | `true` | let `python -m sensai schedule` run the scheduled tasks |
+| `SENSAI_FEATURE_SHARING` | `false` | publish on public links, and let `python -m sensai publish` serve them |
 | `SENSAI_FEATURE_PROMPT_VERSIONS` | `true` | keep every version of the system prompt, and use the one chosen with `/prompt use N` |
 | `SENSAI_FEATURE_LOGGING` | `true` | log every message with its prompt, answer, tools, time and tokens |
 | `SENSAI_FEATURE_FACT_CHECK` | `false` | check each answer against its excerpts and flag what they do not support |
@@ -920,6 +976,9 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_EXAMPLES_K` | `2` | examples shown to the model for each question, the closest ones first (0-5) |
 | `SENSAI_SCHEDULE_PATH` | `.sensai/schedule.json` | the scheduled tasks and the list of their reports |
 | `SENSAI_REPORTS_DIR` | `.sensai/reports` | folder of the reports, in Markdown |
+| `SENSAI_SHARES_DIR` | `.sensai/shared` | folder of the public pages |
+| `SENSAI_PUBLIC_PORT` | `8765` | port of `python -m sensai publish`, and of the links |
+| `SENSAI_PUBLIC_URL` | (the address of this machine) | what the links start with, behind a tunnel or a reverse proxy |
 | `SENSAI_PROMPTS_DIR` | `.sensai/prompts` | the versions of the system prompt (`system.json`) and the comparisons run |
 | `SENSAI_PROMPT_CASES_PATH` | `.sensai/prompt_cases.json` | the test questions of `/prompt compare` (see `prompt_cases.example.json`) |
 | `SENSAI_JUDGE_MODEL` | empty | model that checks the answers (/feature fact_check on); empty: the chat model |
@@ -970,8 +1029,9 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `prompt_versions` | the versions of the system prompt; the configured prompt is used, and the versions kept, when it is off |
 | `logging` | the log of every message; the log is kept, and `python -m sensai stats` still reads it, when it is off |
 | `fact_check` | the verification of each answer against its excerpts, off by default because each sentence is a call to `SENSAI_JUDGE_MODEL` |
+| `sharing` | `/share conversation`, `/share document` and `python -m sensai publish`, off by default because anyone with a link can read its page; listing the links and taking them down always work |
 
-The features are on by default, except `web_search`, `code_exec`, `files`, `reasoning` and `fact_check`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
+The features are on by default, except `web_search`, `code_exec`, `files`, `reasoning`, `fact_check` and `sharing`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.
 
 To add a feature, register it in `FEATURES` in `sensai/core/config.py`:
 

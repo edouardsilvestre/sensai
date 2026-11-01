@@ -39,7 +39,7 @@ def test_features_have_their_default(env_file):
         "rag": True, "hybrid": True, "rerank": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "questions": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
         "orchestration": True, "branching": True, "reasoning": False, "cache": True, "examples": True,
-        "prompt_versions": True, "schedule": True, "logging": True, "fact_check": False,
+        "prompt_versions": True, "schedule": True, "logging": True, "fact_check": False, "sharing": False,
     }
 
 

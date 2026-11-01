@@ -142,7 +142,7 @@ def test_stream_without_rules_is_unchanged():
 
 
 def test_missing_file_gives_the_default_rules(tmp_path):
-    assert [rule.name for rule in load_rules(tmp_path / "guardrails.json")] == ["personal-data"]
+    assert [rule.name for rule in load_rules(tmp_path / "guardrails.json")] == ["personal-data", "published-personal-data"]
 
 
 def test_rules_file_replaces_the_defaults(tmp_path):
@@ -152,7 +152,7 @@ def test_rules_file_replaces_the_defaults(tmp_path):
 
 
 def test_example_file_is_valid():
-    assert len(load_rules(Path(__file__).parent.parent / "guardrails.example.json")) == 4
+    assert len(load_rules(Path(__file__).parent.parent / "guardrails.example.json")) == 5
 
 
 @pytest.mark.parametrize(

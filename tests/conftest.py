@@ -116,6 +116,7 @@ def config(tmp_path) -> Config:
         chunk_size=200,
         chunk_overlap=40,
         sessions_dir=tmp_path / "sessions",
+        shares_dir=tmp_path / "shared",
         profile_path=tmp_path / "profile.md",
         memory_path=tmp_path / "memory.db",
         mcp_path=tmp_path / "mcp.json",

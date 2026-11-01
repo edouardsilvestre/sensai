@@ -48,6 +48,8 @@ FEATURES = {
     "schedule": Feature("run the scheduled tasks and write their reports"),
     "logging": Feature("log every message with its prompt, answer, tools, time and tokens"),
     "fact_check": Feature("check each answer against its excerpts and flag what they do not support", default=False),
+    # Off by default: what is published can be read by anyone who gets the link.
+    "sharing": Feature("publish a conversation or the document on a link anyone can open without logging in", default=False),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -85,6 +87,11 @@ class Config:
     prompt_cases_path: Path = Path(".sensai/prompt_cases.json")
     schedule_path: Path = Path(".sensai/schedule.json")
     reports_dir: Path = Path(".sensai/reports")
+    shares_dir: Path = Path(".sensai/shared")
+    # The chat writes the links and python -m sensai publish serves them: both read the port here.
+    public_port: int = 8765
+    # What the links start with, for a machine reached through a tunnel or a reverse proxy.
+    public_url: str = ""
     judge_model: str = ""
     judge_max_tokens: int = 1500
 
@@ -202,6 +209,9 @@ def load_config(path: Path | None = None) -> Config:
         prompt_cases_path=Path(os.getenv("SENSAI_PROMPT_CASES_PATH", str(Config.prompt_cases_path))),
         schedule_path=Path(os.getenv("SENSAI_SCHEDULE_PATH", str(Config.schedule_path))),
         reports_dir=Path(os.getenv("SENSAI_REPORTS_DIR", str(Config.reports_dir))),
+        shares_dir=Path(os.getenv("SENSAI_SHARES_DIR", str(Config.shares_dir))),
+        public_port=_int_env("SENSAI_PUBLIC_PORT", Config.public_port, minimum=1, maximum=65535),
+        public_url=os.getenv("SENSAI_PUBLIC_URL", Config.public_url).strip(),
         judge_model=os.getenv("SENSAI_JUDGE_MODEL", Config.judge_model).strip(),
         judge_max_tokens=_int_env("SENSAI_JUDGE_MAX_TOKENS", Config.judge_max_tokens, minimum=200, maximum=8000),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),

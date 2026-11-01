@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from conftest import FakeClient
 from sensai.core.agent import INTERRUPTED, Agent
+from sensai.core.document.document import Edit
 from sensai.core.evaluation.judge import Claim, Judgement
 from sensai.core.events import CheckEvent, CheckFailedEvent, CheckStartedEvent, LogFailedEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
@@ -47,8 +48,11 @@ def send(query: str) -> str:
     return f"sent {query}"
 
 
+SOURCE_RULE = {"name": "source", "terms": ["Hello there"], "on": ["output"], "replacement": "[SOURCE]"}
+
+
 class Excerpts:
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [SearchResult(chunk_id=1, text="Orion", location="p. 1", source="statutes.pdf", score=0.9, description="")]
 
 
@@ -158,7 +162,7 @@ def test_the_answers_are_never_inserted_as_html_without_escaping():
 def test_the_state_describes_the_page(page, config):
     state = page.get("/api/state").json()
     assert state["model"] == config.model and state["session"] is None and state["turns"] == []
-    assert state["context"] == {"used": 0, "limit": 8192, "condensed_from": 6144}
+    assert state["context"] == {"used": 0, "limit": 16384, "condensed_from": 12288}
     assert [persona["id"] for persona in state["personas"]] == ["editor", "fact_checker", "investigator"]
     assert {"name": "rag", "on": True, "description": "answer from the indexed documents"} in state["features"]
 
@@ -680,3 +684,114 @@ def test_the_web_command():
     args = parse_args(["web", "--port", "9000"])
     assert args.command == "web" and args.port == 9000
     assert parse_args(["web"]).port == 8000
+
+
+def test_the_conversation_can_be_downloaded(page):
+    ask(page)
+    response = page.get("/api/export/conversation.md")
+    assert response.status_code == 200 and "Who approved the transfer?" in response.text
+    assert response.headers["content-type"].startswith("text/markdown")
+    session = page.get("/api/state").json()["session"]
+    assert response.headers["content-disposition"] == f'attachment; filename="sensai-conversation-{session}.md"'
+
+
+@pytest.mark.parametrize(
+    ("suffix", "start"), [("json", b"{"), ("pdf", b"%PDF"), ("html", b"<!doctype html>")],
+)
+def test_every_format_can_be_downloaded(page, suffix, start):
+    ask(page)
+    assert page.get(f"/api/export/conversation.{suffix}").content.startswith(start)
+
+
+def test_the_document_can_be_downloaded(chat, page):
+    chat.session.agent.memory.document.apply([Edit("append", "Summary", "Paid in April.")])
+    assert "Paid in April." in page.get("/api/export/document.md").text
+    assert page.get("/api/state").json()["document"] is True
+
+
+def test_a_conversation_without_a_message_has_nothing_to_download(page):
+    response = page.get("/api/export/conversation.pdf")
+    assert response.status_code == 400 and response.json()["detail"] == "No message to export yet."
+
+
+@pytest.mark.parametrize("path", ["/api/export/conversation.docx", "/api/export/profile.md"])
+def test_only_the_known_exports_exist(page, path):
+    assert page.get(path).status_code == 422
+
+
+def test_nothing_is_exported_during_an_answer(chat, page):
+    chat.answering.acquire()
+    try:
+        assert page.get("/api/export/conversation.md").status_code == 409
+        assert page.get("/api/shares/conversation").status_code == 409
+    finally:
+        chat.answering.release()
+
+
+def test_a_public_link_needs_the_feature(page):
+    ask(page)
+    assert page.get("/api/state").json()["sharing"] is False
+    for response in (page.get("/api/shares/conversation"), page.post("/api/shares/conversation")):
+        assert response.status_code == 400 and "The sharing feature is off" in response.json()["detail"]
+    assert page.get("/api/shares").json() == {"shares": []}
+
+
+def test_a_public_link_is_previewed_then_published(chat, config, page):
+    config.features["sharing"] = True
+    config.public_url = "http://sensai.test"
+    chat.session.agent.guardrails = Guardrails(parse_rules([SOURCE_RULE]))
+    ask(page)
+
+    preview = page.get("/api/shares/conversation").json()
+    assert preview["blocked"] is None
+    assert preview["lines"][0] == "Page: Who approved the transfer? (1 message)"
+    assert page.get("/api/shares").json() == {"shares": []}
+
+    shown = page.get("/api/shares/conversation/page")
+    assert "[SOURCE]" in shown.text and "Hello" not in shown.text
+    assert "script-src" not in shown.headers["content-security-policy"]
+
+    link = page.post("/api/shares/conversation").json()["link"]
+    share = page.get("/api/shares").json()["shares"][0]
+    assert link == share["link"] == f"http://sensai.test/shared/{share['token']}"
+    assert share["kind"] == "conversation" and share["title"] == "Who approved the transfer?"
+    assert "[SOURCE]" in chat.session.shares.page(share["token"])
+
+
+def test_a_public_link_can_be_taken_down(chat, config, page):
+    config.features["sharing"] = True
+    ask(page)
+    page.post("/api/shares/conversation")
+    token = page.get("/api/shares").json()["shares"][0]["token"]
+    assert page.delete(f"/api/shares/{token}").status_code == 200
+    assert chat.session.shares.page(token) is None
+    assert page.delete(f"/api/shares/{token}").status_code == 404
+
+
+def test_a_public_link_can_be_taken_down_during_an_answer(chat, config, page):
+    config.features["sharing"] = True
+    ask(page)
+    page.post("/api/shares/conversation")
+    token = page.get("/api/shares").json()["shares"][0]["token"]
+    chat.answering.acquire()
+    try:
+        assert page.delete(f"/api/shares/{token}").status_code == 200
+    finally:
+        chat.answering.release()
+
+
+def test_a_block_rule_stops_the_public_link(chat, config, page):
+    config.features["sharing"] = True
+    rule = {"name": "stop", "terms": ["Hello"], "on": ["publish"], "action": "block"}
+    chat.session.agent.guardrails = Guardrails(parse_rules([rule]))
+    ask(page)
+    assert page.get("/api/shares/conversation").json()["blocked"].startswith("Not published: the rule 'stop'")
+    response = page.post("/api/shares/conversation")
+    assert response.status_code == 400 and chat.session.shares.list() == []
+
+
+def test_another_site_cannot_publish(config, page):
+    config.features["sharing"] = True
+    ask(page)
+    assert page.post("/api/shares/conversation", headers={"Origin": "http://evil.example"}).status_code == 403
+

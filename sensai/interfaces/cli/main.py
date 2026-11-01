@@ -65,11 +65,24 @@ from sensai.core.evaluation.runner import (
     summarize as summarize_eval,
 )
 from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
+from sensai.core.export.report import (
+    FORMATS,
+    YOU,
+    ExportError,
+    Publication,
+    Report,
+    conversation_report,
+    document_report,
+    prepare_publication,
+    render,
+    to_html,
+)
+from sensai.core.export.shares import Share, ShareError, ShareStore, public_link
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
 from sensai.core.memory.conversation import Turn
 from sensai.core.memory.profile import Profile, ProfileError
-from sensai.core.memory.sessions import SessionError, SessionStore
+from sensai.core.memory.sessions import SessionError, SessionStore, session_data
 from sensai.core.memory.store import MemoryStoreError
 from sensai.core.monitoring.log import InteractionLog, LogError
 from sensai.core.monitoring.metrics import Group, Report, Timing, summarize
@@ -94,6 +107,9 @@ EXIT_COMMANDS = {"/exit", "/quit"}
 ASK_USER = "ask_user"
 POLL_SECONDS = 15
 DEFAULT_WEB_PORT = 8000
+SHARE_KINDS = ("conversation", "document")
+SHARE_USAGE = "Usage: /share [conversation | document | remove N]"
+SERVE_HINT = "The links answer while python -m sensai publish runs."
 SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
 SCHEDULE_USAGE = f"Usage: /schedule add WHEN [--allow TOOL,TOOL] TASK, or /schedule remove N. WHEN is {WHEN_FORMS}"
 ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
@@ -126,7 +142,12 @@ Commands:
   /profile remove N       remove instruction N from your profile
   /document               show the working document the model keeps up to date
   /document undo          undo the changes made to the document by the last answer
-  /document export PATH   write the document to a Markdown file
+  /document export PATH   write the document to a .md, .json, .pdf or .html file
+  /export PATH            write the conversation to a .md, .json, .pdf or .html file
+  /share                  list the public links
+  /share conversation     publish a frozen copy of this conversation on a link anyone can open
+  /share document         publish a frozen copy of the document on a link anyone can open
+  /share remove N         take link N down
   /features               list the features and whether they are on
   /feature NAME on|off    turn a feature on or off for this session
   /personas               list the personas
@@ -193,6 +214,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
     web_parser = commands.add_parser("web", help="chat in a browser page")
     web_parser.add_argument("--port", type=int, default=DEFAULT_WEB_PORT, help=f"default: {DEFAULT_WEB_PORT}")
+    publish_parser = commands.add_parser("publish", help="serve the pages published with /share to whoever has their link")
+    publish_parser.add_argument("--host", default="0.0.0.0", help="the address to listen on (default: all of them)")
     return parser.parse_args(argv)
 
 
@@ -398,6 +421,7 @@ class Session:
     # Found for the last message, but under SENSAI_RERANK_THRESHOLD: never sent to the model.
     last_dropped: list[SearchResult] = field(default_factory=list)
     store: SessionStore | None = None
+    shares: ShareStore | None = None
     # Given at the first save, so that a conversation without any message is never saved.
     session_id: str | None = None
     profile: Profile | None = None
@@ -445,6 +469,19 @@ def confirm_cached(cached: CachedAnswer) -> bool:
     while True:
         try:
             answer = input("Use this answer? [y]es / [n]o: ").strip().lower()
+        except EOFError:
+            print()
+            return False
+        if answer in ALLOW_ANSWERS:
+            return True
+        if answer in REFUSE_ANSWERS:
+            return False
+
+
+def confirm(question: str) -> bool:
+    while True:
+        try:
+            answer = input(question).strip().lower()
         except EOFError:
             print()
             return False
@@ -730,6 +767,11 @@ def print_document_report(report: EditReport) -> None:
         warning(f"document edit rejected ({rejected.edit.describe()}): {rejected.reason}")
 
 
+def saved_fields(session: Session) -> dict:
+    persona = session.agent.persona
+    return {"persona": persona.id if persona else None, "prompt_version": session.agent.prompt_version}
+
+
 def save_session(session: Session) -> None:
     memory = session.agent.memory
     if session.store is None or not session.config.features["sessions"] or not (memory.turns or memory.summary):
@@ -737,12 +779,7 @@ def save_session(session: Session) -> None:
     if session.session_id is None:
         session.session_id = session.agent.session_id or session.store.new_id()
     try:
-        persona = session.agent.persona
-        prompt_ver = session.agent.prompt_version if isinstance(session.agent.prompt_version, int) else None
-        session.store.save(
-            session.session_id, memory, session.config.model,
-            persona.id if persona else None, prompt_ver,
-        )
+        session.store.save(session.session_id, memory, session.config.model, **saved_fields(session))
     except SessionError as e:
         warning(f"The conversation is not saved: {e}")
 
@@ -960,18 +997,152 @@ def document_command(session: Session, argument: str) -> None:
         path = Path(value.strip().strip('"'))
         if not value.strip():
             error("Usage: /document export PATH")
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(memory.document.markdown(), encoding="utf-8")
-        except OSError as e:
-            error(f"Cannot write {path}: {e}")
-            return
-        print(f"Document written to {path}.")
+        elif write_report(report_of(session, "document"), path):
+            print(f"Document written to {path}.")
     elif action:
         error("Usage: /document [undo | export PATH]")
     else:
         show_document(session)
+
+
+def report_of(session: Session, kind: str) -> Report:
+    memory = session.agent.memory
+    if kind == "document":
+        return document_report(memory.document)
+    data = session_data(session.session_id, memory, session.config.model, **saved_fields(session))
+    return conversation_report(memory, session.config.model, data)
+
+
+def write_report(report: Report, path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix not in FORMATS:
+        error(f"Cannot write {path}: the name must end with {', '.join(FORMATS)}, which says the format.")
+        return False
+    try:
+        content = render(report, suffix)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    except ExportError as e:
+        error(str(e))
+        return False
+    except OSError as e:
+        error(f"Cannot write {path}: {e}")
+        return False
+    return True
+
+
+def export_command(session: Session, argument: str) -> None:
+    memory = session.agent.memory
+    if not argument:
+        error(f"Usage: /export PATH, with PATH ending in {', '.join(FORMATS)}")
+    elif not (memory.turns or memory.summary):
+        print("No message to export yet.")
+    else:
+        path = Path(argument.strip('"'))
+        if write_report(report_of(session, "conversation"), path):
+            print(f"Conversation written to {path}.")
+            branches = len(memory.branches())
+            if branches > 1 and path.suffix.lower() != ".json":
+                print(f"It holds branch {memory.branch.number} only, out of {branches}: a .json file holds all of them.")
+
+
+def share_refusal(session: Session, kind: str) -> str | None:
+    memory = session.agent.memory
+    if not session.config.features["sharing"]:
+        return "The sharing feature is off: /feature sharing on to publish on a public link."
+    if kind == "document":
+        return "The document is empty: nothing to publish." if memory.document.is_empty else None
+    return None if memory.turns or memory.summary else "No message to publish yet."
+
+
+def publication_of(session: Session, kind: str) -> Publication:
+    return prepare_publication(report_of(session, kind), session.agent.active_guardrails)
+
+
+def blocked_message(hit: Hit) -> str:
+    return " ".join(filter(None, [f"Not published: the rule '{hit.rule}' found {hit.found}.", hit.message]))
+
+
+def publication_lines(session: Session, publication: Publication) -> list[str]:
+    """What the user reads before publishing: what the page holds and what the rules changed in it."""
+    report = publication.report
+    messages = sum(part.author == YOU for part in report.parts)
+    lines = [f"Page: {report.title}" + (f" ({plural(messages, 'message')})" if messages else "")]
+    if not session.config.features["guardrails"]:
+        lines.append("The guardrails are off: nothing was checked or redacted.")
+    for hit in publication.hits:
+        done = "redacted" if hit.action == "redact" else "found, and left in the page"
+        lines.append(" ".join(filter(None, [f"Rule '{hit.rule}': {hit.count} {done} ({hit.found}).", hit.message])))
+    if publication.sources:
+        lines.append(f"Sources named: {'; '.join(publication.sources)}")
+    return lines
+
+
+def publish(session: Session, kind: str, publication: Publication) -> Share:
+    return session.shares.add(kind, publication.report.title, to_html(publication.report))
+
+
+def list_shares(session: Session) -> None:
+    shares = session.shares.list()
+    if not shares:
+        print("No public link yet. /share conversation or /share document to publish one.")
+        return
+    for number, share in enumerate(shares, start=1):
+        print(f"{number}. {share.created:%Y-%m-%d %H:%M}  {share.kind}  {shorten(share.title)}")
+        print(f"   {public_link(session.config, share)}")
+    print(f"/share remove N to take a link down. {SERVE_HINT}")
+
+
+def remove_share(session: Session, value: str) -> None:
+    shares = session.shares.list()
+    if not value.isdecimal():
+        error(SHARE_USAGE)
+    elif not 1 <= int(value) <= len(shares):
+        error(f"No link {value}: /share lists them.")
+    else:
+        share = shares[int(value) - 1]
+        try:
+            session.shares.remove(share.token)
+        except ShareError as e:
+            error(str(e))
+            return
+        print(f"Link {value} is down: {shorten(share.title)}")
+
+
+def publish_command(session: Session, kind: str) -> None:
+    refusal = share_refusal(session, kind)
+    if refusal:
+        print(refusal)
+        return
+    publication = publication_of(session, kind)
+    if publication.blocked:
+        error(blocked_message(publication.blocked))
+        return
+    for line in publication_lines(session, publication):
+        print(line)
+    print("Anyone who gets the link can read this page, without logging in.")
+    if not confirm("Publish? [y]es / [n]o: "):
+        print("Nothing was published.")
+        return
+    try:
+        share = publish(session, kind, publication)
+    except ShareError as e:
+        error(str(e))
+        return
+    print(f"Published: {public_link(session.config, share)}")
+    print(f"The page stays as it is now: the next messages are not added. {SERVE_HINT}")
+
+
+def share_command(session: Session, argument: str) -> None:
+    action, _, value = argument.partition(" ")
+    if not action:
+        list_shares(session)
+    elif action == "remove":
+        remove_share(session, value.strip())
+    elif action in SHARE_KINDS and not value:
+        publish_command(session, action)
+    else:
+        error(SHARE_USAGE)
 
 
 def show_document(session: Session) -> None:
@@ -1623,6 +1794,10 @@ def handle_command(session: Session, line: str) -> bool:
         profile_command(session, argument)
     elif name == "/document":
         document_command(session, argument)
+    elif name == "/export":
+        export_command(session, argument)
+    elif name == "/share":
+        share_command(session, argument)
     elif name == "/guardrails":
         guardrails_command(session)
     elif name == "/approval":
@@ -1745,6 +1920,7 @@ def load_memory(session: Session, resume_id: str | None) -> None:
         if session.profile.entries and config.features["profile"]:
             print(f"Profile: {plural(len(session.profile.entries), 'instruction')} sent to the model. /profile to see them.")
     session.store = SessionStore(config.sessions_dir)
+    session.shares = ShareStore(config.shares_dir)
     if resume_id is None:
         return
     if config.features["sessions"]:
@@ -2188,6 +2364,13 @@ def main(argv: list[str] | None = None) -> int:
         from sensai.interfaces.web.server import run_web
 
         return run_web(config, args.port)
+    if args.command == "publish":
+        if not config.features["sharing"]:
+            error("The sharing feature is off: SENSAI_FEATURE_SHARING=true to serve the public pages.")
+            return 1
+        from sensai.interfaces.web.public import run_public
+
+        return run_public(config, args.host)
     return run_chat(config, args.resume)
 
 
