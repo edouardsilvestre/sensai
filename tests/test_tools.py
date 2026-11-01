@@ -1,3 +1,4 @@
+import pytest
 from ollama._types import Tool
 from ollama._utils import convert_function_to_tool
 
@@ -125,6 +126,35 @@ def test_web_search_is_enabled_by_its_setting(config, client):
     config.features["web_search"] = True
     config.features["memory"] = False
     assert build_registry(config, client).names() == ["web_search"]
+
+
+def asker(question: str, options: list[str]) -> str:
+    return "Orion Delta Consulting"
+
+
+def test_ask_user_is_given_when_an_interface_can_ask(config, client):
+    config.features["memory"] = False
+    assert build_registry(config, client).names() == []
+    assert build_registry(config, client, asker).names() == ["ask_user"]
+
+
+@pytest.mark.parametrize("feature", ["questions", "tools"])
+def test_ask_user_follows_its_feature_and_the_tools_feature(config, client, feature):
+    config.features[feature] = False
+    assert "ask_user" not in build_registry(config, client, asker).names()
+
+
+def test_mcp_tools_cannot_take_the_name_of_ask_user(config, client, monkeypatch):
+    names_taken = []
+
+    def load_tools(servers, timeout, taken):
+        names_taken.extend(taken)
+        return [], []
+
+    monkeypatch.setattr("sensai.core.tools.catalog.load_servers", lambda path: [])
+    monkeypatch.setattr("sensai.core.tools.catalog.load_tools", load_tools)
+    build_registry(config, client, asker)
+    assert "ask_user" in names_taken
 
 
 def test_tools_feature_disables_every_tool(config, client):

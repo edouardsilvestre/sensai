@@ -78,6 +78,7 @@ from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+ASK_USER = "ask_user"
 POLL_SECONDS = 15
 SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
 SCHEDULE_USAGE = f"Usage: /schedule add WHEN [--allow TOOL,TOOL] TASK, or /schedule remove N. WHEN is {WHEN_FORMS}"
@@ -399,6 +400,23 @@ def confirm_cached(cached: CachedAnswer) -> bool:
             return False
 
 
+def ask_question(question: str, options: list[str]) -> str | None:
+    print(f"[{ASK_USER}] {question}")
+    for number, option in enumerate(options, start=1):
+        print(f"  {number}. {option}")
+    label = "Your answer (a number or your own words): " if options else "Your answer: "
+    while True:
+        try:
+            answer = input(label).strip()
+        except EOFError:
+            print()
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        if answer:
+            return answer
+
+
 def prompt(session: Session) -> str:
     persona = session.agent.persona
     return f"\n[{persona.id}] > " if persona else "\n> "
@@ -556,7 +574,8 @@ def show_events(
                 if mid_line:
                     print()
                     mid_line = False
-                print(describe_call(event.call))
+                if event.call.name != ASK_USER:
+                    print(describe_call(event.call))
             elif isinstance(event, ToolResultEvent):
                 if event.result.error:
                     warning(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}")
@@ -1566,7 +1585,7 @@ def load_schedule(config: Config) -> Schedule | None:
 
 
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
-    tools = build_registry(config, client)
+    tools = build_registry(config, client, ask_question)
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()

@@ -23,6 +23,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
 - 💡 **Answer examples**: keep your best answers with `/example add`, and Sensai shows the closest ones to the model for each new question, so that even a small model cites its excerpts and says what the documents do not say.
+- ❓ **Questions to the user**: when a request is ambiguous, the model can ask the journalist a question, with a few options to pick from, and goes on with the answer instead of guessing.
 - ⏰ **Scheduled tasks**: a question Sensai goes through on its own every morning or every hour, comparing with its last run, and writing a sourced report only when it finds something else, with no tool used unless the journalist allowed it in advance.
 - 🗂️ **Prompt versioning**: each change to the system prompt is kept as a dated version that can be compared, measured on your own test questions, and rolled back with `/prompt use N`.
 - 📈 **Logs & metrics**: every message is logged on the machine with the prompt sent, the answer, the tools, the time and the tokens, and `/stats` shows the volume, the response time, the error rate and the prompt changes that slowed Sensai down.
@@ -398,6 +399,34 @@ Every path goes through `tools/permissions.py` before the file is touched. `Perm
 
 It is the `files` feature, off by default because the model reads and writes files on this machine. Turned on, it reads the folder Sensai runs in and writes nowhere, until `SENSAI_FILES_WRITE` names a folder. `/files` shows what is allowed.
 
+### Questions to the user
+
+A journalist's question is sometimes ambiguous: two companies share a name, a nickname stands for someone, a period is missing. With the `questions` feature (on by default), the model can ask instead of guessing: it calls `ask_user`, the CLI shows the question and its options, the journalist answers with a number or in their own words, and the model goes on with the answer. During the step-by-step reasoning, on a bank statement with two Vidal:
+
+```
+> Il y a deux Vidal dans le relevé et je ne sais pas lequel m'intéresse. Combien Vidal a-t-il reçu de Nordbank ?
+[search] 1 excerpts from 1 documents
+[thought 1] I need to find out who 'M. Marc Vidal' and 'Mme Sophie Vidal' refer to.
+[ask_user] Quel sont les deux Vidal qui figurent dans le relevé et à qui appartient celui du crédit ?
+Your answer: Marc Vidal
+[ask_user] answered "Marc Vidal"
+[thought 2] The user has identified 'M. Marc Vidal' as Marc Vidal.
+[...]
+Il y a deux Vidal dans le relevé. 'M. Marc Vidal' a reçu 480 000,00 de Nordbank, tandis que 'Mme Sophie Vidal' a reçu 35 000,00 de la société.
+```
+
+`tools/questions.py`: `ask_user(question, options)` is a tool like the others, whose docstring tells the model when to ask (a missing piece that no document and no tool can give) and when not to (what it can find itself). The question is put to the user by the interface, through the `Asker` it gives to `build_registry`, like the approver: the CLI prints the options numbered, a number picks one and anything else is sent as it is, an empty answer asks again, and `Ctrl+D` tells the model that the user did not answer and that it should not ask again. The call itself is not printed, so that the question is not shown twice. The question is the argument of a tool call: it goes through the guardrails of the tool calls before it is shown, so that a protected name is redacted from it. The answer is the journalist's own words, given to the model as the result of the tool, and it lives only in the messages of that turn, like the excerpts; what the model then writes goes through the output guardrails as usual. An answer that called `ask_user` is never kept by the semantic cache, since it depends on more than the question.
+
+Whether the model asks is up to the model. On ambiguous questions like "Combien Vidal a-t-il reçu de Nordbank ?" on a statement with Marc and Sophie Vidal, each asked several times:
+
+| | The ambiguity is said in the question | The ambiguity is only in the documents |
+|---|---|---|
+| `qwen2.5:1.5b` | never asks | never asks |
+| `qwen2.5:1.5b` with the reasoning | asks 1 time out of 3 | never asks: it answers with Marc Vidal's amount |
+| `qwen3:1.7b` | asks 6 times out of 6 | never asks |
+
+Small models ask when the user says the request is ambiguous, not when only the documents show it, and `qwen3:1.7b` never filled the options. Without documents, `qwen2.5:1.5b` with the reasoning asked too much instead, things it should have looked for itself ("which bank?", "which period?"). Having Sensai check every message for an ambiguity before answering was considered and ruled out: it would cost one more call to the model for every message, for questions that are rarely ambiguous.
+
 ### MCP servers
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) lets a program, the server, offer tools to an AI application. Sensai is an MCP client: it reads the tools of the servers listed in `SENSAI_MCP_PATH`, and the model calls them like its own tools. Only servers reached by their URL are supported (Streamable HTTP transport).
@@ -742,6 +771,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_FILES` | `false` | `true` lets the model list, read and write files in the allowed folders; needs a model that supports tools |
 | `SENSAI_FEATURE_MEMORY` | `true` | let the model save and look up facts about people, companies and places; needs a model that supports tools |
 | `SENSAI_FEATURE_MCP` | `true` | let the model call the tools of the MCP servers listed in `SENSAI_MCP_PATH`; needs a model that supports tools |
+| `SENSAI_FEATURE_QUESTIONS` | `true` | let the model ask you a question when your request is ambiguous; needs a model that supports tools |
 | `SENSAI_FEATURE_SESSIONS` | `true` | save every conversation and allow resuming it |
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
@@ -802,6 +832,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |
 | `files` | the file tools, off by default because the model reads and writes files on this machine |
 | `memory` | the long-term memory tools; the memory file is kept when it is off |
+| `questions` | the `ask_user` tool, with which the model asks you a question when your request is ambiguous |
 | `branching` | `/edit`, `/branches` and `/branch`, and keeping an interrupted answer; the branches stay saved |
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
