@@ -4,7 +4,10 @@ import pytest
 
 from sensai.core.agent import Agent
 from sensai.core.guardrails.rules import GuardrailError, Hit
-from sensai.interfaces.cli.main import Session, chat_turn, handle_command, load_guardrails, print_guardrail
+from sensai.interfaces.cli.answer import chat_turn, print_guardrail
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_guardrails
 
 RULES = {
     "rules": [

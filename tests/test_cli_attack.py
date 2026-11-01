@@ -19,7 +19,7 @@ def mock_client(monkeypatch):
         yield "Je ne peux pas répondre à cette demande."
 
     client.chat_stream.side_effect = fake_stream
-    monkeypatch.setattr("sensai.interfaces.cli.main.OllamaClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr("sensai.interfaces.cli.runs.attack.OllamaClient", lambda *args, **kwargs: client)
     return client
 
 
@@ -162,7 +162,7 @@ def test_cli_attack_llm_connection_error(mock_client, capsys):
 
 def test_cli_attack_guardrail_load_error(mock_client, monkeypatch, capsys):
     monkeypatch.setattr(
-        "sensai.interfaces.cli.main.load_guardrails",
+        "sensai.interfaces.cli.runs.attack.load_guardrails",
         MagicMock(side_effect=GuardrailError("Malformed guardrails file")),
     )
     code = main(["attack"])

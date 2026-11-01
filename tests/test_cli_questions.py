@@ -2,7 +2,9 @@ import pytest
 
 from sensai.core.agent import Agent
 from sensai.core.llm.ollama import ToolCall
-from sensai.interfaces.cli.main import Session, ask_question, chat_turn, load_memory, load_tools
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.session import Session, ask_question
+from sensai.interfaces.cli.startup import load_memory, load_tools
 
 QUESTION = "Plusieurs sociétés Orion apparaissent dans les documents. Laquelle ?"
 OPTIONS = ["Orion Delta Consulting (Lyon)", "Orion Holding Ltd (Chypre)"]

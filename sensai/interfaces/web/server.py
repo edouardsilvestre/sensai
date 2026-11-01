@@ -46,30 +46,26 @@ from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.tools.questions import Asker
-from sensai.interfaces.cli.main import (
-    ASK_USER,
-    Session,
-    blocked_message,
+from sensai.interfaces.cli.answer import (
     describe_call,
     describe_edits,
-    feature_command,
-    feature_refusal,
     guardrail_message,
     judgement_lines,
-    load_log,
-    load_memory,
     name_conversation,
-    new_command,
-    plural,
+)
+from sensai.interfaces.cli.commands.conversation import new_command, resume
+from sensai.interfaces.cli.commands.document import report_of
+from sensai.interfaces.cli.commands.settings import feature_command, feature_refusal
+from sensai.interfaces.cli.commands.sharing import (
+    blocked_message,
     publication_lines,
     publication_of,
     publish,
-    report_of,
-    resume,
-    save_session,
     share_refusal,
-    start_session,
 )
+from sensai.interfaces.cli.output import plural
+from sensai.interfaces.cli.session import ASK_USER, Session, save_session
+from sensai.interfaces.cli.startup import load_log, load_memory, start_session
 from sensai.interfaces.web.public import PAGE_HEADERS
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"

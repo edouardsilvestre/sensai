@@ -6,7 +6,10 @@ from sensai.core.agent import Agent
 from sensai.core.llm.ollama import LLMError
 from sensai.core.memory.sessions import SessionStore
 from sensai.core.prompts import PromptStore
-from sensai.interfaces.cli.main import HELP, Session, chat_turn, handle_command, load_prompts
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import HELP, handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_prompts
 
 
 def start(config, client) -> Session:

@@ -170,7 +170,7 @@ def cli(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SENSAI_FEATURE_TOOLS", "false")
     client = JudgeClient("supported", "supported", "supported", "supported")
-    monkeypatch.setattr("sensai.interfaces.cli.main.OllamaClient", lambda host, key="": client)
+    monkeypatch.setattr("sensai.interfaces.cli.runs.evaluation.OllamaClient", lambda host, key="": client)
     cases = write(tmp_path / "eval.json", {"cases": [{"question": QUESTION, "expected": ["Marc Vidal", "Nordbank"]}]})
     env = tmp_path / ".env"
     env.write_text("", encoding="utf-8")

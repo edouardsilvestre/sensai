@@ -5,7 +5,10 @@ from sensai.core.document.document import Edit
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import LLMError
 from sensai.core.memory.sessions import SessionStore
-from sensai.interfaces.cli.main import Session, chat_turn, handle_command, load_memory
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory
 
 
 @pytest.fixture

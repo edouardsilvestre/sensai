@@ -1,8 +1,13 @@
+import subprocess
+import sys
+
 import pytest
 
 from sensai.core.agent import Agent
 from sensai.core.tools.registry import ToolRegistry
-from sensai.interfaces.cli.main import Session, handle_command, run_status
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.runs.index import run_status
+from sensai.interfaces.cli.session import Session
 
 
 @pytest.fixture
@@ -18,6 +23,11 @@ def lookup(query: str) -> str:
       query: What to look up
     """
     return query
+
+
+def test_the_cli_runs_as_a_module():
+    command = [sys.executable, "-m", "sensai.interfaces.cli.main", "--help"]
+    assert "usage: sensai" in subprocess.run(command, check=True, capture_output=True, text=True).stdout
 
 
 def test_features_lists_every_feature(session, capsys):

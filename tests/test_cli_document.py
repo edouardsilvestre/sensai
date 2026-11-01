@@ -6,7 +6,10 @@ from sensai.core.agent import Agent
 from sensai.core.document.document import Document, Edit
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.memory.sessions import SessionStore
-from sensai.interfaces.cli.main import Session, chat_turn, describe_edits, handle_command, load_memory
+from sensai.interfaces.cli.answer import chat_turn, describe_edits
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory
 
 TIMELINE = {"op": "append", "section": "Timeline", "text": "- 4 April 2023: Marc Vidal approves the transfer"}
 

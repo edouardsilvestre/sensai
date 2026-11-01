@@ -7,15 +7,11 @@ from sensai.core.agent import Agent
 from sensai.core.cache import CachedAnswer, SemanticCache
 from sensai.core.llm.ollama import LLMError, ModelNotFoundError
 from sensai.core.rag.models import SearchResult
-from sensai.interfaces.cli.main import (
-    HELP,
-    Session,
-    chat_turn,
-    confirm_cached,
-    handle_command,
-    load_cache,
-    new_command,
-)
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.conversation import new_command
+from sensai.interfaces.cli.commands.dispatch import HELP, handle_command
+from sensai.interfaces.cli.session import Session, confirm_cached
+from sensai.interfaces.cli.startup import load_cache
 
 QUESTION = "Qui dirige Orion ?"
 CLOSE = "Qui dirige la société Orion ?"

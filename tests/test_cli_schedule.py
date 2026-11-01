@@ -11,21 +11,14 @@ from sensai.core.memory.sessions import SessionStore
 from sensai.core.rag.models import SearchResult
 from sensai.core.schedule import Schedule
 from sensai.core.tools.registry import ToolRegistry, requires_approval
-from sensai.interfaces.cli import main as main_module
-from sensai.interfaces.cli.main import (
-    HELP,
-    Session,
-    feature_command,
-    handle_command,
-    load_memory,
-    load_schedule,
-    main,
-    parse_args,
-    print_schedule_news,
-    run_due_tasks,
-    run_schedule,
-    watch_schedule,
-)
+from sensai.interfaces.cli.runs import scheduler
+from sensai.interfaces.cli.chat import print_schedule_news
+from sensai.interfaces.cli.commands.dispatch import HELP, handle_command
+from sensai.interfaces.cli.commands.settings import feature_command
+from sensai.interfaces.cli.main import main, parse_args
+from sensai.interfaces.cli.runs.scheduler import run_due_tasks, run_schedule, watch_schedule
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory, load_schedule
 
 PAST = datetime(2026, 1, 1, 8, 0)
 
@@ -279,14 +272,14 @@ def test_a_failed_run_is_reported_and_the_next_task_still_runs(config, capsys):
 
 @pytest.mark.parametrize("failure", [RuntimeError("the tool crashed"), OSError("disk full"), RuntimeError()])
 def test_an_unexpected_error_fails_the_task_and_not_the_scheduler(session, client, capsys, monkeypatch, failure):
-    original = main_module.run_task
+    original = scheduler.run_task
 
     def crash_on_the_first(agent, task, *args):
         if task.question == "First":
             raise failure
         return original(agent, task, *args)
 
-    monkeypatch.setattr(main_module, "run_task", crash_on_the_first)
+    monkeypatch.setattr(scheduler, "run_task", crash_on_the_first)
     due_task(session, "First")
     due_task(session, "Second")
     assert watch_schedule(session, once=True) == 1
@@ -334,13 +327,13 @@ def test_the_scheduler_waits_and_sees_the_tasks_added_meanwhile(session, client,
         else:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr("sensai.interfaces.cli.main.time.sleep", sleep)
+    monkeypatch.setattr("sensai.interfaces.cli.runs.scheduler.time.sleep", sleep)
     assert watch_schedule(session, once=False) == 0
     assert len(client.chats) == 1
 
 
 def test_once_runs_what_is_due_and_exits(session, client, monkeypatch):
-    monkeypatch.setattr("sensai.interfaces.cli.main.time.sleep", lambda seconds: pytest.fail("it should exit"))
+    monkeypatch.setattr("sensai.interfaces.cli.runs.scheduler.time.sleep", lambda seconds: pytest.fail("it should exit"))
     due_task(session)
     assert watch_schedule(session, once=True) == 0
     assert len(client.chats) == 1
@@ -358,7 +351,7 @@ def test_a_file_broken_while_running_does_not_stop_the_scheduler(session, capsys
     def sleep(seconds):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("sensai.interfaces.cli.main.time.sleep", sleep)
+    monkeypatch.setattr("sensai.interfaces.cli.runs.scheduler.time.sleep", sleep)
     session.config.schedule_path.write_text("not json", encoding="utf-8")
     assert watch_schedule(session, once=False) == 0
     assert "Invalid schedule file" in capsys.readouterr().err
