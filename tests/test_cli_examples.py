@@ -146,7 +146,7 @@ def test_remove_deletes_an_example(session, capsys):
     assert kept(session) == []
 
 
-@pytest.mark.parametrize("argument", ["remove 3", "remove", "add 2", "keep", ""])
+@pytest.mark.parametrize("argument", ["remove 3", "remove", "remove ²", "add 2", "keep", ""])
 def test_example_rejects_wrong_arguments(session, capsys, argument):
     handle_command(session, f"/example {argument}")
     err = capsys.readouterr().err

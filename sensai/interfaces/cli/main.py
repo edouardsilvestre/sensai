@@ -791,7 +791,7 @@ def reasoning_command(session: Session, argument: str) -> None:
             print(f"  {number}. {reasoning.question} ({plural(len(reasoning.steps), 'step')})")
         print("/reasoning N to read the steps of question N.")
         return
-    if not argument.isdigit() or not 1 <= int(argument) <= len(history):
+    if not argument.isdecimal() or not 1 <= int(argument) <= len(history):
         error(f"Usage: /reasoning [N], with N between 1 and {len(history)}")
         return
     reasoning = history[int(argument) - 1]
@@ -875,7 +875,7 @@ def add_example(session: Session) -> None:
 def example_command(session: Session, argument: str) -> None:
     action, _, number = argument.partition(" ")
     number = number.strip()
-    if not (action == "add" and not number) and not (action == "remove" and number.isdigit()):
+    if not (action == "add" and not number) and not (action == "remove" and number.isdecimal()):
         error("Usage: /example add, or /example remove N")
         return
     if session.examples is None:
