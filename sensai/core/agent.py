@@ -8,10 +8,14 @@ from sensai.core.cache import CacheError, CachedAnswer, ConfirmCache, SemanticCa
 from sensai.core.config import Config
 from sensai.core.document.document import DocumentError, Edit, Rejected
 from sensai.core.document.editor import DocumentEditor, model_editor
+from sensai.core.evaluation.judge import check, evidence, sentences
 from sensai.core.examples import ExampleLibrary, examples_message
 from sensai.core.guardrails.rules import Guardrails
 from sensai.core.events import (
     ApprovalEvent,
+    CheckEvent,
+    CheckFailedEvent,
+    CheckStartedEvent,
     CacheFailedEvent,
     CacheHitEvent,
     CompactionEvent,
@@ -262,6 +266,15 @@ class Agent:
         templates = [self.memory.system_prompt, build_prompt("", []), instructions(ToolRegistry())]
         return hashlib.sha256(json.dumps(templates, ensure_ascii=False).encode()).hexdigest()[:8]
 
+    def _check(self, question: str, answer: str, given: str) -> Iterator[Event]:
+        yield CheckStartedEvent(len(sentences(answer)), self.config.judge_model or self.config.model)
+        try:
+            judgement = check(self.client, self.config, question, answer, given)
+        except LLMError as e:
+            yield CheckFailedEvent(str(e))
+            return
+        yield CheckEvent(judgement)
+
     def run(self, user_input: str, format: dict | None = None) -> Iterator[Event]:
         if self.log is None or not self.config.features["logging"]:
             try:
@@ -400,6 +413,7 @@ class Agent:
         # The schema constrains every token of the answer: the model could not call a tool.
         functions = self.tools.tools() if self.config.features["tools"] and format is None else []
         used_tools = False
+        reasoning = None
         if self.config.features["reasoning"] and format is None:
             found = len(sources)
             reasoning = yield from self._reason(user_input, pending, options, guardrails, sources)
@@ -457,6 +471,18 @@ class Agent:
                 yield CacheFailedEvent(str(e))
         if self.keeps_document and self.config.features["document"] and content.strip() and not output.blocked:
             yield from self.update_document(user_input, content, guardrails)
+        checks = self.keeps_document and self.config.features["fact_check"] and format is None
+        if checks and sentences(content) and not output.blocked:
+            results = [
+                message["content"] for message in pending
+                if message.get("role") == "tool" and not message["content"].startswith("Error:")
+            ]
+            if reasoning is not None:
+                results += [
+                    step.result.content for step in reasoning.steps
+                    if step.result is not None and not step.result.error and step.action != "search_documents"
+                ]
+            yield from self._check(user_input, content, evidence(sources, results))
 
         # The turn is saved: from here on, a failure only delays the compaction to the next turn.
         if self.memory.needs_compaction(usage.total_tokens):

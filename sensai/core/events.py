@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from sensai.core.cache import CachedAnswer
 from sensai.core.document.document import EditReport
+from sensai.core.evaluation.judge import Judgement
 from sensai.core.examples import Example
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
@@ -68,6 +69,22 @@ class ExamplesFailedEvent:
 
 @dataclass
 class LogFailedEvent:
+    message: str
+
+
+@dataclass
+class CheckStartedEvent:
+    sentences: int
+    model: str
+
+
+@dataclass
+class CheckEvent:
+    judgement: Judgement
+
+
+@dataclass
+class CheckFailedEvent:
     message: str
 
 
@@ -143,6 +160,9 @@ Event = (
     | ExamplesFailedEvent
     | DoneEvent
     | LogFailedEvent
+    | CheckStartedEvent
+    | CheckEvent
+    | CheckFailedEvent
     | DocumentEvent
     | DocumentFailedEvent
     | AgentStartedEvent
