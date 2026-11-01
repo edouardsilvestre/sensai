@@ -28,7 +28,7 @@ class FakeRetriever:
     def __init__(self, results: list[SearchResult]):
         self.results = results
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return self.results
 
 

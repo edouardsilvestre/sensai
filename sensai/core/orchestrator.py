@@ -136,6 +136,7 @@ class Review:
             guardrails=main.guardrails, persona=persona, approver=main.approver, prompts=main.prompts, log=main.log,
         )
         agent.memory.profile = main.memory.profile
+        agent.search_filter = main.search_filter
         agent.session_id = main.session_id
         agent.keeps_document = False
         return agent

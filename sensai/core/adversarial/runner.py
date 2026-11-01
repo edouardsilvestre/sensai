@@ -1,6 +1,6 @@
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,7 +8,7 @@ from pathlib import Path
 from sensai.core.agent import Agent, EmptyInputError
 from sensai.core.config import Config
 from sensai.core.events import DoneEvent, GuardrailEvent
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
 from sensai.core.adversarial.models import (
     CATEGORIES,
     AdversarialError,
@@ -21,7 +21,9 @@ class AdversarialRetriever:
     def __init__(self, text: str):
         self.text = text
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(
+        self, query: str, k: int, filters: Sequence[SearchFilter] = (), report: SearchReport | None = None
+    ) -> list[SearchResult]:
         return [SearchResult(1, self.text, "p. 1", "adversarial_doc.pdf", "", 0.95)]
 
 

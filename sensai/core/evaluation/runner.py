@@ -24,6 +24,8 @@ class EvalError(Exception):
 class Case:
     question: str
     expected: list[str] = field(default_factory=list)
+    # The documents that answer, for `sensai eval --retrieval`: none when the documents do not answer.
+    sources: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -70,7 +72,10 @@ def load_cases(path: Path) -> list[Case]:
             raise EvalError(f"Invalid questions file {path}: question {number} is empty")
         if not isinstance(expected, list) or not all(isinstance(fact, str) and fact.strip() for fact in expected):
             raise EvalError(f"Invalid questions file {path}: the expected facts of question {number} are not texts")
-        cases.append(Case(question.strip(), [fact.strip() for fact in expected]))
+        sources = item.get("sources", [])
+        if not isinstance(sources, list) or not all(isinstance(source, str) and source.strip() for source in sources):
+            raise EvalError(f"Invalid questions file {path}: the sources of question {number} are not texts")
+        cases.append(Case(question.strip(), [fact.strip() for fact in expected], [source.strip() for source in sources]))
     return cases
 
 

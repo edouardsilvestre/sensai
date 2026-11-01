@@ -22,6 +22,8 @@ class Feature:
 
 FEATURES = {
     "rag": Feature("answer from the indexed documents"),
+    "hybrid": Feature("also search the documents by their exact words, like a name, an amount or an account number"),
+    "rerank": Feature("read each excerpt found with the question, to put first the ones that answer it"),
     "tools": Feature("let the model call the tools enabled in the configuration"),
     # Off by default: the queries leave the machine.
     "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
@@ -63,7 +65,7 @@ class Config:
     model: str = "llama3"
     host: str = "http://localhost:11434"
     system_prompt: str = ""
-    num_ctx: int = 8192
+    num_ctx: int = 16384
     think: bool | None = None
     persona: str = ""
     personas_dir: Path = DEFAULT_PERSONAS_DIR
@@ -89,6 +91,10 @@ class Config:
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
     rag_top_k: int = 5
+    rag_candidates: int = 30
+    rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    rerank_threshold: int = 20
+    rag_neighbors: int = 1
     chunk_size: int = 1200
     chunk_overlap: int = 200
     cache_path: Path = Path(".sensai/cache.db")
@@ -201,6 +207,10 @@ def load_config(path: Path | None = None) -> Config:
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
+        rag_candidates=_int_env("SENSAI_RAG_CANDIDATES", Config.rag_candidates, minimum=1, maximum=200),
+        rerank_model=os.getenv("SENSAI_RERANK_MODEL", Config.rerank_model).strip() or Config.rerank_model,
+        rerank_threshold=_int_env("SENSAI_RERANK_THRESHOLD", Config.rerank_threshold, minimum=0, maximum=100),
+        rag_neighbors=_int_env("SENSAI_RAG_NEIGHBORS", Config.rag_neighbors, minimum=0, maximum=3),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),

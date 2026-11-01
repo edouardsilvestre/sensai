@@ -94,7 +94,7 @@ class Excerpts:
     STATUTES = SearchResult(chunk_id=1, text="Orion statutes", location="p. 1", source="statutes.pdf", description="", score=0.9)
     STATEMENT = SearchResult(chunk_id=2, text="Vidal statement", location="p. 2", source="statement.pdf", description="", score=0.9)
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [self.STATEMENT if "Vidal" in query else self.STATUTES]
 
 

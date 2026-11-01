@@ -14,7 +14,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🛡️ **Source & privacy guardrails**: the name of the source is removed from every answer and web search, personal data never leaves the machine, and requests targeting someone's private life are refused, following rules set in a file.
 - 🌐 **Web search**: when enabled, the model can look up public facts (companies, people, news) and cites the URLs it used.
 - 🔌 **MCP servers**: the model can call the tools of any MCP server reached by its URL, like a company registry lookup, each call approved first.
-- 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), with every answer cited to its source.
+- 🔎 **Advanced RAG**: semantic and keyword search across thousands of heterogeneous documents (PDFs, emails, spreadsheets...), filtered by date, sender or kind, reranked so that only the excerpts that answer reach the model, and every answer cited to its source.
 - 🕸️ **Entity graph memory**: the model saves what is established about people, companies and places, and who is linked to whom, in a local database it reads and corrects across sessions.
 - 📅 **Timeline & contradiction detection**: events are placed on a chronology, and inconsistencies between documents are surfaced automatically.
 - 📂 **Living investigation file**: a case document, apart from the chat, that the model updates section by section after every answer with the facts established and their source, and that can be undone and exported to Markdown.
@@ -43,9 +43,53 @@ Indexing (`python -m sensai ingest`):
 3. `rag/embedder.py` computes one vector per chunk with Ollama (`/api/embed`).
 4. `rag/store.py` saves documents, chunks and vectors in one SQLite file, the vectors in a [sqlite-vec](https://github.com/asg017/sqlite-vec) table.
 
-Files that did not change are skipped on the next run, and deleted files are removed from the index.
+Files that did not change are skipped on the next run, and deleted files are removed from the index. An index made before the search filters (format v1) is refused with a message: rebuild it with `ingest --rebuild`. An index made before the neighbors gets the `overlap` column when it is opened, at 0: its passages repeat a few sentences between chunks until it is rebuilt.
 
-Answering: the message is embedded, the closest chunks are added to the prompt as numbered excerpts, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts.
+Answering (`DocumentIndex.search`), for each message:
+
+1. **Filters** (`/filter`, or the arguments of `search_documents` during the reasoning): `store.allowed_documents` keeps the documents of the period, the sender, the recipient, the kind or the folder asked, from the `date`, `author`, `sender` and `recipients` columns copied from the metadata at indexing. Both searches below only look at these documents, inside their top-k, so that a filter never leaks a document nor leaves fewer results than it could.
+2. **Hybrid search** (`hybrid` feature): the `SENSAI_RAG_CANDIDATES` (30) chunks closest to the message by cosine similarity, and the 30 that match its words best in a SQLite [FTS5](https://www.sqlite.org/fts5.html) table by BM25, where a rare word counts more and the header of an email (title, people, attachments) counts half. The two rankings cannot be compared by their scores: `retriever.fuse` merges them by their ranks only ([Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)), and a chunk found by both comes first. The vectors find "the suspicious payments", the keywords find "CH93 0076 2011".
+3. **Reranking** (`rerank` feature): the vectors compare the question and a chunk separately, so a chunk on the same subject that does not answer scores as high as the one that does. `rag/reranker.py` reads the question and each of the 30 chunks together with a cross-encoder ([sentence-transformers](https://sbert.net/docs/cross_encoder/usage/usage.html), `SENSAI_RERANK_MODEL`) and gives it a relevance from 0 to 1. It is too slow to read the whole index, hence the fast search first. The raw score of the model goes through a sigmoid, so that the threshold means the same with any model.
+4. **Threshold**: a chunk under `SENSAI_RERANK_THRESHOLD` percent of relevance is dropped and never reaches the model, like the transfer of May for a question on March; then the `SENSAI_RAG_TOP_K` best are kept. When every chunk is dropped, the model is told that the documents do not answer, instead of getting the question alone and answering from what it knows.
+5. **Neighbors**: a chunk is cut every 1200 characters, and the sentence that answers can be just before the cut. Each excerpt kept comes with the `SENSAI_RAG_NEIGHBORS` chunks before and after it in the same document, joined without their overlap: the chunker records how many characters each chunk repeats from the one before (`chunks.overlap`), and `chunker.join_chunks` skips them. Two excerpts close in a document become one passage. The search stays precise on small chunks, the model reads the whole passage.
+
+The excerpts are added to the prompt, numbered, and the model cites them as `[1]`, `[2]`. Only the message is kept in the history, not the excerpts. After each search, the CLI tells what happened to the candidates, and `/sources dropped` shows those under the threshold:
+
+```
+[rerank] 30 candidates: 5 kept, 16 left out after the 5 best, 9 dropped under 20% relevance (/sources dropped)
+[search] 5 excerpts from 4 documents
+```
+
+Measured with `python -m sensai eval eval/questions.json --retrieval` on the 21 documents of a fictional case (`eval/corpus/`), with 20 questions of which 3 are not answered by the documents, `qwen3-embedding:0.6b` and the default reranker:
+
+| Step | Recall@5 | NDCG@10 | Excerpts sent from a document that answers | Excerpts sent for a question without answer |
+|---|---|---|---|---|
+| Semantic search (R1) | 91% | 0.86 | 24% | 5.0 |
+| + hybrid search | 97% | 0.89 | 26% | 5.0 |
+| + reranking | 94% | 0.95 | 25% | 5.0 |
+| + threshold at 20% | 91% | 0.92 | 64% | 0.7 |
+
+The keyword search finds the IBAN and the invoice number the vectors missed. The reranker puts the document that answers first (NDCG 0.89 to 0.95), but pushes one out of the 5 best. The threshold does the most for the model: for a question the documents do not answer, it gets 0.7 excerpt instead of 5 off-topic ones, and two thirds of the excerpts it reads come from a document that answers, against a quarter, for the recall of the semantic search alone. It costs a few documents that answer, mostly spreadsheet rows, which the cross-encoder reads poorly.
+
+The threshold was chosen from the scores the same command prints for thresholds from 10 to 50%:
+
+| Threshold | Recall@5 | NDCG@10 | Excerpts sent from a document that answers | Excerpts sent for a question without answer |
+|---|---|---|---|---|
+| 10% | 91% | 0.92 | 57% | 0.7 |
+| **20%** | **91%** | **0.92** | **64%** | **0.7** |
+| 30% | 88% | 0.90 | 65% | 0.7 |
+| 50% | 82% | 0.83 | 68% | 0.3 |
+
+Up to 20%, the noise falls from 5 excerpts to 0.7 for the loss of one document that answers; past it, each step loses documents that answer for a few points of precision. Twenty questions on documents written for the test are a small sample: run the evaluation on your own case before changing the threshold.
+
+The default cross-encoder, `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, is multilingual and reads 30 candidates in about 2 s on a laptop CPU, plus about 5 s to load at the first search. `BAAI/bge-reranker-v2-m3` (`SENSAI_RERANK_MODEL=BAAI/bge-reranker-v2-m3`) does better on the same evaluation, but takes about 23 s per search without a GPU:
+
+| Cross-encoder | + reranking: Recall@5 / NDCG@10 | + threshold at 20%: Recall@5 / NDCG@10 | Excerpts sent from a document that answers | Excerpts sent for a question without answer | Time per search |
+|---|---|---|---|---|---|
+| `mmarco-mMiniLMv2-L12-H384-v1` (default) | 94% / 0.95 | 91% / 0.92 | 64% | 0.7 | ~2.3 s |
+| `bge-reranker-v2-m3` | 97% / 0.97 | 94% / 0.95 | 68% | 0.3 | ~23 s |
+
+It is worth it with a GPU, or for a batch of questions that can wait; for a chat on a CPU, the default model answers ten times faster.
 
 ### Sessions & profile
 
@@ -581,6 +625,13 @@ python -m sensai eval eval.json --compare results.json
 
 Each question is answered by a fresh agent with long-term memory, living document, cache and examples turned off, and then judged against retrieved evidence. Expected facts are matched using normalized values ("480 000 €" matches "480 000"). `--compare` prints side-by-side metric deltas against a previous benchmark run.
 
+With `"sources"`, the documents that answer each question, by their path in the index or its end (`"mail_001.eml"`), `--retrieval` scores the document search alone, without calling the chat model: the Recall@`SENSAI_RAG_TOP_K`, the NDCG@10, the share of the excerpts sent that come from a document that answers and the excerpts sent for the questions without `"sources"` (the noise), for each step of the search and for thresholds from 10 to 50%. `eval/questions.json` and `eval/corpus/` are a fictional case to try it:
+
+```bash
+SENSAI_INDEX_PATH=/tmp/eval.db python -m sensai ingest eval/corpus
+SENSAI_INDEX_PATH=/tmp/eval.db python -m sensai eval eval/questions.json --retrieval
+```
+
 #### Technical choices & honest evaluation
 
 Tested on fictional leaked documents with `qwen2.5:1.5b` and `qwen3:1.7b` on CPU:
@@ -596,7 +647,6 @@ Tested on fictional leaked documents with `qwen2.5:1.5b` and `qwen3:1.7b` on CPU
 - **Why code-based fact extraction**: Small models misread numbers (reading French decimal "480 000,00" as "480 million") or demanded details that sentences were not meant to include. Pre-checking amounts and dates by code eliminated number hallucination errors instantly.
 - **Limits**: `qwen3:1.7b` remains overly suspicious on qualitative statements, occasionally claiming details are missing. On CPU, it takes minutes per answer. Therefore, `fact_check` is disabled by default (`/feature fact_check on` to enable), serving as a safeguard for careful verification rather than an automatic blocker.
 - **Alternatives ruled out**: Embedding comparison (cosine similarity failed to differentiate transaction direction), dedicated NLI libraries (to adhere strictly to standard Ollama API constraints), and 3-vote self-consistency (prohibitive 15-minute runtime per turn on CPU).
->>>>>>> origin/develop
 
 ## Getting Started
 
@@ -607,6 +657,7 @@ Requirements: Python 3.10+ and a running [Ollama](https://ollama.com/download) s
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # without a GPU: skips gigabytes of CUDA libraries
 pip install -r requirements.txt
 cp .env.example .env
 ollama pull llama3
@@ -628,6 +679,7 @@ python -m sensai status                  # what the index contains
 python -m sensai stats --days 30         # the metrics of the messages of the last 30 days
 python -m sensai -p fact_checker         # start with another persona
 python -m sensai eval eval.json          # evaluate and score Sensai on test questions
+python -m sensai eval eval.json --retrieval   # score the document search alone, step by step
 python -m sensai attack                  # audit defenses against adversarial attacks
 ```
 
@@ -655,7 +707,9 @@ Sources:
 | Command | Effect |
 |---|---|
 | `/ingest PATH...` | index files or folders without leaving the chat |
-| `/sources` | show the full excerpts retrieved for the last message |
+| `/sources` | show the full excerpts retrieved for the last message, with their relevance and similarity |
+| `/sources dropped` | show the excerpts found for the last message but dropped under `SENSAI_RERANK_THRESHOLD` |
+| `/filter [FILTER\|clear]` | search only some documents, like `after:2023-03 before:2023-07 from:dupont to:martin kind:email source:leak/mails/` |
 | `/context` | show the tokens used by the last message and the summary of older turns |
 | `/tools` | list the tools the model can call |
 | `/files` | show the folders the model may read and write, and the patterns always denied |
@@ -799,9 +853,11 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_PERSONA` | empty | persona used at startup (overridden by `-p ID`); empty: no persona, `SENSAI_SYSTEM_PROMPT` is used |
 | `SENSAI_PERSONAS_DIR` | `personas/` of the repository | folder of the persona files |
 | `SENSAI_SYSTEM_PROMPT` | empty | system prompt sent at the start of every conversation when no persona is active |
-| `SENSAI_NUM_CTX` | `8192` | context window of the chat model, in tokens |
+| `SENSAI_NUM_CTX` | `16384` | context window of the chat model, in tokens |
 | `SENSAI_THINK` | model default | `false` disables the thinking phase of models like qwen3.5 |
 | `SENSAI_FEATURE_RAG` | `true` | answer from the indexed documents |
+| `SENSAI_FEATURE_HYBRID` | `true` | also search the documents by their exact words (FTS5, BM25), merged with the semantic search |
+| `SENSAI_FEATURE_RERANK` | `true` | sort the candidates by a cross-encoder and drop those under `SENSAI_RERANK_THRESHOLD`; needs sentence-transformers |
 | `SENSAI_FEATURE_TOOLS` | `true` | `false` disables every tool, whatever their own setting |
 | `SENSAI_FEATURE_WEB_SEARCH` | `false` | `true` lets the model search the web with Ollama's web search API; needs a model that supports tools and `OLLAMA_API_KEY` |
 | `SENSAI_FEATURE_CODE_EXEC` | `false` | `true` lets the model run Python code in a Docker container; needs Docker and a model that supports tools |
@@ -842,6 +898,10 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
+| `SENSAI_RAG_CANDIDATES` | `30` | chunks taken from each search, then merged and read by the reranker (1-200) |
+| `SENSAI_RERANK_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | cross-encoder of the `rerank` feature, from Hugging Face, downloaded at the first search |
+| `SENSAI_RERANK_THRESHOLD` | `20` | relevance, in percent, under which an excerpt is dropped (0-100, 0 keeps them all) |
+| `SENSAI_RAG_NEIGHBORS` | `1` | chunks added before and after each excerpt kept, from the same document (0-3) |
 | `SENSAI_RAG_CHUNK_SIZE` | `1200` | maximum chunk size, in characters |
 | `SENSAI_RAG_CHUNK_OVERLAP` | `200` | characters repeated between consecutive chunks |
 | `OLLAMA_API_KEY` | empty | key from [ollama.com/settings/keys](https://ollama.com/settings/keys), required by the web search |
@@ -864,6 +924,8 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | Feature | What it turns on or off |
 |---|---|
 | `rag` | answers drawn from the indexed documents |
+| `hybrid` | the keyword search added to the semantic search; off, the vectors alone find the excerpts |
+| `rerank` | the cross-encoder and its threshold; off, the excerpts are the best of the searches, none is dropped |
 | `tools` | every tool the model can call, whatever their own feature or setting |
 | `web_search` | the web search tool, off by default because the queries leave the machine; needs `OLLAMA_API_KEY` |
 | `code_exec` | the Python code execution tool, off by default because the code runs on this machine; needs Docker |

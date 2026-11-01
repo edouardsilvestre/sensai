@@ -51,7 +51,7 @@ class Excerpts:
     def __init__(self):
         self.found = [excerpt(1, "Orion statutes")]
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return self.found
 
 

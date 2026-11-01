@@ -10,7 +10,7 @@ from sensai.core.examples import Example, ExampleLibrary
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.persona import Persona
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult
 from sensai.core.tools.registry import ToolRegistry
 
 WORDS = ["qui", "dirige", "la", "société", "orion", "gérant", "quel", "montant", "vidal"]
@@ -30,7 +30,7 @@ class Retriever:
         self.documents = "v1"
         self.queries: list[str] = []
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         self.queries.append(query)
         return [STATUTES]
 
@@ -144,6 +144,16 @@ def test_changed_documents_are_another_context(config, client, cache):
     list(agent.run(QUESTION))
     new_conversation(agent)
     agent.retriever.documents = "v2"
+    list(agent.run(QUESTION))
+    assert confirm.asked == []
+
+
+def test_another_filter_is_another_context(config, client, cache):
+    confirm = Confirm()
+    agent = make_agent(config, client, cache, confirm, retriever=Retriever())
+    list(agent.run(QUESTION))
+    new_conversation(agent)
+    agent.search_filter = SearchFilter(after="2023")
     list(agent.run(QUESTION))
     assert confirm.asked == []
 

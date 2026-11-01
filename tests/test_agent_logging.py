@@ -22,7 +22,7 @@ APPROVED = '{"claims": [{"claim": "Marc Vidal runs Orion", "verdict": "supported
 
 
 class Retriever:
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [SearchResult(1, "Gérant : Marc Vidal.", "p. 2", "statuts_orion.pdf", "", 0.9)]
 
 

@@ -198,7 +198,7 @@ def test_an_unreadable_cache_disables_it(config, client, capsys):
 
 
 class Retriever:
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [STATUTES]
 
     def fingerprint(self) -> str:

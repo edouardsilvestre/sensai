@@ -31,7 +31,7 @@ class Excerpts:
     def __init__(self):
         self.found = [self.EXCERPT]
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         self.query = query
         return self.found
 

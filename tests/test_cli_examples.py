@@ -17,7 +17,7 @@ STATEMENT = SearchResult(8, "05/04/2023 virement Nordbank, 480 000 EUR.", "row 1
 
 
 class Retriever:
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [STATEMENT, STATUTES]
 
 

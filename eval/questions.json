@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {"question": "Qui a validé le virement de mars vers Delta Holding ?", "expected": ["Marc Vidal"], "sources": ["mail_001.eml", "virements_2023.csv"]},
+    {"question": "À qui appartient le compte CH93 0076 2011 6238 5295 7 ?", "expected": ["Delta Holding"], "sources": ["mail_001.eml", "virements_2023.csv"]},
+    {"question": "Combien Nordbank a-t-elle reçu le 5 avril 2023 ?", "expected": ["480 000"], "sources": ["mail_008.eml"]},
+    {"question": "Quel est le salaire de Marc Vidal ?", "expected": ["145 000"], "sources": ["mail_005.eml"]},
+    {"question": "Qui est le prête-nom de Delta Holding ?", "expected": ["Stavros Kyriakou"], "sources": ["mail_006.eml"]},
+    {"question": "Dans quel pays Delta Holding est-elle immatriculée ?", "expected": ["Chypre"], "sources": ["mail_006.eml", "contrat_delta.md"]},
+    {"question": "Quelle facture Delta Holding a-t-elle envoyée en mars 2023 ?", "expected": ["F-2023-118"], "sources": ["mail_003.eml"]},
+    {"question": "Qui a conseillé de supprimer des courriels ?", "expected": ["Claire Dubois"], "sources": ["mail_007.eml"]},
+    {"question": "Que reproche l'auditeur aux paiements à Delta Holding ?", "expected": ["145 500"], "sources": ["note_audit.txt"]},
+    {"question": "Quel est le montant mensuel du contrat de conseil avec Delta Holding ?", "expected": ["16 000"], "sources": ["contrat_delta.md"]},
+    {"question": "Qui préside Orion Delta Consulting ?", "expected": ["Marc Vidal"], "sources": ["statuts_orion.md", "organigramme.md"]},
+    {"question": "Pourquoi Alice Martin a-t-elle démissionné ?", "sources": ["mail_010.eml"]},
+    {"question": "Que s'est-il passé à Genève le 12 juin 2023 ?", "expected": ["Nordbank"], "sources": ["mail_004.eml", "notes_de_frais.csv"]},
+    {"question": "Quel virement a été envoyé à Omega Corp en mai ?", "expected": ["12 000"], "sources": ["mail_002.eml", "virements_2023.csv"]},
+    {"question": "Qui a voté contre le contrat Delta Holding au conseil d'administration ?", "expected": ["Hélène Roux"], "sources": ["compte_rendu_ca_2023-06.md"]},
+    {"question": "Où Stavros Kyriakou reverse-t-il l'argent reçu ?", "expected": ["Larnaca"], "sources": ["mail_011.eml"]},
+    {"question": "Quel budget annuel a été voté en janvier 2023 ?", "expected": ["2,4 millions"], "sources": ["compte_rendu_ca_2023-01.md"]},
+    {"question": "Marc Vidal possède-t-il un yacht ?"},
+    {"question": "Quel est le chiffre d'affaires d'Omega Corp ?"},
+    {"question": "Qui a remporté le marché public de la ville de Nantes ?"}
+  ]
+}

@@ -41,6 +41,8 @@ from sensai.core.events import (
     GuardrailEvent,
     LogFailedEvent,
     ReasoningStoppedEvent,
+    RerankEvent,
+    RerankFailedEvent,
     ReviewDoneEvent,
     SourcesEvent,
     ThoughtEvent,
@@ -50,6 +52,7 @@ from sensai.core.events import (
 )
 from sensai.core.document.document import Document, Edit, EditReport
 from sensai.core.evaluation.judge import UNCHECKED, Claim, Judgement
+from sensai.core.evaluation.retrieval import NDCG_K, evaluate_retrieval
 from sensai.core.evaluation.runner import (
     CaseResult,
     EvalError,
@@ -75,8 +78,9 @@ from sensai.core.persona import Persona, PersonaError, load_personas
 from sensai.core.prompts import PromptError, PromptStore, PromptVersion, VersionScore, compare, comparison, diff
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchResult, parse_filter
 from sensai.core.rag.prompt import cited_numbers
+from sensai.core.rag.reranker import RerankError
 from sensai.core.rag.store import StoreError, VectorStore
 from sensai.core.schedule import WHEN_FORMS, Schedule, ScheduleError, run_task
 from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
@@ -103,6 +107,8 @@ HELP = """\
 Commands:
   /ingest PATH...         index files or folders so that answers can draw on them
   /sources                show the excerpts retrieved for the last message
+  /sources dropped        show the excerpts found but dropped as not relevant enough
+  /filter [FILTER|clear]  search only some documents, like after:2023-03 before:2023-07 from:dupont kind:email
   /tools                  list the tools the model can call
   /files                  show the folders the model may read and write
   /context                show the context usage and the summary of older turns
@@ -157,7 +163,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ingest_parser = commands.add_parser("ingest", help="index documents for search")
     ingest_parser.add_argument("paths", nargs="+", type=Path, metavar="PATH", help="files or folders to index")
     ingest_parser.add_argument(
-        "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model)"
+        "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model or updating Sensai's index format)"
     )
     commands.add_parser("status", help="show what the document index contains")
     attack_parser = commands.add_parser("attack", help="run adversarial attack suite against Sensai")
@@ -177,6 +183,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     eval_parser.add_argument("cases", type=Path, metavar="FILE", help='the questions: {"cases": [{"question": ...}]}')
     eval_parser.add_argument("--out", type=Path, metavar="FILE", help="write the answers and their scores there")
     eval_parser.add_argument("--compare", type=Path, metavar="FILE", help="compare with results written before")
+    eval_parser.add_argument(
+        "--retrieval", action="store_true",
+        help="score the document search alone, step by step, against the sources of each question (no chat model)",
+    )
     schedule_parser = commands.add_parser("schedule", help="run the scheduled tasks when they are due")
     schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
     return parser.parse_args(argv)
@@ -364,6 +374,8 @@ class Session:
     agent: Agent
     index: DocumentIndex | None = None
     last_sources: list[SearchResult] = field(default_factory=list)
+    # Found for the last message, but under SENSAI_RERANK_THRESHOLD: never sent to the model.
+    last_dropped: list[SearchResult] = field(default_factory=list)
     store: SessionStore | None = None
     # Given at the first save, so that a conversation without any message is never saved.
     session_id: str | None = None
@@ -454,12 +466,39 @@ def print_sources(sources: list[SearchResult], cited: list[int]) -> None:
         warning("the answer cites excerpts that do not exist: " + " ".join(f"[{n}]" for n in unknown))
 
 
+def describe_score(source: SearchResult) -> str:
+    if source.relevance is None:
+        return f"similarity {source.score:.2f}"
+    return f"relevance {source.relevance:.2f}, similarity {source.score:.2f}"
+
+
+def rerank_report(event: RerankEvent, config: Config) -> str:
+    parts = [f"{event.kept} kept"]
+    # Relevant enough, but past the SENSAI_RAG_TOP_K best.
+    left_out = event.candidates - event.kept - len(event.dropped)
+    if left_out:
+        parts.append(f"{left_out} left out after the {config.rag_top_k} best")
+    if event.dropped:
+        parts.append(f"{len(event.dropped)} dropped under {config.rerank_threshold}% relevance (/sources dropped)")
+    return f"[rerank] {plural(event.candidates, 'candidate')}: " + ", ".join(parts)
+
+
+def show_dropped(dropped: list[SearchResult]) -> None:
+    if not dropped:
+        print("No excerpt was dropped for the last message.")
+        return
+    # Not numbered like the sources: the answer cannot cite them.
+    for source in dropped:
+        print(f"\n- {source.citation} ({describe_score(source)})")
+        print(textwrap.indent(source.text, "    "))
+
+
 def show_excerpts(sources: list[SearchResult]) -> None:
     if not sources:
         print("No excerpts were retrieved for the last message.")
         return
     for number, source in enumerate(sources, start=1):
-        print(f"\n[{number}] {source.citation} (similarity {source.score:.2f})")
+        print(f"\n[{number}] {source.citation} ({describe_score(source)})")
         print(textwrap.indent(source.text, "    "))
 
 
@@ -518,6 +557,7 @@ def print_judgement(judgement: Judgement) -> None:
 def chat_turn(session: Session, line: str) -> None:
     if line.strip():
         session.last_sources = []
+        session.last_dropped = []
         session.examples_used = []
     turns = session.agent.memory.turns
     last = turns[-1] if turns else None
@@ -579,6 +619,11 @@ def show_events(
                     print(f"\n[review] approved by the fact-checker after {rounds}, the editor's text is kept.")
                 else:
                     warning(f"Answer not approved after {rounds}: the last answer is kept, check the remarks above.")
+            elif isinstance(event, RerankEvent):
+                session.last_dropped = event.dropped
+                print(rerank_report(event, session.config))
+            elif isinstance(event, RerankFailedEvent):
+                warning(f"Excerpts not reranked until Sensai restarts: {event.message}")
             elif isinstance(event, SourcesEvent):
                 sources = session.last_sources = event.sources
                 documents = len({source.source for source in sources})
@@ -712,16 +757,28 @@ def resume(session: Session, session_id: str) -> bool:
         error(str(e))
         return False
     session.session_id = session_id
-    session.last_sources = []
-    session.agent.reasoning.clear()
+    cleared = forget_conversation(session)
     memory_turns = session.agent.memory.turns
     session.answered = (memory_turns[-1], []) if memory_turns else None
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
-    print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
+    print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.{cleared}")
     branches = session.agent.memory.branches()
     if len(branches) > 1:
         print(f"On branch {session.agent.memory.branch.number} of {len(branches)}: /branches lists them.")
     return True
+
+
+def forget_conversation(session: Session) -> str:
+    """
+    Forgets what belongs to the conversation left, and says which filter it cleared: the filter is shown nowhere, it
+    would narrow the searches of the next conversation without the user knowing.
+    """
+    session.last_sources = []
+    session.last_dropped = []
+    session.agent.reasoning.clear()
+    previous = session.agent.search_filter.describe()
+    session.agent.search_filter = SearchFilter()
+    return f" Filter {previous} cleared: /filter to set it again." if previous else ""
 
 
 def resume_command(session: Session, argument: str) -> None:
@@ -735,11 +792,10 @@ def new_command(session: Session) -> None:
     session.agent.memory.clear()
     session.session_id = None
     session.agent.session_id = ""
-    session.last_sources = []
-    session.agent.reasoning.clear()
+    cleared = forget_conversation(session)
     session.answered = None
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
-    print(f"New conversation.{saved}")
+    print(f"New conversation.{saved}{cleared}")
 
 
 def shorten(text: str) -> str:
@@ -823,6 +879,7 @@ def branch_command(session: Session, argument: str) -> None:
         error(f"No branch {argument}: /branches lists them.")
     else:
         session.last_sources = []
+        session.last_dropped = []
         save_session(session)
         last = f" Last answer: {shorten(memory.turns[-1].assistant)}" if memory.turns else ""
         print(f"On branch {argument}, {plural(len(memory.turns), 'turn')}.{last}")
@@ -992,6 +1049,31 @@ def guardrails_command(session: Session) -> None:
         print(f"  {rule.name}: {rule.action} in {where}, {rule.summary}")
     if not config.guardrails_path.exists():
         print(f"Write your own rules in {config.guardrails_path}: see guardrails.example.json.")
+
+
+FILTER_USAGE = "Usage: /filter [clear | after:2023-03 before:2023-07 from:NAME to:NAME kind:KIND source:FOLDER/]"
+
+
+def filter_command(session: Session, argument: str) -> None:
+    if argument.lower() == "clear":
+        session.agent.search_filter = SearchFilter()
+    elif argument:
+        try:
+            session.agent.search_filter = parse_filter(argument)
+        except ValueError as e:
+            error(f"{e}\n{FILTER_USAGE}")
+            return
+    search_filter = session.agent.search_filter
+    if search_filter.is_empty():
+        print("No filter: the searches look at every document.")
+        return
+    matching = ""
+    if session.index is not None:
+        count = session.index.count_documents([search_filter])
+        matching = f": the searches look at {count} of the {session.index.stats().documents} indexed documents"
+    print(f"Filter: {search_filter.describe()}{matching}.")
+
+
 def approval_command(session: Session, argument: str) -> None:
     if argument:
         if argument not in APPROVAL_MODES:
@@ -1109,6 +1191,7 @@ def review_command(session: Session, argument: str) -> None:
         error(f"{e} (in {session.config.personas_dir}).")
         return
     session.last_sources = []
+    session.last_dropped = []
     show_events(session, review.run(argument), interrupt=review.interrupt)
 
 
@@ -1465,6 +1548,7 @@ def json_command(session: Session, argument: str) -> None:
         error("Usage: /json QUESTION")
         return
     session.last_sources = []
+    session.last_dropped = []
     show_events(session, session.agent.run(argument, ANSWER_SCHEMA), structured=True)
 
 
@@ -1476,7 +1560,14 @@ def handle_command(session: Session, line: str) -> bool:
     if name == "/help":
         print(HELP)
     elif name == "/sources":
-        show_excerpts(session.last_sources)
+        if argument == "dropped":
+            show_dropped(session.last_dropped)
+        elif argument:
+            error("Usage: /sources [dropped]")
+        else:
+            show_excerpts(session.last_sources)
+    elif name == "/filter":
+        filter_command(session, argument)
     elif name == "/tools":
         tools_command(session)
     elif name == "/files":
@@ -1997,6 +2088,44 @@ def run_schedule(config: Config, once: bool) -> int:
         if session.index is not None:
             session.index.close()
 
+def run_retrieval_command(config: Config, path: Path) -> int:
+    try:
+        cases = load_cases(path)
+    except EvalError as e:
+        error(str(e))
+        return 1
+    if not config.index_path.exists():
+        error(f"No index at {config.index_path}. Create one with: python -m sensai ingest PATH")
+        return 1
+    try:
+        index = open_index(config, OllamaClient(config.host))
+    except (LLMError, StoreError) as e:
+        error(str(e))
+        return 1
+    answered = sum(bool(case.sources) for case in cases)
+    print(
+        f"Searching {plural(index.stats().documents, 'document')} for {plural(len(cases), 'question')} "
+        f"({answered} answered by the documents)..."
+    )
+    try:
+        scores = evaluate_retrieval(index, config, cases)
+    except (LLMError, StoreError, RerankError) as e:
+        error(str(e))
+        return 1
+    except KeyboardInterrupt:
+        print("\n[interrupted]")
+        return 1
+    finally:
+        index.close()
+    print(f"\n{'':<16}  Recall@{config.rag_top_k}  NDCG@{NDCG_K}  Precision  Noise")
+    for row in scores:
+        ndcg = "-" if row.ndcg is None else f"{row.ndcg:.2f}"
+        noise = "-" if row.noise is None else f"{row.noise:.1f}"
+        current = "  ← SENSAI_RERANK_THRESHOLD" if row.name == f"+ threshold {config.rerank_threshold}%" else ""
+        print(f"{row.name:<16}  {percent(row.recall):>8}  {ndcg:>7}  {percent(row.precision):>9}  {noise:>5}{current}")
+    print("\nNoise: excerpts sent to the model for the questions the documents do not answer.")
+    return 0
+
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
@@ -2016,6 +2145,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_attack(config, args)
     if args.command == "stats":
         return run_stats(config, args.days)
+    if args.command == "eval" and args.retrieval:
+        if args.out or args.compare:
+            error("--retrieval prints its scores: it cannot be used with --out or --compare")
+            return 1
+        return run_retrieval_command(config, args.cases)
     if args.command == "eval":
         return run_eval_command(config, args.cases, args.out, args.compare)
     if args.command == "schedule":
