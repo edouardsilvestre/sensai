@@ -70,6 +70,12 @@ def test_the_cli_gives_ask_user_to_the_model(config, client):
     assert "ask_user" not in load_tools(config, client).names()
 
 
+def test_the_interface_chooses_who_answers(config, client, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("the question went to the terminal"))
+    tools = load_tools(config, client, lambda question, options: "Lyon")
+    assert tools.execute(ToolCall("ask_user", {"question": QUESTION})).content == "The user answered: Lyon"
+
+
 def test_the_model_asks_and_gets_the_answer(config, client, monkeypatch, capsys):
     agent = Agent(config, client)
     agent.tools = load_tools(config, client)

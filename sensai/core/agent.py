@@ -170,9 +170,10 @@ class Agent:
             if approval is not None:
                 yield ApprovalEvent(call, approval)
             result = tools.execute(call) if approval is None or approval.approved else refusal(approval)
-        self.shown.append(self._kept_result(call, result, guardrails))
+        if not result.private:
+            self.shown.append(self._kept_result(call, result, guardrails))
         # A blocked call is kept as the model wrote it: what the rule stopped must not reach the history.
-        if not checked.blocked:
+        if not checked.blocked and not result.private:
             self.used.append(self.used_tool(call, result, guardrails))
         yield ToolResultEvent(call, result)
         return call, result

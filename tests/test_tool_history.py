@@ -6,12 +6,14 @@ from conftest import FakeClient
 from sensai.core.agent import KEPT_CHARS, WITHHELD, Agent
 from sensai.core.approval import Approval
 from sensai.core.config import DEFAULT_PERSONAS_DIR
+from sensai.core.events import ToolResultEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.memory.conversation import ConversationMemory, ToolUse, Turn
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.orchestrator import Review
 from sensai.core.persona import load_personas
+from sensai.core.tools.questions import Questions
 from sensai.core.tools.registry import ToolRegistry, ToolResult, requires_approval
 
 PERSONAS = load_personas(DEFAULT_PERSONAS_DIR)
@@ -226,6 +228,39 @@ def test_a_review_keeps_the_tool_calls_of_the_investigator(config):
     agent = agent_with(config, client)
     list(Review(agent, PERSONAS).run("Who paid?"))
     assert [tool.name for tool in agent.memory.turns[0].tools] == ["write_note"]
+
+
+def question_agent(config, client) -> Agent:
+    client.tool_rounds = [[ToolCall("ask_user", {"question": "Which Vidal?"})]]
+    return Agent(config, client, tools=ToolRegistry([Questions(lambda question, options: "Marc Vidal").ask_user]))
+
+
+def test_the_answer_to_a_question_stays_in_its_turn(config, client):
+    agent = question_agent(config, client)
+    list(agent.run("How much did Vidal get?"))
+    assert "The user answered: Marc Vidal" in str(client.chats[1][0])
+    assert agent.memory.turns[0].tools == []
+    list(agent.run("And after that?"))
+    assert "Marc Vidal" not in str(client.chats[-1][0])
+
+
+def test_the_answer_to_a_question_stays_out_of_the_saved_session(config, client, tmp_path):
+    agent = question_agent(config, client)
+    list(agent.run("How much did Vidal get?"))
+    store = SessionStore(tmp_path / "sessions")
+    store.save("one", agent.memory, config.model)
+    assert "Marc Vidal" not in (tmp_path / "sessions" / "one.json").read_text(encoding="utf-8")
+
+
+def test_an_interrupted_turn_keeps_the_calls_but_not_the_answer_to_a_question(config, client):
+    agent = question_agent(config, client)
+    events = agent.run("How much did Vidal get?")
+    for event in events:
+        if isinstance(event, ToolResultEvent):
+            break
+    events.close()
+    assert agent.interrupt()
+    assert "Marc Vidal" not in str(agent.memory.messages())
 
 
 def test_an_interrupted_review_keeps_the_tool_calls_too(config):

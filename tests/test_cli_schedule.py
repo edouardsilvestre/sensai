@@ -23,6 +23,7 @@ from sensai.interfaces.cli.main import (
     parse_args,
     print_schedule_news,
     run_due_tasks,
+    run_schedule,
     watch_schedule,
 )
 
@@ -292,6 +293,16 @@ def test_an_unexpected_error_fails_the_task_and_not_the_scheduler(session, clien
     first, second = session.schedule.tasks
     assert first.failed and first.status == f"failed: {str(failure) or type(failure).__name__}"
     assert second.status == "report written"
+
+
+def test_a_scheduled_task_has_nobody_to_ask(config, client, monkeypatch):
+    monkeypatch.setattr("sensai.core.agent.OllamaClient", lambda *args: client)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("the task waited for the keyboard"))
+    config.features["rag"] = False
+    Schedule(config.schedule_path, config.reports_dir).add("every 1h", "Which Orion?", [], PAST)
+    client.tool_rounds = [[ToolCall("ask_user", {"question": "Which Orion?"})]]
+    assert run_schedule(config, once=True) == 0
+    assert client.tools_seen and "ask_user" not in str(client.tools_seen)
 
 
 def test_a_run_after_a_failure_clears_it(session):

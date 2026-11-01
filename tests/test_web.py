@@ -3,24 +3,32 @@ import json
 import queue
 import threading
 import time
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from conftest import FakeClient
 from sensai.core.agent import INTERRUPTED, Agent
+from sensai.core.evaluation.judge import Claim, Judgement
+from sensai.core.events import CheckEvent, CheckFailedEvent, CheckStartedEvent, LogFailedEvent
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import LLMError, ToolCall
 from sensai.core.memory.conversation import Turn
 from sensai.core.memory.sessions import SessionStore
+from sensai.core.monitoring.log import InteractionLog
 from sensai.core.persona import load_personas
+from sensai.core.prompts import PromptStore
 from sensai.core.rag.models import SearchResult
+from sensai.core.tools.questions import NO_ANSWER, Questions
 from sensai.core.tools.registry import ToolRegistry, requires_approval
 from sensai.interfaces.cli.main import Session, load_memory, parse_args
-from sensai.interfaces.web.server import HOST, STATIC_DIR, WebChat, create_app, stream
+from sensai.interfaces.web.server import HOST, STATIC_DIR, WebChat, create_app, open_session, page_event, stream
 
 SENT: list[str] = []
 THREADS: set[int] = set()
+QUESTION = "Which Vidal do you mean?"
+OPTIONS = ["Marc Vidal", "Sophie Vidal"]
 
 
 @requires_approval("the query leaves the machine")
@@ -65,15 +73,15 @@ class DownClient(FakeClient):
 
 
 def start(config, client, **agent) -> WebChat:
-    def open_session() -> Session:
-        tools = ToolRegistry([send])
+    def opened(asker) -> Session:
+        tools = ToolRegistry([send, Questions(asker).ask_user])
         session = Session(
-            config, Agent(config, client, tools=tools, **agent), personas=load_personas(config.personas_dir)
+            config, Agent(config, client, tools=tools, **agent), personas=load_personas(config.personas_dir), asker=asker
         )
         load_memory(session, None)
         return session
 
-    return WebChat(open_session)
+    return WebChat(opened)
 
 
 @pytest.fixture(autouse=True)
@@ -270,7 +278,7 @@ def test_an_approval_nobody_asked_for_is_refused(page):
 
 
 def test_a_late_click_does_not_answer_the_next_question(page, chat, client):
-    chat.approvals.put("allow")
+    chat.replies.put("allow")
     client.tool_rounds = [[ToolCall("send", {"query": "Orion"})]]
     thread, _ = in_background(page)
     wait_for(lambda: chat.asking)
@@ -359,10 +367,194 @@ def test_a_page_closed_during_an_approval_refuses_the_tool(page, chat, client):
     assert SENT == []
 
 
+def ask_a_question(page, chat, client, **arguments) -> tuple[threading.Thread, dict]:
+    client.tool_rounds = [[ToolCall("ask_user", {"question": QUESTION, "options": OPTIONS, **arguments})]]
+    thread, result = in_background(page)
+    wait_for(lambda: chat.asking)
+    return thread, result
+
+
+def test_a_question_waits_for_the_click_and_the_answer_goes_to_the_model(page, chat, client):
+    thread, result = ask_a_question(page, chat, client)
+    assert len(client.chats) == 1
+    assert page.post("/api/question", json={"answer": "Marc Vidal"}).status_code == 200
+    thread.join(5)
+    assert client.chats[1][0][-1]["content"] == "The user answered: Marc Vidal"
+    assert of_type(result["events"], "question") == [{"type": "question", "question": QUESTION, "options": OPTIONS}]
+    # The card shows the question: the call of the tool is not shown as well.
+    assert [event["text"] for event in of_type(result["events"], "activity")] == ['[ask_user] answered "Marc Vidal"']
+
+
+def test_the_answer_can_be_something_the_options_did_not_offer(page, chat, client):
+    thread, _ = ask_a_question(page, chat, client)
+    page.post("/api/question", json={"answer": "the one in Lyon"})
+    thread.join(5)
+    assert client.chats[1][0][-1]["content"] == "The user answered: the one in Lyon"
+
+
+def test_a_question_without_options_has_a_free_answer(page, chat, client):
+    thread, result = ask_a_question(page, chat, client, options=None)
+    page.post("/api/question", json={"answer": "Lyon"})
+    thread.join(5)
+    assert of_type(result["events"], "question")[0]["options"] == []
+
+
+def test_a_question_can_be_left_unanswered(page, chat, client):
+    thread, result = ask_a_question(page, chat, client)
+    assert page.post("/api/question", json={"answer": None}).status_code == 200
+    thread.join(5)
+    assert client.chats[1][0][-1]["content"] == NO_ANSWER
+    assert of_type(result["events"], "activity")[0]["text"] == "[ask_user] no answer"
+    assert of_type(result["events"], "done")
+
+
+def test_stop_during_a_question_ends_the_answer(page, chat, client):
+    thread, result = ask_a_question(page, chat, client)
+    page.post("/api/stop")
+    thread.join(5)
+    assert not thread.is_alive() and of_type(result["events"], "stopped")
+    assert len(client.chats) == 1
+
+
+def test_a_page_closed_during_a_question_does_not_block_the_session(page, chat, client):
+    client.tool_rounds = [[ToolCall("ask_user", {"question": QUESTION})]]
+    events = chat.start("Who?")
+    wait_for(lambda: chat.asking)
+    chat.stop()
+    while events.get(timeout=5) is not None:
+        pass
+    assert not chat.asking and ask(page, "Still there?")[-1]["type"] == "state"
+
+
+def test_an_answer_nobody_asked_for_is_refused(page):
+    assert page.post("/api/question", json={"answer": "Marc Vidal"}).status_code == 409
+    assert page.post("/api/question", json={}).status_code == 422
+
+
+def test_a_late_answer_does_not_answer_the_next_question(page, chat, client):
+    chat.replies.put("Sophie Vidal")
+    thread, _ = ask_a_question(page, chat, client)
+    assert len(client.chats) == 1
+    page.post("/api/question", json={"answer": "Marc Vidal"})
+    thread.join(5)
+    assert client.chats[1][0][-1]["content"] == "The user answered: Marc Vidal"
+
+
+def test_a_click_only_answers_what_is_asked(page, chat, client):
+    thread, _ = ask_a_question(page, chat, client)
+    assert page.post("/api/approval", json={"choice": "allow"}).status_code == 409
+    page.post("/api/question", json={"answer": "Marc Vidal"})
+    thread.join(5)
+    client.tool_rounds = [[ToolCall("send", {"query": "Orion"})]]
+    thread, _ = in_background(page)
+    wait_for(lambda: chat.asking)
+    assert page.post("/api/question", json={"answer": "Marc Vidal"}).status_code == 409
+    page.post("/api/approval", json={"choice": "deny"})
+    thread.join(5)
+    assert SENT == []
+
+
+def test_the_question_is_redacted_before_it_is_shown(config, client):
+    rules = [{"name": "source", "terms": ["Claire Benoit"], "on": ["tools"], "action": "redact"}]
+    chat = start(config, client, guardrails=Guardrails(parse_rules(rules)))
+    client.tool_rounds = [[ToolCall("ask_user", {"question": "Is it Claire Benoit?"})]]
+    try:
+        thread, result = in_background(page := page_of(chat))
+        wait_for(lambda: chat.asking)
+        page.post("/api/question", json={"answer": "No"})
+        thread.join(5)
+    finally:
+        chat.close()
+    assert "Claire Benoit" not in json.dumps(of_type(result["events"], "question"))
+
+
+def test_the_question_stays_on_the_page_when_the_feature_comes_back(page, chat, client, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("the question went to the terminal"))
+    assert page.post("/api/features/questions", json={"on": False}).status_code == 200
+    assert "ask_user" not in chat.session.agent.tools.names()
+    assert page.post("/api/features/questions", json={"on": True}).status_code == 200
+    thread, result = ask_a_question(page, chat, client)
+    page.post("/api/question", json={"answer": "Marc Vidal"})
+    thread.join(5)
+    assert of_type(result["events"], "question") and client.chats[1][0][-1]["content"] == "The user answered: Marc Vidal"
+
+
+def web_session(config, client, monkeypatch) -> WebChat:
+    """What `run_web` opens, without a model to check."""
+
+    def started(config, asker) -> Session:
+        return Session(config, Agent(config, client, tools=ToolRegistry([Questions(asker).ask_user])), asker=asker)
+
+    monkeypatch.setattr("sensai.interfaces.web.server.start_session", started)
+    return WebChat(lambda asker: open_session(config, asker))
+
+
+def test_the_web_command_asks_the_questions_on_the_page(config, client, monkeypatch):
+    chat = web_session(config, client, monkeypatch)
+    try:
+        assert chat.session.asker == chat.ask
+    finally:
+        chat.close()
+
+
+def test_the_messages_of_the_page_are_logged(config, client, monkeypatch):
+    config.features["logging"] = True
+    chat = web_session(config, client, monkeypatch)
+    ask(page_of(chat))
+    session_id = chat.session.session_id
+    chat.close()
+    log = InteractionLog(config.log_path)
+    logged = log.since(datetime(2000, 1, 1))
+    log.close()
+    assert [interaction.session_id for interaction in logged] == [session_id]
+
+
+def test_a_message_is_not_logged_when_the_feature_is_off(config, client, monkeypatch):
+    config.features["logging"] = False
+    chat = web_session(config, client, monkeypatch)
+    try:
+        assert chat.session.log is None
+    finally:
+        chat.close()
+
+
+def test_the_check_of_an_answer_is_shown():
+    started = page_event(CheckStartedEvent(2, "qwen3:1.7b"), [])
+    assert started["text"].startswith("Checking 2 sentences with qwen3:1.7b")
+    judgement = Judgement([Claim("Marc paid.", "contradicted", "he was paid")], 5, 4)
+    checked = page_event(CheckEvent(judgement), [])
+    assert checked["warning"] and checked["text"].splitlines()[1] == '  contradicted: "Marc paid." (he was paid)'
+    assert not page_event(CheckEvent(Judgement([Claim("Marc was paid.", "supported")], 5, 4)), [])["warning"]
+    assert page_event(CheckFailedEvent("no model"), [])["text"] == "The answer could not be checked: no model"
+
+
+def test_a_message_that_could_not_be_logged_is_reported():
+    assert page_event(LogFailedEvent("disk full"), [])["warning"] is True
+
+
+def test_default_goes_back_to_the_prompt_version_in_use(config, client, tmp_path):
+    prompts = PromptStore(tmp_path / "prompts")
+    prompts.snapshot("Be clear.")
+    prompts.snapshot("Be short.")
+    prompts.activate(1)
+    config.features["prompt_versions"] = True
+    chat = start(config, client, prompts=prompts)
+    chat.session.prompts = prompts
+    page = page_of(chat)
+    try:
+        assert page.post("/api/persona", json={"id": "investigator"}).status_code == 200
+        assert chat.session.agent.prompt_version is None
+        assert page.post("/api/persona", json={"id": None}).status_code == 200
+        assert chat.session.agent.memory.system_prompt == "Be clear."
+        assert chat.session.agent.prompt_version == 1
+    finally:
+        chat.close()
+
+
 def test_everything_runs_on_the_thread_that_opened_the_session(config, client):
     """An SQLite connection refuses any other thread."""
     opened = []
-    chat = WebChat(lambda: opened.append(threading.get_ident()) or Session(config, Agent(config, client)))
+    chat = WebChat(lambda asker: opened.append(threading.get_ident()) or Session(config, Agent(config, client)))
     try:
         assert chat.call(threading.get_ident) == opened[0]
     finally:

@@ -37,6 +37,6 @@ class Questions:
             raise ToolError("ask_user: the question is empty")
         answer = self.asker(question, _options(options))
         if answer is None or not answer.strip():
-            return ToolResult(NO_ANSWER, summary="no answer")
+            return ToolResult(NO_ANSWER, summary="no answer", private=True)
         answer = answer.strip()
-        return ToolResult(f"The user answered: {answer}", summary=f'answered "{answer}"')
+        return ToolResult(f"The user answered: {answer}", summary=f'answered "{answer}"', private=True)

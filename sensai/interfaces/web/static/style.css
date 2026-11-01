@@ -299,6 +299,22 @@ pre code { padding: 0; background: none; }
 .approval button.allow { background: var(--accent); border-color: var(--accent); color: #fff; }
 .approval button.allow:hover { background: var(--accent-hover); }
 
+.question strong { margin-bottom: 10px; font-weight: 500; }
+.question .actions:not(:empty) + .actions { margin-top: 8px; }
+
+.question input {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 6px 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+}
+
+.question input:focus { border-color: var(--muted); outline: none; }
+
 /* Composer */
 
 #composer {

@@ -18,6 +18,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from sensai.core.approval import Approval
 from sensai.core.config import FEATURES, Config
 from sensai.core.events import (
+    CheckEvent,
+    CheckFailedEvent,
+    CheckStartedEvent,
     CompactionEvent,
     CompactionFailedEvent,
     CompactionStartedEvent,
@@ -28,6 +31,7 @@ from sensai.core.events import (
     ExamplesEvent,
     ExamplesFailedEvent,
     GuardrailEvent,
+    LogFailedEvent,
     ReasoningStoppedEvent,
     SourcesEvent,
     ThoughtEvent,
@@ -39,14 +43,19 @@ from sensai.core.llm.ollama import ToolCall
 from sensai.core.memory.conversation import ConversationMemory
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
+from sensai.core.tools.questions import Asker
 from sensai.interfaces.cli.main import (
+    ASK_USER,
     Session,
     describe_call,
     describe_edits,
     feature_command,
     feature_refusal,
     guardrail_message,
+    judgement_lines,
+    load_log,
     load_memory,
+    name_conversation,
     new_command,
     plural,
     resume,
@@ -90,7 +99,8 @@ def page_event(event: Event, sources: list[SearchResult]) -> dict | None:
         documents = len({source.source for source in event.sources})
         return activity(f"{plural(len(event.sources), 'excerpt')} from {plural(documents, 'document')}")
     if isinstance(event, ToolCallEvent):
-        return activity(describe_call(event.call))
+        # The question of `ask_user` has its own card: it must not appear twice.
+        return None if event.call.name == ASK_USER else activity(describe_call(event.call))
     if isinstance(event, ToolResultEvent):
         if event.result.error:
             return activity(f"{event.call.name} failed: {event.result.content.removeprefix('Error: ')}", warning=True)
@@ -116,6 +126,16 @@ def page_event(event: Event, sources: list[SearchResult]) -> dict | None:
         return activity(f"{plural(event.turns, 'turn')} condensed into the summary")
     if isinstance(event, CompactionFailedEvent):
         return activity(f"Could not condense the history: {event.message}", warning=True)
+    if isinstance(event, CheckStartedEvent):
+        sentences = plural(event.sentences, "sentence")
+        return activity(f"Checking {sentences} with {event.model}, this can take a few minutes...")
+    if isinstance(event, CheckEvent):
+        lines = judgement_lines(event.judgement)
+        return activity("\n".join(lines), warning=len(lines) > 1)
+    if isinstance(event, CheckFailedEvent):
+        return activity(f"The answer could not be checked: {event.message}", warning=True)
+    if isinstance(event, LogFailedEvent):
+        return activity(f"This message was not logged: {event.message}", warning=True)
     return None
 
 
@@ -125,15 +145,16 @@ class WebChat:
     only works on the thread that opened it. There is one conversation at a time, like in a terminal.
     """
 
-    def __init__(self, open_session: Callable[[], Session | None]):
+    def __init__(self, open_session: Callable[[Asker], Session | None]):
         self.thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sensai")
-        self.session = self.call(open_session)
+        self.session = self.call(open_session, self.ask)
         if self.session is not None:
             self.session.agent.approver = self.approve
         self.answering = threading.Lock()
         self.stopping = threading.Event()
-        self.approvals: queue.Queue[str] = queue.Queue()
-        self.asking = False
+        self.replies: queue.Queue[str | None] = queue.Queue()
+        # What the page was asked and has not answered yet: "approval" or "question".
+        self.asking: str | None = None
         self.events: queue.Queue[dict | None] = queue.Queue()
 
     def call(self, job: Callable, *args: Any) -> Any:
@@ -143,6 +164,8 @@ class WebChat:
         self.stop()
         if self.session is not None and self.session.index is not None:
             self.call(self.session.index.close)
+        if self.session is not None and self.session.log is not None:
+            self.call(self.session.log.close)
         self.thread.shutdown()
 
     def state(self) -> dict:
@@ -190,7 +213,7 @@ class WebChat:
     def stop(self) -> None:
         """Takes effect at the next event of the agent: a call to the model or a tool cannot be cut from outside."""
         self.stopping.set()
-        self.approvals.put("deny")
+        self.replies.put(None)
 
     def _answer(self, message: str) -> None:
         try:
@@ -206,6 +229,7 @@ class WebChat:
             self.events.put(None)
 
     def _stream(self, message: str) -> None:
+        name_conversation(self.session)
         agent = self.session.agent
         events = agent.run(message)
         sources: list[SearchResult] = []
@@ -222,28 +246,40 @@ class WebChat:
             if shown is not None:
                 self.events.put(shown)
 
+    def wait_for_page(self, event: dict) -> str | None:
+        """Blocks the thread of the session until the click. None when the answer is stopped or the page closed."""
+        # A click that came too late, or the stop of the last answer, must not answer this question.
+        while not self.replies.empty():
+            self.replies.get_nowait()
+        if self.stopping.is_set():
+            return None
+        self.asking = event["type"]
+        self.events.put(event)
+        reply = self.replies.get()
+        self.asking = None
+        return reply
+
+    def reply(self, kind: str, value: str | None) -> bool:
+        if self.asking != kind:
+            return False
+        self.replies.put(value)
+        return True
+
     def approve(self, call: ToolCall, reason: str) -> Approval:
         if call.name in self.session.always_allowed:
             return Approval(True)
-        # A click that came too late, or the stop of the last answer, must not answer this question.
-        while not self.approvals.empty():
-            self.approvals.get_nowait()
-        if self.stopping.is_set():
-            return Approval(False, "the user stopped the answer")
-        self.asking = True
         # The exact call was shown just before, by the ToolCallEvent.
-        self.events.put({"type": "approval", "tool": call.name, "reason": f"{reason[:1].upper()}{reason[1:]}."})
-        choice = self.approvals.get()
-        self.asking = False
+        reason = f"{reason[:1].upper()}{reason[1:]}."
+        choice = self.wait_for_page({"type": "approval", "tool": call.name, "reason": reason})
+        if choice is None:
+            return Approval(False, "the user stopped the answer")
         if choice == "always":
             self.session.always_allowed.add(call.name)
         return Approval(choice != "deny")
 
-    def answer_approval(self, choice: str) -> bool:
-        if not self.asking:
-            return False
-        self.approvals.put(choice)
-        return True
+    def ask(self, question: str, options: list[str]) -> str | None:
+        """Asks the question of the model on the page. None tells the model that nobody answered."""
+        return self.wait_for_page({"type": "question", "question": question, "options": options})
 
     def new(self) -> None:
         new_command(self.session)
@@ -255,6 +291,9 @@ class WebChat:
         session, agent = self.session, self.session.agent
         if persona_id is None:
             agent.persona, agent.memory.system_prompt = None, session.config.system_prompt
+            active = session.prompts.active() if session.prompts and session.config.features["prompt_versions"] else None
+            if active:
+                agent.prompt_version, agent.memory.system_prompt = active.number, active.prompt
             return True
         persona = session.personas.get(persona_id)
         if persona is None:
@@ -273,6 +312,10 @@ class Message(BaseModel):
 
 class ApprovalChoice(BaseModel):
     choice: Literal["allow", "always", "deny"]
+
+
+class QuestionAnswer(BaseModel):
+    answer: str | None
 
 
 class PersonaChoice(BaseModel):
@@ -331,8 +374,14 @@ def create_app(chat: WebChat) -> FastAPI:
 
     @app.post("/api/approval")
     def approval(body: ApprovalChoice) -> dict:
-        if not chat.answer_approval(body.choice):
+        if not chat.reply("approval", body.choice):
             raise HTTPException(409, "No tool call is waiting for an answer")
+        return {}
+
+    @app.post("/api/question")
+    def question(body: QuestionAnswer) -> dict:
+        if not chat.reply("question", body.answer):
+            raise HTTPException(409, "No question is waiting for an answer")
         return {}
 
     @app.post("/api/new")
@@ -366,14 +415,18 @@ def create_app(chat: WebChat) -> FastAPI:
     return app
 
 
-def run_web(config: Config, port: int) -> int:
-    def open_session() -> Session | None:
-        session = start_session(config)
-        if session is not None:
-            load_memory(session, None)
-        return session
+def open_session(config: Config, asker: Asker) -> Session | None:
+    session = start_session(config, asker)
+    if session is None:
+        return None
+    if config.features["logging"]:
+        session.log = session.agent.log = load_log(config)
+    load_memory(session, None)
+    return session
 
-    chat = WebChat(open_session)
+
+def run_web(config: Config, port: int) -> int:
+    chat = WebChat(lambda asker: open_session(config, asker))
     if chat.session is None:
         return 1
     print(f"Sensai web UI: http://{HOST}:{port} (Ctrl+C to stop)", flush=True)

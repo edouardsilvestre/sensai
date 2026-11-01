@@ -27,6 +27,7 @@ As an investigative journalist protecting a source, I want the page to apply the
 
 Acceptance criteria:
 - A tool that asks for approval stops the answer and shows the exact call with `Allow`, `Always this session` and `Deny`; nothing runs before the click.
+- A question of the model stops the answer the same way: nothing is answered for me, and the question never waits in the terminal of the server.
 - The guardrails apply as in the chat, and what they redact or block is shown in the conversation.
 - The page loads nothing from the internet: it works on an air-gapped machine.
 - The answers of the model are never inserted as HTML: a document cannot run a script in the page.

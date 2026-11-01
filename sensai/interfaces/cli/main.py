@@ -75,6 +75,7 @@ from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.mcp import MCPConfigError
 from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
+from sensai.core.tools.questions import Asker
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
@@ -342,6 +343,23 @@ def run_stats(config: Config, days: int) -> int:
     return 0
 
 
+def ask_question(question: str, options: list[str]) -> str | None:
+    print(f"[{ASK_USER}] {question}")
+    for number, option in enumerate(options, start=1):
+        print(f"  {number}. {option}")
+    label = "Your answer (a number or your own words): " if options else "Your answer: "
+    while True:
+        try:
+            answer = input(label).strip()
+        except EOFError:
+            print()
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        if answer:
+            return answer
+
+
 @dataclass
 class Session:
     config: Config
@@ -361,6 +379,8 @@ class Session:
     prompts: PromptStore | None = None
     schedule: Schedule | None = None
     log: InteractionLog | None = None
+    # Who answers the questions of the model: the page in the web UI, nobody in a run without a user.
+    asker: Asker | None = ask_question
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -401,23 +421,6 @@ def confirm_cached(cached: CachedAnswer) -> bool:
             return True
         if answer in REFUSE_ANSWERS:
             return False
-
-
-def ask_question(question: str, options: list[str]) -> str | None:
-    print(f"[{ASK_USER}] {question}")
-    for number, option in enumerate(options, start=1):
-        print(f"  {number}. {option}")
-    label = "Your answer (a number or your own words): " if options else "Your answer: "
-    while True:
-        try:
-            answer = input(label).strip()
-        except EOFError:
-            print()
-            return None
-        if answer.isdigit() and 1 <= int(answer) <= len(options):
-            return options[int(answer) - 1]
-        if answer:
-            return answer
 
 
 def prompt(session: Session) -> str:
@@ -494,20 +497,25 @@ def claim_label(claim: Claim) -> str:
     return "contradicted" if claim.verdict == "contradicted" else "to verify"
 
 
-def print_judgement(judgement: Judgement) -> None:
+def judgement_lines(judgement: Judgement) -> list[str]:
     supported = sum(claim.verdict == "supported" for claim in judgement.claims)
     faithfulness = "-" if judgement.faithfulness is None else f"{judgement.faithfulness:.0%}"
     scores = ", ".join(
         f"{name} {'-' if score is None else score}/5"
         for name, score in (("relevance", judgement.relevance), ("coherence", judgement.coherence))
     )
-    print(
+    lines = [
         f"[check] {plural(len(judgement.claims), 'sentence')}: {supported} supported, "
         f"faithfulness {faithfulness}, {scores}"
-    )
+    ]
     for claim in judgement.claims:
         if claim.verdict != "supported":
-            print(f'  {claim_label(claim)}: "{claim.text}"' + (f" ({claim.reason})" if claim.reason else ""))
+            lines.append(f'  {claim_label(claim)}: "{claim.text}"' + (f" ({claim.reason})" if claim.reason else ""))
+    return lines
+
+
+def print_judgement(judgement: Judgement) -> None:
+    print("\n".join(judgement_lines(judgement)))
 
 
 def chat_turn(session: Session, line: str) -> None:
@@ -1058,7 +1066,7 @@ def feature_command(session: Session, argument: str) -> None:
 
 def reload_tools(session: Session) -> None:
     try:
-        session.agent.tools = load_tools(session.config, session.agent.client)
+        session.agent.tools = load_tools(session.config, session.agent.client, session.asker)
     except (LLMError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
         return
@@ -1605,8 +1613,8 @@ def load_schedule(config: Config) -> Schedule | None:
         return None
 
 
-def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
-    tools = build_registry(config, client, ask_question)
+def load_tools(config: Config, client: OllamaClient, asker: Asker | None = ask_question) -> ToolRegistry:
+    tools = build_registry(config, client, asker)
     if tools and not client.can_call_tools(config.model):
         warning(f"Model '{config.model}' cannot call tools, they are disabled. Pick a model like qwen3 or llama3.1.")
         return ToolRegistry()
@@ -1650,7 +1658,7 @@ def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
     return personas, personas[config.persona]
 
 
-def start_session(config: Config) -> Session | None:
+def start_session(config: Config, asker: Asker | None = ask_question) -> Session | None:
     """The model checked, then the tools, the rules, the documents, the examples. None when Sensai cannot start."""
     try:
         personas, persona = load_persona(config)
@@ -1661,13 +1669,13 @@ def start_session(config: Config) -> Session | None:
     agent = Agent(config, persona=persona, prompts=prompts)
     try:
         agent.client.ensure_model(config.model)
-        agent.tools = load_tools(config, agent.client)
+        agent.tools = load_tools(config, agent.client, asker)
         agent.guardrails = load_guardrails(config, agent.client)
     except (LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
         return None
 
-    session = Session(config, agent, personas=personas, prompts=prompts)
+    session = Session(config, agent, personas=personas, prompts=prompts, asker=asker)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
@@ -1800,7 +1808,7 @@ def run_eval_command(config: Config, path: Path, out: Path | None, compare: Path
         client = OllamaClient(config.host, config.ollama_api_key)
         client.ensure_model(config.model)
         client.ensure_model(config.judge_model or config.model)
-        tools = load_tools(config, client)
+        tools = load_tools(config, client, asker=None)
         guardrails = load_guardrails(config, client)
     except (EvalError, PersonaError, LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
@@ -1899,7 +1907,7 @@ def run_schedule(config: Config, once: bool) -> int:
     if not config.features["schedule"]:
         error("The schedule feature is off: SENSAI_FEATURE_SCHEDULE=true to run the tasks.")
         return 1
-    session = start_session(config)
+    session = start_session(config, asker=None)
     if session is None:
         return 1
     load_memory(session, None)

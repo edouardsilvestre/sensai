@@ -250,6 +250,36 @@ function askApproval(parent, event) {
   parent.append(card);
 }
 
+function askQuestion(parent, event) {
+  const card = element("form", "approval question");
+  const reply = async (answer) => {
+    card.replaceWith(element("div", "step", `[ask_user] ${event.question}`));
+    await post("/api/question", { answer }).catch((error) => toast(error.message));
+  };
+  const options = element("div", "actions");
+  for (const option of event.options) {
+    const button = element("button", "", option);
+    button.type = "button";
+    button.addEventListener("click", () => reply(option));
+    options.append(button);
+  }
+  const field = element("input");
+  field.placeholder = event.options.length ? "Or in your own words" : "Your answer";
+  field.setAttribute("aria-label", "Your answer");
+  const skip = element("button", "", "Don't answer");
+  skip.type = "button";
+  skip.addEventListener("click", () => reply(null));
+  const own = element("div", "actions");
+  own.append(field, element("button", "allow", "Send"), skip);
+  card.addEventListener("submit", (submitted) => {
+    submitted.preventDefault();
+    if (field.value.trim()) reply(field.value.trim());
+  });
+  card.append(element("strong", "", event.question), options, own);
+  parent.append(card);
+  field.focus();
+}
+
 // One answer on the page, filled in by the events of the server.
 function startAnswer() {
   const assistant = element("div", "assistant");
@@ -286,6 +316,8 @@ function startAnswer() {
       activity.append(element("div", event.warning ? "step warning" : "step", event.text));
     } else if (event.type === "approval") {
       askApproval(activity, event);
+    } else if (event.type === "question") {
+      askQuestion(activity, event);
     } else if (event.type === "done") {
       stopThinking();
       addSources(assistant, event.sources);

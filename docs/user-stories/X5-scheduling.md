@@ -26,6 +26,7 @@ Acceptance criteria:
 As an investigative journalist protecting a source, I want a task nobody watches to do no more than I allowed when I created it, so that it never sends a query out of the machine or writes a file on its own decision.
 
 Acceptance criteria:
+- The model cannot ask a question during a scheduled run: `ask_user` is not among its tools.
 - A tool that asks for approval in the chat is refused in a scheduled run, and the model is told so, unless the task was created with `--allow`: `/schedule add every 6h --allow web_search Any new article about Orion Delta?`.
 - `--allow` only accepts the tools enabled in the chat, and `/schedule` shows what each task is allowed to use.
 - A report says which tools were refused or failed, and such a run always gives a report, since finding the same thing may only mean it could not look.
