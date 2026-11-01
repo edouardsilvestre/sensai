@@ -647,7 +647,6 @@ Tested on fictional leaked documents with `qwen2.5:1.5b` and `qwen3:1.7b` on CPU
 - **Why code-based fact extraction**: Small models misread numbers (reading French decimal "480 000,00" as "480 million") or demanded details that sentences were not meant to include. Pre-checking amounts and dates by code eliminated number hallucination errors instantly.
 - **Limits**: `qwen3:1.7b` remains overly suspicious on qualitative statements, occasionally claiming details are missing. On CPU, it takes minutes per answer. Therefore, `fact_check` is disabled by default (`/feature fact_check on` to enable), serving as a safeguard for careful verification rather than an automatic blocker.
 - **Alternatives ruled out**: Embedding comparison (cosine similarity failed to differentiate transaction direction), dedicated NLI libraries (to adhere strictly to standard Ollama API constraints), and 3-vote self-consistency (prohibitive 15-minute runtime per turn on CPU).
->>>>>>> origin/develop
 
 ## Getting Started
 
