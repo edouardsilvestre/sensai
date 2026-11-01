@@ -110,6 +110,13 @@ class DocumentEvent:
 
 
 @dataclass
+class RerankFailedEvent:
+    """The search was not reranked: its excerpts are in the order of the search."""
+
+    message: str
+
+
+@dataclass
 class DocumentFailedEvent:
     message: str
 
@@ -159,6 +166,7 @@ class CacheFailedEvent:
 Event = (
     SourcesEvent
     | RerankEvent
+    | RerankFailedEvent
     | TokenEvent
     | ToolCallEvent
     | ApprovalEvent

@@ -10,7 +10,7 @@ from sensai.core.rag.chunker import Chunker, join_chunks, join_locations
 from sensai.core.rag.embedder import Embedder
 from sensai.core.rag.loaders import DocumentLoadError, is_supported, load_document
 from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
-from sensai.core.rag.reranker import Reranker
+from sensai.core.rag.reranker import RerankError, Reranker
 from sensai.core.rag.retriever import fuse
 from sensai.core.rag.store import DocumentRecord, IndexStats, VectorStore
 
@@ -54,6 +54,8 @@ class DocumentIndex:
         self.embedder = embedder
         self.chunker = chunker
         self.reranker = reranker
+        # Why the reranker could not run: the searches go on without it, and do not load it again.
+        self.rerank_error = ""
         # Read at each search, so that /feature hybrid off or /feature rerank off takes effect at once.
         self.config = config
 
@@ -155,14 +157,21 @@ class DocumentIndex:
             keyword = self.store.keyword_search(query, candidates, vector, document_ids)
             # Up to twice as many chunks when the searches found different ones: the reranker reads the best only.
             found = fuse([found, keyword])[:candidates]
-        if self.config.features["rerank"]:
-            found = self.reranker.rerank(query, found)
-            threshold = self.config.rerank_threshold / 100
-            if report is not None:
-                report.candidates = len(found)
-                report.dropped = [result for result in found if result.relevance < threshold]
-            # A chunk on the subject that does not answer, like the transfer of May for a question on March.
-            found = [result for result in found if result.relevance >= threshold]
+        if self.config.features["rerank"] and not self.rerank_error:
+            try:
+                found = self.reranker.rerank(query, found)
+            except RerankError as e:
+                # Searching without the reranker beats failing every message, like without sentence-transformers.
+                self.rerank_error = str(e)
+            else:
+                threshold = self.config.rerank_threshold / 100
+                if report is not None:
+                    report.candidates = len(found)
+                    report.dropped = [result for result in found if result.relevance < threshold]
+                # A chunk on the subject that does not answer, like the transfer of May for a question on March.
+                found = [result for result in found if result.relevance >= threshold]
+        if self.config.features["rerank"] and self.rerank_error and report is not None:
+            report.rerank_error = self.rerank_error
         return self._widen(found[:k])
 
     def _widen(self, results: list[SearchResult]) -> list[SearchResult]:
@@ -180,31 +189,31 @@ class DocumentIndex:
                 passages.append(_Passage(result, None, 0, -1))
                 continue
             document_id, position = positions[result.chunk_id]
-            first, last = max(position - around, 0), position + around
+            new = _Passage(result, document_id, max(position - around, 0), position + around)
             touching = [
-                p for p in passages if p.document_id == document_id and p.first <= last + 1 and first <= p.last + 1
+                p
+                for p in passages
+                if p.document_id == document_id and p.first <= new.last + 1 and new.first <= p.last + 1
             ]
             if not touching:
-                passages.append(_Passage(result, document_id, first, last))
+                passages.append(new)
                 continue
             # The passages are in the order of their excerpts: the first one touched is the most relevant.
-            kept = touching[0]
-            kept.first = min([first] + [p.first for p in touching])
-            kept.last = max([last] + [p.last for p in touching])
-            for passage in touching[1:]:
-                passages.remove(passage)
-        widened = []
-        for passage in passages:
-            chunks = []
-            if passage.document_id is not None:
-                chunks = self.store.chunks_between(passage.document_id, passage.first, passage.last)
-            if not chunks:
-                widened.append(passage.excerpt)
-                continue
-            text = join_chunks(chunks)
-            location = join_locations([chunk.location for chunk in chunks])
-            widened.append(replace(passage.excerpt, text=text, location=location))
-        return widened
+            kept, merged = touching[0], touching[1:]
+            kept.first = min(p.first for p in touching + [new])
+            kept.last = max(p.last for p in touching + [new])
+            passages = [p for p in passages if p not in merged]
+        return [self._read(passage) for passage in passages]
+
+    def _read(self, passage: _Passage) -> SearchResult:
+        """The excerpt of a passage with the text of all its chunks, or alone when they are no longer in the store."""
+        if passage.document_id is None:
+            return passage.excerpt
+        chunks = self.store.chunks_between(passage.document_id, passage.first, passage.last)
+        if not chunks:
+            return passage.excerpt
+        location = join_locations([chunk.location for chunk in chunks])
+        return replace(passage.excerpt, text=join_chunks(chunks), location=location)
 
     def count_documents(self, filters: Sequence[SearchFilter]) -> int:
         document_ids = self.store.allowed_documents(filters)

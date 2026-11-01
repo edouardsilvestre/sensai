@@ -58,6 +58,8 @@ class SearchReport:
     candidates: int = 0
     # The chunks under the relevance threshold, the most relevant first.
     dropped: list[SearchResult] = field(default_factory=list)
+    # Why the search was not reranked although the feature is on.
+    rerank_error: str = ""
 
 
 _DESCRIBED_FIELDS = {"from": "From", "to": "To", "cc": "Cc", "date": "Date", "author": "Author", "attachments": "Attachments"}

@@ -31,6 +31,7 @@ from sensai.core.events import (
     LogFailedEvent,
     ReasoningStoppedEvent,
     RerankEvent,
+    RerankFailedEvent,
     SourcesEvent,
     ThoughtEvent,
     TokenEvent,
@@ -396,6 +397,8 @@ class Agent:
             sources = self.retriever.search(user_input, self.config.rag_top_k, [self.search_filter], report)
             if report.candidates:
                 yield RerankEvent(report.candidates, len(sources), report.dropped)
+            if report.rerank_error:
+                yield RerankFailedEvent(report.rerank_error)
             if sources:
                 yield SourcesEvent(sources)
                 prompt = build_prompt(user_input, sources)

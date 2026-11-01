@@ -34,6 +34,7 @@ from sensai.core.events import (
     LogFailedEvent,
     ReasoningStoppedEvent,
     RerankEvent,
+    RerankFailedEvent,
     ReviewDoneEvent,
     SourcesEvent,
     ThoughtEvent,
@@ -584,6 +585,8 @@ def show_events(
             elif isinstance(event, RerankEvent):
                 session.last_dropped = event.dropped
                 print(rerank_report(event, session.config))
+            elif isinstance(event, RerankFailedEvent):
+                warning(f"Excerpts not reranked until Sensai restarts: {event.message}")
             elif isinstance(event, SourcesEvent):
                 sources = session.last_sources = event.sources
                 documents = len({source.source for source in sources})
@@ -635,7 +638,7 @@ def show_events(
                 warning(f"Could not condense the history, retrying after the next message: {event.message}")
     except EmptyInputError:
         error("Empty message, please type something.")
-    except (LLMError, StoreError, RerankError) as e:
+    except (LLMError, StoreError) as e:
         print()
         error(str(e))
     except KeyboardInterrupt:

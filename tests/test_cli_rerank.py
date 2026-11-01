@@ -33,6 +33,23 @@ def test_only_the_parts_that_happened_are_shown(config, client, capsys):
     assert "[rerank] 1 candidate: 1 kept\n" in capsys.readouterr().out
 
 
+class UnrankedRetriever:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
+        report.rerank_error = "The rerank feature needs sentence-transformers: pip install -r requirements.txt"
+        return [KEPT]
+
+
+def test_a_search_not_reranked_is_said_and_answered(config, client, capsys):
+    chat_turn(session(config, client, UnrankedRetriever()), "Who approved the transfer of March?")
+    captured = capsys.readouterr()
+    assert (
+        "Excerpts not reranked until Sensai restarts: "
+        "The rerank feature needs sentence-transformers: pip install -r requirements.txt" in captured.err
+    )
+    assert "[rerank]" not in captured.out
+    assert "[search] 1 excerpts from 1 documents" in captured.out
+
+
 def test_sources_dropped_shows_the_excerpts_the_model_did_not_get(config, client, capsys):
     chatting = session(config, client, Retriever(2, [KEPT], [NEAR_MISS]))
     chat_turn(chatting, "Who approved the transfer of March?")

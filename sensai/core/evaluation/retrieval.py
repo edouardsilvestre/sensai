@@ -10,6 +10,7 @@ from sensai.core.config import Config
 from sensai.core.evaluation.runner import Case
 from sensai.core.rag.index import DocumentIndex
 from sensai.core.rag.models import SearchResult
+from sensai.core.rag.reranker import RerankError
 
 STEPS = {
     "vector (R1)": {"hybrid": False, "rerank": False},
@@ -81,6 +82,9 @@ def evaluate_retrieval(index: DocumentIndex, config: Config, cases: list[Case]) 
                 config, features={**config.features, **features}, rerank_threshold=0, rag_neighbors=0
             )
             rankings[name] = [index.search(case.question, max(k, NDCG_K)) for case in cases]
+            # Without the reranker, its rows would be the scores of the search before it.
+            if index.rerank_error:
+                raise RerankError(index.rerank_error)
     finally:
         index.config = config
     scores = [score(name, cases, ranking, k) for name, ranking in rankings.items()]

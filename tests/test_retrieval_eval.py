@@ -6,7 +6,7 @@ from sensai.core.evaluation.retrieval import evaluate_retrieval, matches, ranks,
 from sensai.core.evaluation.runner import Case, EvalError, load_cases
 from sensai.core.rag.index import DocumentIndex
 from sensai.core.rag.models import SearchResult
-from sensai.core.rag.reranker import Reranker
+from sensai.core.rag.reranker import RerankError, Reranker
 from sensai.interfaces.cli.main import main
 
 
@@ -79,6 +79,16 @@ def test_each_step_and_threshold_is_measured_and_the_config_is_given_back(leak, 
     assert scores["+ rerank"].ndcg == 1.0
     assert (scores["+ rerank"].noise, scores["+ threshold 25%"].noise) == (3.0, 0.0)
     assert scores["+ threshold 25%"].precision == 1.0
+    assert leak.config is config
+
+
+def test_a_reranker_that_cannot_run_fails_the_evaluation(leak, config):
+    def score(pairs):
+        raise RerankError("Cannot load the rerank model 'fake'")
+
+    leak.reranker = Reranker("fake", scorer=score)
+    with pytest.raises(RerankError, match="Cannot load the rerank model 'fake'"):
+        evaluate_retrieval(leak, config, [Case("Who approved the transfer of March?", sources=["march.txt"])])
     assert leak.config is config
 
 

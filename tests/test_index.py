@@ -6,7 +6,7 @@ from sensai.core.rag.chunker import Chunker, join_chunks
 from sensai.core.rag.index import DocumentIndex
 from sensai.core.rag.models import Document, Section
 from sensai.core.rag.models import SearchFilter, SearchReport
-from sensai.core.rag.reranker import Reranker
+from sensai.core.rag.reranker import RerankError, Reranker
 from sensai.core.rag.store import IndexMismatchError
 
 
@@ -221,6 +221,47 @@ def test_without_the_reranker_nothing_is_dropped(index, corpus, config):
     report = SearchReport()
     assert len(index.search("transfer", k=3, report=report)) == 3
     assert (report.candidates, report.dropped) == (0, [])
+
+
+def failing_reranker(calls: list):
+    def score(pairs):
+        calls.append(pairs)
+        raise RerankError("The rerank feature needs sentence-transformers: pip install -r requirements.txt")
+
+    return Reranker("fake", scorer=score)
+
+
+def test_a_reranker_that_cannot_run_leaves_the_order_of_the_search(index, corpus, config):
+    index.ingest([corpus])
+    config.features["rerank"] = False
+    unranked = index.search("transfer", k=3)
+    config.features["rerank"] = True
+    index.reranker = failing_reranker([])
+    report = SearchReport()
+    assert index.search("transfer", k=3, report=report) == unranked
+    assert report.rerank_error == "The rerank feature needs sentence-transformers: pip install -r requirements.txt"
+    assert (report.candidates, report.dropped) == (0, [])
+
+
+def test_a_reranker_that_cannot_run_is_not_tried_again(index, corpus):
+    index.ingest([corpus])
+    calls = []
+    index.reranker = failing_reranker(calls)
+    index.search("transfer", k=3)
+    report = SearchReport()
+    index.search("transfer", k=3, report=report)
+    assert len(calls) == 1
+    assert report.rerank_error
+
+
+def test_a_reranker_that_cannot_run_is_not_reported_when_the_feature_is_off(index, corpus, config):
+    index.ingest([corpus])
+    index.reranker = failing_reranker([])
+    index.search("transfer", k=3)
+    config.features["rerank"] = False
+    report = SearchReport()
+    index.search("transfer", k=3, report=report)
+    assert report.rerank_error == ""
 
 
 # Sentences shorter than the overlap of the test config, so that the chunks overlap.
