@@ -10,7 +10,9 @@ from sensai.core.document.document import Edit
 from sensai.core.export.shares import ShareStore
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.memory.sessions import SessionStore
-from sensai.interfaces.cli.main import Session, handle_command, main, parse_args
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.main import main, parse_args
+from sensai.interfaces.cli.session import Session
 
 SOURCE = {"name": "source", "terms": ["Marc Vidal"], "on": ["output"], "replacement": "[SOURCE]"}
 BLOCK = {"name": "stop", "terms": ["Marc Vidal"], "on": ["publish"], "action": "block", "message": "Never name him."}

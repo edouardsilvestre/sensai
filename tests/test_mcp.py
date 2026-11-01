@@ -12,7 +12,8 @@ from sensai.core.llm.ollama import ToolCall
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.mcp import MCPConfigError, MCPServer, _connect, call_tool, load_servers, load_tools
 from sensai.core.tools.registry import ToolError, ToolRegistry, ToolResult
-from sensai.interfaces.cli.main import Session, handle_command
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
 
 
 def free_port() -> int:

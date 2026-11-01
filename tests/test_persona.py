@@ -5,7 +5,9 @@ import pytest
 from sensai.core.agent import Agent
 from sensai.core.config import DEFAULT_PERSONAS_DIR
 from sensai.core.persona import Persona, PersonaError, load_persona, load_personas
-from sensai.interfaces.cli.main import Session, load_persona as load_startup_persona, persona_command
+from sensai.interfaces.cli.commands.personas import persona_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_persona as load_startup_persona
 
 INVESTIGATOR = Persona("investigator", "Investigator", "a researcher.", "neutral.", "find leads.")
 EDITOR = Persona("editor", "Editor", "an editor.", "clear.", "write drafts.")

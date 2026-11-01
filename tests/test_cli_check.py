@@ -1,7 +1,8 @@
 from sensai.core.agent import Agent
 from sensai.core.evaluation.judge import UNCHECKED, Claim, Judgement
 from sensai.core.events import CheckEvent, CheckFailedEvent, CheckStartedEvent
-from sensai.interfaces.cli.main import Session, chat_turn, show_events
+from sensai.interfaces.cli.answer import chat_turn, show_events
+from sensai.interfaces.cli.session import Session
 
 from test_agent_check import ANSWER, JudgeClient, Retriever
 

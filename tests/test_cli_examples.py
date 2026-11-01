@@ -7,7 +7,10 @@ from sensai.core.examples import Example, ExampleLibrary, Excerpt
 from sensai.core.guardrails.rules import Guardrails, parse_rules
 from sensai.core.llm.ollama import LLMError, ModelNotFoundError
 from sensai.core.rag.models import SearchResult
-from sensai.interfaces.cli.main import HELP, Session, chat_turn, handle_command, load_examples, load_memory
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import HELP, handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_examples, load_memory
 
 SALARY = "Quel salaire touche Marc Vidal ?"
 BONUS = "Quel bonus touche Marc Vidal ?"

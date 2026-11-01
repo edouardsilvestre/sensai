@@ -545,7 +545,7 @@ Without a rules file, one rule applies: personal data is blocked in web searches
 
 The page shows the answer as it is generated, with the searches, the tool calls, the thoughts and the result of `fact_check` above it and the sources cited below it. The sidebar lists the saved conversations, shared with the CLI, and `New chat` starts another one. The composer has the persona list and a gauge of the tokens used out of `SENSAI_NUM_CTX`, which turns orange when the oldest turns are about to be condensed. `Settings` turns the features on or off for this run, `Export & share` downloads the conversation or the document and creates public links, the stop button ends an answer and keeps what was written, and a tool that needs approval shows `Allow`, `Always this session` and `Deny`.
 
-The backend does not change: `sensai/interfaces/web/server.py` is an interface like `cli/main.py`, it reads the events of `Agent.run` and reuses the functions of the CLI to start a session, save it and resume it.
+The backend does not change: `sensai/interfaces/web/server.py` is an interface like `sensai/interfaces/cli/`, it reads the events of `Agent.run` and reuses the functions of the CLI to start a session, save it and resume it.
 
 - **One thread for the session.** An SQLite connection only works on the thread that opened it, and the index, the memory and the cache each hold one. `WebChat` runs everything that touches the session on a single thread: the server only puts the events in a queue and reads them back.
 - **Streaming.** `POST /api/chat` answers with a stream of [server-sent events](https://developer.mozilla.org/docs/Web/API/Server-sent_events), one JSON object per event of the agent, read with `fetch`. The stream only goes one way: the clicks are ordinary requests (`/api/stop`, `/api/approval`), so a WebSocket would add nothing.
@@ -1045,6 +1045,23 @@ FEATURES = {
 ```
 
 Then check `config.features["compaction"]` where the feature runs. `SENSAI_FEATURE_COMPACTION`, `/features` and `/feature compaction off` work without other changes.
+
+### Code layout
+
+`sensai/core/` holds what Sensai does, and `sensai/interfaces/` how it is used: the CLI and the web page read the same events of `Agent.run`. The CLI is split by what each file is for:
+
+| In `sensai/interfaces/cli/` | What it holds |
+|---|---|
+| `main.py` | the arguments of `python -m sensai`, and which run each one starts |
+| `chat.py` | the chat loop |
+| `startup.py` | what a session loads: the model, the tools, the rules, the index, the memory |
+| `session.py` | the `Session`, what is asked at the keyboard, and saving the conversation |
+| `answer.py` | an answer in the terminal, from the events of the agent |
+| `output.py` | errors, warnings and the small text formats |
+| `commands/` | the `/commands` of the chat, by subject; `dispatch.py` holds `/help` and sends each command to its function |
+| `runs/` | the runs without a chat: `ingest` and `status`, `stats`, `eval`, `attack`, `schedule` |
+
+A new `/command` goes in the file of its subject, with a line in `HELP` and in `handle_command` in `commands/dispatch.py`. The imports go one way, from `output.py` to `main.py`, so that any file can be imported first.
 
 ### Tests
 

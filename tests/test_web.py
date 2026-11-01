@@ -23,7 +23,9 @@ from sensai.core.prompts import PromptStore
 from sensai.core.rag.models import SearchResult
 from sensai.core.tools.questions import NO_ANSWER, Questions
 from sensai.core.tools.registry import ToolRegistry, requires_approval
-from sensai.interfaces.cli.main import Session, load_memory, parse_args
+from sensai.interfaces.cli.main import parse_args
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory
 from sensai.interfaces.web.server import HOST, STATIC_DIR, WebChat, create_app, open_session, page_event, stream
 
 SENT: list[str] = []

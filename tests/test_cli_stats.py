@@ -4,7 +4,11 @@ import pytest
 
 from sensai.core.agent import Agent
 from sensai.core.monitoring.log import Interaction, InteractionLog
-from sensai.interfaces.cli.main import HELP, Session, chat_turn, handle_command, load_log, load_memory, main
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import HELP, handle_command
+from sensai.interfaces.cli.main import main
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_log, load_memory
 
 NOW = datetime.now(timezone.utc)
 

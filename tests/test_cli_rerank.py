@@ -1,6 +1,8 @@
 from sensai.core.agent import Agent
 from sensai.core.rag.models import SearchResult
-from sensai.interfaces.cli.main import HELP, Session, chat_turn, handle_command
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import HELP, handle_command
+from sensai.interfaces.cli.session import Session
 
 KEPT = SearchResult(1, "Alice approved the transfer of March.", "", "leak/march.eml", "", score=0.9, relevance=0.97)
 NEAR_MISS = SearchResult(2, "Bob approved the transfer of May.", "", "leak/may.eml", "", score=0.8, relevance=0.04)

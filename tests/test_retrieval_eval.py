@@ -97,7 +97,7 @@ def test_the_cli_prints_one_table_and_marks_the_threshold(tmp_path, monkeypatch,
     questions = tmp_path / "eval.json"
     questions.write_text(json.dumps({"cases": [{"question": "the budget?", "sources": ["budget.txt"]}]}), encoding="utf-8")
     monkeypatch.setattr("sensai.interfaces.cli.main.load_config", lambda path: config)
-    monkeypatch.setattr("sensai.interfaces.cli.main.OllamaClient", lambda *args: client)
+    monkeypatch.setattr("sensai.interfaces.cli.runs.evaluation.OllamaClient", lambda *args: client)
 
     assert main(["eval", str(questions), "--retrieval"]) == 0
     out = capsys.readouterr().out

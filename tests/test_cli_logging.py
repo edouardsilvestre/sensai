@@ -6,7 +6,10 @@ from sensai.core.agent import Agent
 from sensai.core.config import DEFAULT_PERSONAS_DIR
 from sensai.core.monitoring.log import InteractionLog
 from sensai.core.persona import load_personas
-from sensai.interfaces.cli.main import Session, chat_turn, handle_command, load_log, load_memory
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_log, load_memory
 
 ANSWER = "Marc Vidal dirige Orion."
 APPROVED = '{"claims": [{"claim": "Marc Vidal runs Orion", "verdict": "supported", "reason": "the statutes say so"}]}'

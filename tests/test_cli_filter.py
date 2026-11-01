@@ -4,7 +4,9 @@ from sensai.core.agent import Agent
 from sensai.core.memory.sessions import SessionStore
 from sensai.core.rag.models import SearchFilter
 from sensai.core.rag.store import IndexStats
-from sensai.interfaces.cli.main import Session, handle_command, load_memory
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory
 
 
 class FakeIndex:
