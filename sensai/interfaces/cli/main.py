@@ -1,8 +1,10 @@
 import argparse
 import json
+import re
 import shlex
 import sys
 import textwrap
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections.abc import Iterator
@@ -49,6 +51,7 @@ from sensai.core.rag.index import DocumentIndex, IngestProgress, IngestReport
 from sensai.core.rag.models import SearchResult
 from sensai.core.rag.prompt import cited_numbers
 from sensai.core.rag.store import StoreError, VectorStore
+from sensai.core.schedule import WHEN_FORMS, Schedule, ScheduleError, run_task
 from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer
 from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.mcp import MCPConfigError
@@ -56,6 +59,9 @@ from sensai.core.tools.permissions import ALWAYS_DENIED, Permissions
 from sensai.core.tools.registry import ToolRegistry
 
 EXIT_COMMANDS = {"/exit", "/quit"}
+POLL_SECONDS = 15
+SCHEDULE_ADD = re.compile(r"(every \S+|daily \S+|weekly \S+ \S+)(?: --allow (\S+))? (.+)", re.IGNORECASE)
+SCHEDULE_USAGE = f"Usage: /schedule add WHEN [--allow TOOL,TOOL] TASK, or /schedule remove N. WHEN is {WHEN_FORMS}"
 ALLOW_ANSWERS = {"y", "yes", "o", "oui"}
 ALWAYS_ANSWERS = {"a", "always"}
 REFUSE_ANSWERS = {"n", "no", "non"}
@@ -92,6 +98,10 @@ Commands:
   /cache [clear]          show the answers kept to reuse, or remove them all
   /examples               list the answers kept as examples, * marks those shown for the last answer
   /example add|remove N   keep the last answer as an example for similar questions, or remove example N
+  /schedule               list the tasks run on their own by python -m sensai schedule
+  /schedule add WHEN TASK add a task: every 6h, daily 08:00 or weekly mon 08:00, --allow TOOL for a critical tool
+  /schedule remove N      remove task N, its reports stay
+  /reports [N]            list the reports of the scheduled tasks, or read report N
   /exit, /quit            leave (or press Ctrl+D)"""
 
 
@@ -111,6 +121,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--rebuild", action="store_true", help="empty the index first (needed after changing the embedding model)"
     )
     commands.add_parser("status", help="show what the document index contains")
+    schedule_parser = commands.add_parser("schedule", help="run the scheduled tasks when they are due")
+    schedule_parser.add_argument("--once", action="store_true", help="run what is due and exit, for cron or the like")
     return parser.parse_args(argv)
 
 
@@ -225,6 +237,7 @@ class Session:
     examples: ExampleLibrary | None = None
     examples_used: list[Example] = field(default_factory=list)
     answered: tuple[Turn, list[SearchResult]] | None = None
+    schedule: Schedule | None = None
 
 
 def ask_approval(session: Session, call: ToolCall, reason: str) -> Approval:
@@ -720,6 +733,8 @@ def feature_command(session: Session, argument: str) -> None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
     if name == "examples" and value == "on" and session.examples is None:
         session.examples = session.agent.examples = load_examples(config, session.agent.client)
+    if name == "schedule" and value == "on" and session.schedule is None:
+        session.schedule = load_schedule(config)
 
 
 def reload_tools(session: Session) -> None:
@@ -903,6 +918,102 @@ def print_structured(answer: str, sources: list[SearchResult]) -> None:
         print_sources(sources, cited_sources(data))
 
 
+def run_time(value: str) -> str:
+    return f"{datetime.fromisoformat(value):%Y-%m-%d %H:%M}"
+
+
+def add_task(session: Session, text: str) -> None:
+    match = SCHEDULE_ADD.fullmatch(" ".join(text.split()))
+    if match is None or match[3].startswith("--"):
+        error(SCHEDULE_USAGE)
+        return
+    allow = [name for name in (match[2] or "").split(",") if name]
+    unknown = sorted(set(allow) - set(session.agent.tools.names()))
+    if unknown:
+        error(f"Cannot allow {', '.join(unknown)}: /tools lists the tools enabled.")
+        return
+    checked = session.agent.active_guardrails.check_input(match[3])
+    for hit in checked.hits:
+        print_guardrail(hit)
+    if checked.blocked:
+        print_guardrail(checked.blocked)
+        return
+    task = session.schedule.add(match[1], checked.text, allow, datetime.now())
+    print(f"Task {len(session.schedule.tasks)} added, first run on {run_time(task.next_run)}.")
+    print("It runs while python -m sensai schedule is running.")
+
+
+def show_schedule(session: Session) -> None:
+    session.schedule.reload()
+    tasks = session.schedule.tasks
+    if not tasks:
+        print("No scheduled task. For example: /schedule add daily 08:00 What is new about Orion Delta?")
+        return
+    now = datetime.now()
+    late = False
+    print("Scheduled tasks:")
+    for number, task in enumerate(tasks, start=1):
+        overdue = datetime.fromisoformat(task.next_run) <= now
+        late = late or overdue
+        last = f"last run {run_time(task.last_run)}: {task.status or 'running'}" if task.last_run else "not run yet"
+        allowed = f", allowed: {', '.join(task.allow)}" if task.allow else ""
+        print(f"  {number}. {task.question}")
+        print(f"     {task.when}, next run {run_time(task.next_run)}{' (late)' if overdue else ''}, {last}{allowed}")
+    if late:
+        print("Late tasks run as soon as python -m sensai schedule is started.")
+
+
+def schedule_ready(session: Session) -> bool:
+    if not session.config.features["schedule"]:
+        print("The schedule feature is off: /feature schedule on to run tasks on their own.")
+        return False
+    if session.schedule is None:
+        print("The schedule could not be read: fix the file, then /feature schedule on.")
+        return False
+    return True
+
+
+def schedule_command(session: Session, argument: str) -> None:
+    if not schedule_ready(session):
+        return
+    action, _, value = argument.partition(" ")
+    value = value.strip()
+    try:
+        if action == "add":
+            add_task(session, value)
+        elif action == "remove" and value.isdecimal():
+            print(f"Removed: {session.schedule.remove(int(value)).question}")
+        elif action:
+            error(SCHEDULE_USAGE)
+        else:
+            show_schedule(session)
+    except (ScheduleError, LLMError) as e:
+        error(str(e))
+
+
+def reports_command(session: Session, argument: str) -> None:
+    if not schedule_ready(session):
+        return
+    try:
+        if argument:
+            if not argument.isdecimal():
+                error("Usage: /reports [N]")
+                return
+            print(session.schedule.read_report(int(argument)).rstrip())
+            return
+        reports = session.schedule.latest_reports()
+    except ScheduleError as e:
+        error(str(e))
+        return
+    if not reports:
+        print("No report yet: a report is written when a scheduled task finds something new.")
+        return
+    print("Reports (* not read yet):")
+    for number, report in enumerate(reports, start=1):
+        print(f"  {' ' if report.read else '*'} {number}. {run_time(report.at)}  {report.question}")
+    print("/reports N to read one.")
+
+
 def json_command(session: Session, argument: str) -> None:
     if not argument:
         error("Usage: /json QUESTION")
@@ -950,6 +1061,10 @@ def handle_command(session: Session, line: str) -> bool:
         list_examples(session)
     elif name == "/example":
         example_command(session, argument.lower())
+    elif name == "/schedule":
+        schedule_command(session, argument)
+    elif name == "/reports":
+        reports_command(session, argument)
     elif name == "/features":
         list_features(session)
     elif name == "/feature":
@@ -999,6 +1114,14 @@ def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None
     return examples
 
 
+def load_schedule(config: Config) -> Schedule | None:
+    try:
+        return Schedule(config.schedule_path, config.reports_dir)
+    except ScheduleError as e:
+        warning(f"Schedule disabled: {e}")
+        return None
+
+
 def load_tools(config: Config, client: OllamaClient) -> ToolRegistry:
     tools = build_registry(config, client)
     if tools and not client.can_call_tools(config.model):
@@ -1044,12 +1167,13 @@ def load_persona(config: Config) -> tuple[dict[str, Persona], Persona | None]:
     return personas, personas[config.persona]
 
 
-def run_chat(config: Config, resume_id: str | None = None) -> int:
+def start_session(config: Config) -> Session | None:
+    """The model checked, then the tools, the rules, the documents, the examples. None when Sensai cannot start."""
     try:
         personas, persona = load_persona(config)
     except PersonaError as e:
         error(str(e))
-        return 1
+        return None
     agent = Agent(config, persona=persona)
     try:
         agent.client.ensure_model(config.model)
@@ -1057,15 +1181,23 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         agent.guardrails = load_guardrails(config, agent.client)
     except (LLMError, GuardrailError, MemoryStoreError, MCPConfigError) as e:
         error(str(e))
-        return 1
+        return None
 
     session = Session(config, agent, personas=personas)
     if config.features["rag"]:
         session.index = load_existing_index(config, agent.client)
         agent.retriever = session.index
+    session.examples = agent.examples = load_examples(config, agent.client)
+    return session
+
+
+def run_chat(config: Config, resume_id: str | None = None) -> int:
+    session = start_session(config)
+    if session is None:
+        return 1
+    agent = session.agent
     if config.features["cache"]:
         session.cache = agent.cache = load_cache(config, agent.client)
-    session.examples = agent.examples = load_examples(config, agent.client)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
     agent.confirm_cache = confirm_cached
     print(f"Sensai - model: {config.model}. Type /help for commands, /exit or Ctrl+D to quit.")
@@ -1090,6 +1222,9 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
     elif session.personas:
         print("No persona: /personas to list them, /persona ID to pick one.")
     load_memory(session, resume_id)
+    if config.features["schedule"]:
+        session.schedule = load_schedule(config)
+        print_schedule_news(session)
 
     try:
         while True:
@@ -1110,6 +1245,84 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             session.cache.close()
 
 
+def print_schedule_news(session: Session) -> None:
+    schedule = session.schedule
+    if schedule is None:
+        return
+    unread = sum(not report.read for report in schedule.reports)
+    failed = sum(task.failed for task in schedule.tasks)
+    if unread:
+        print(f"[schedule] {plural(unread, 'new report')}. /reports to read them.")
+    if failed:
+        warning(f"{plural(failed, 'scheduled task')} failed on the last run: /schedule to see why.")
+
+
+def run_due_tasks(session: Session) -> bool:
+    """Runs the tasks that are due, one after the other. False when one failed: the next ones still run."""
+    schedule, succeeded = session.schedule, True
+    for task in schedule.due(datetime.now()):
+        now = datetime.now()
+        if not schedule.claim(task, now):
+            continue
+        print(f"[{now:%H:%M}] {task.question}", flush=True)
+        try:
+            run = run_task(session.agent, task, session.store, now)
+            report = None if run.nothing_new(task) else schedule.write_report(task, run, now)
+        except (LLMError, StoreError, SessionError, ScheduleError) as e:
+            warning(f"The task failed, it runs again at its next time: {e}")
+            schedule.finish(task, f"failed: {e}", failed=True)
+            succeeded = False
+            continue
+        except KeyboardInterrupt:
+            schedule.finish(task, "failed: interrupted", failed=True)
+            raise
+        for failed in run.failed_tools:
+            warning(f"A tool could not run, {failed}")
+        if report is None:
+            schedule.finish(task, "nothing new", evidence=run.evidence)
+            print("Nothing new.", flush=True)
+        else:
+            schedule.finish(task, "report written", report=report, evidence=run.evidence)
+            print(f"New report: {schedule.reports_dir / report.file}", flush=True)
+    return succeeded
+
+
+def watch_schedule(session: Session, once: bool) -> int:
+    try:
+        while True:
+            try:
+                succeeded = run_due_tasks(session)
+            except ScheduleError as e:
+                error(str(e))
+                succeeded = False
+            if once:
+                return 0 if succeeded else 1
+            time.sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        print("\n[interrupted] The scheduler stopped: late tasks run when it starts again.")
+        return 0
+
+
+def run_schedule(config: Config, once: bool) -> int:
+    if not config.features["schedule"]:
+        error("The schedule feature is off: SENSAI_FEATURE_SCHEDULE=true to run the tasks.")
+        return 1
+    session = start_session(config)
+    if session is None:
+        return 1
+    load_memory(session, None)
+    session.schedule = load_schedule(config)
+    try:
+        if session.schedule is None:
+            return 1
+        tasks = plural(len(session.schedule.tasks), "task")
+        print(f"Sensai scheduler - model: {config.model}, {tasks}." + ("" if once else " Ctrl+C to stop."), flush=True)
+        return watch_schedule(session, once)
+    finally:
+        if session.index is not None:
+            session.index.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -1124,6 +1337,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_ingest(config, args.paths, args.rebuild)
     if args.command == "status":
         return run_status(config)
+    if args.command == "schedule":
+        return run_schedule(config, args.once)
     return run_chat(config, args.resume)
 
 

@@ -105,4 +105,6 @@ def config(tmp_path) -> Config:
         mcp_path=tmp_path / "mcp.json",
         cache_path=tmp_path / "cache.db",
         examples_path=tmp_path / "examples.json",
+        schedule_path=tmp_path / "schedule.json",
+        reports_dir=tmp_path / "reports",
     )

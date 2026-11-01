@@ -12,7 +12,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
-    "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K",
+    "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K", "SENSAI_SCHEDULE_PATH", "SENSAI_REPORTS_DIR",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
     "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
     "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE", "SENSAI_FILES_READ", "SENSAI_FILES_WRITE", "SENSAI_FILES_DENY",
@@ -36,7 +36,7 @@ def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
-        "orchestration": True, "reasoning": False, "cache": True, "examples": True,
+        "orchestration": True, "reasoning": False, "cache": True, "examples": True, "schedule": True,
     }
 
 

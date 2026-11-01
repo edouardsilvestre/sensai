@@ -10,6 +10,8 @@ from sensai.core.memory.conversation import ConversationMemory, Turn
 
 FORMAT_VERSION = 1
 TITLE_CHARS = 60
+# The conversations of the scheduled tasks: they are listed, but are never "the last conversation".
+TASK_PREFIX = "task-"
 
 # Ids are file names: nothing that could point outside the sessions folder.
 _ID = re.compile(r"^[\w-]+$")
@@ -42,6 +44,9 @@ class SessionStore:
         if not _ID.match(session_id):
             raise SessionError(f"Invalid session id '{session_id}'")
         return self.directory / f"{session_id}.json"
+
+    def exists(self, session_id: str) -> bool:
+        return self._path(session_id).exists()
 
     def new_id(self) -> str:
         base = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -105,5 +110,4 @@ class SessionStore:
         return sorted(sessions, key=lambda session: (session.updated, session.id), reverse=True)
 
     def latest(self) -> str | None:
-        sessions = self.list()
-        return sessions[0].id if sessions else None
+        return next((session.id for session in self.list() if not session.id.startswith(TASK_PREFIX)), None)
