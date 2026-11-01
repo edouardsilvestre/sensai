@@ -282,6 +282,21 @@ def test_distant_excerpts_stay_apart_in_their_order(index, story, config):
     ]
 
 
+def test_an_excerpt_of_a_document_reindexed_during_the_search_is_kept_as_found(index, story):
+    folder, chunks = story
+    index.ingest([folder])
+    document = index.store.get_document(str(folder / "story.txt"))
+
+    def score(pairs):
+        # The document is reindexed between the search of its chunks and their widening.
+        index.store.delete_document(document.id)
+        return [5.0 if passage.endswith(chunks[3].text) else -5.0 for _, passage in pairs]
+
+    index.reranker = Reranker("fake", scorer=score)
+    [excerpt] = index.search("what happened?", k=3)
+    assert excerpt.text == chunks[3].text
+
+
 def test_no_neighbors_sends_the_chunk_alone(index, story, config):
     folder, chunks = story
     index.ingest([folder])

@@ -42,7 +42,8 @@ class _Passage:
     """The chunks `first` to `last` of a document, shown as one excerpt."""
 
     excerpt: SearchResult
-    document_id: int
+    # None when the document of the excerpt is no longer in the store.
+    document_id: int | None
     first: int
     last: int
 
@@ -175,6 +176,9 @@ class DocumentIndex:
         positions = self.store.chunk_positions([result.chunk_id for result in results])
         passages: list[_Passage] = []
         for result in results:
+            if result.chunk_id not in positions:
+                passages.append(_Passage(result, None, 0, -1))
+                continue
             document_id, position = positions[result.chunk_id]
             first, last = max(position - around, 0), position + around
             touching = [
@@ -191,7 +195,12 @@ class DocumentIndex:
                 passages.remove(passage)
         widened = []
         for passage in passages:
-            chunks = self.store.chunks_between(passage.document_id, passage.first, passage.last)
+            chunks = []
+            if passage.document_id is not None:
+                chunks = self.store.chunks_between(passage.document_id, passage.first, passage.last)
+            if not chunks:
+                widened.append(passage.excerpt)
+                continue
             text = join_chunks(chunks)
             location = join_locations([chunk.location for chunk in chunks])
             widened.append(replace(passage.excerpt, text=text, location=location))
