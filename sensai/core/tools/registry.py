@@ -1,4 +1,5 @@
 import inspect
+import types
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -11,11 +12,15 @@ class ToolError(Exception):
 
 @dataclass
 class ToolResult:
-    """`content` is sent to the model, `summary` is only shown to the user."""
+    """
+    `content` is sent to the model, `summary` is only shown to the user.
+    A `private` result stays in its turn: neither the history nor the saved session keeps it.
+    """
 
     content: str
     summary: str = ""
     error: bool = False
+    private: bool = False
 
 
 @dataclass
@@ -55,7 +60,10 @@ def _arguments_schema(function: Callable) -> dict:
     parameters = inspect.signature(function).parameters.values()
     properties = {}
     for parameter in parameters:
-        json_type = _JSON_TYPES.get(parameter.annotation)
+        annotation = parameter.annotation
+        if isinstance(annotation, types.UnionType):
+            annotation = next((arg for arg in annotation.__args__ if arg is not type(None)), annotation)
+        json_type = _JSON_TYPES.get(annotation)
         properties[parameter.name] = {"type": json_type} if json_type else {}
     required = [parameter.name for parameter in parameters if parameter.default is inspect.Parameter.empty]
     return {"type": "object", "properties": properties, "required": required}

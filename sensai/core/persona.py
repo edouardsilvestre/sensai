@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REQUIRED_FIELDS = ("name", "role", "tone", "scope")
+# The scope is what the persona can be asked, not a task: without this, a small model starts on it by itself.
+ON_REQUEST = "Answer the user's message and nothing else. When the user asks for it, you can help with this work:"
 
 
 class PersonaError(Exception):
@@ -19,7 +21,7 @@ class Persona:
     instructions: str = ""
 
     def system_prompt(self) -> str:
-        lines = [f"You are {self.name}, {self.role}", f"Tone: {self.tone}", f"Scope: {self.scope}"]
+        lines = [f"You are {self.name}, {self.role}", f"Tone: {self.tone}", f"{ON_REQUEST} {self.scope}"]
         if self.instructions:
             lines.append(self.instructions)
         return "\n".join(lines)

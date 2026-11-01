@@ -13,7 +13,8 @@ from sensai.core.orchestrator import NO_EVIDENCE, VERDICT_SCHEMA, Review, Review
 from sensai.core.persona import load_personas
 from sensai.core.rag.models import SearchResult
 from sensai.core.tools.registry import ToolRegistry
-from sensai.interfaces.cli.main import Session, handle_command
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
 
 PERSONAS = load_personas(DEFAULT_PERSONAS_DIR)
 APPROVED = '{"claims": [{"claim": "Orion paid Delta", "verdict": "supported", "reason": "the mail says so"}]}'
@@ -28,7 +29,7 @@ class FakeRetriever:
     def __init__(self, results: list[SearchResult]):
         self.results = results
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return self.results
 
 

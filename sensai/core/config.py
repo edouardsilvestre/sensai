@@ -22,6 +22,8 @@ class Feature:
 
 FEATURES = {
     "rag": Feature("answer from the indexed documents"),
+    "hybrid": Feature("also search the documents by their exact words, like a name, an amount or an account number"),
+    "rerank": Feature("read each excerpt found with the question, to put first the ones that answer it"),
     "tools": Feature("let the model call the tools enabled in the configuration"),
     # Off by default: the queries leave the machine.
     "web_search": Feature("let the model search the web; the queries are sent to Ollama's web search", default=False, tool=True),
@@ -32,6 +34,7 @@ FEATURES = {
     "memory": Feature("let the model save and look up facts about people, companies and places", tool=True),
     # Without a file at mcp_path, no server is started.
     "mcp": Feature("let the model call the tools of the MCP servers listed in the MCP file", tool=True),
+    "questions": Feature("let the model ask you a question when your request is ambiguous", tool=True),
     "sessions": Feature("save every conversation so that it can be resumed"),
     "profile": Feature("send your profile to the model at the start of every conversation"),
     "document": Feature("keep a working document of the established facts, updated after every answer"),
@@ -41,6 +44,12 @@ FEATURES = {
     "reasoning": Feature("reason step by step and show each step before answering", default=False),
     "cache": Feature("reuse the answer to a close question already asked, once you confirm it"),
     "examples": Feature("show the model your answers kept as examples, for similar questions"),
+    "prompt_versions": Feature("keep every version of the system prompt, to compare them and roll back"),
+    "schedule": Feature("run the scheduled tasks and write their reports"),
+    "logging": Feature("log every message with its prompt, answer, tools, time and tokens"),
+    "fact_check": Feature("check each answer against its excerpts and flag what they do not support", default=False),
+    # Off by default: what is published can be read by anyone who gets the link.
+    "sharing": Feature("publish a conversation or the document on a link anyone can open without logging in", default=False),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -58,7 +67,7 @@ class Config:
     model: str = "llama3"
     host: str = "http://localhost:11434"
     system_prompt: str = ""
-    num_ctx: int = 8192
+    num_ctx: int = 16384
     think: bool | None = None
     persona: str = ""
     personas_dir: Path = DEFAULT_PERSONAS_DIR
@@ -74,10 +83,25 @@ class Config:
     mcp_path: Path = Path(".sensai/mcp.json")
     examples_path: Path = Path(".sensai/examples.json")
     examples_k: int = 2
+    prompts_dir: Path = Path(".sensai/prompts")
+    prompt_cases_path: Path = Path(".sensai/prompt_cases.json")
+    schedule_path: Path = Path(".sensai/schedule.json")
+    reports_dir: Path = Path(".sensai/reports")
+    shares_dir: Path = Path(".sensai/shared")
+    # The chat writes the links and python -m sensai publish serves them: both read the port here.
+    public_port: int = 8765
+    # What the links start with, for a machine reached through a tunnel or a reverse proxy.
+    public_url: str = ""
+    judge_model: str = ""
+    judge_max_tokens: int = 1500
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
     rag_top_k: int = 5
+    rag_candidates: int = 30
+    rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    rerank_threshold: int = 20
+    rag_neighbors: int = 1
     chunk_size: int = 1200
     chunk_overlap: int = 200
     cache_path: Path = Path(".sensai/cache.db")
@@ -94,6 +118,8 @@ class Config:
     max_tool_rounds: int = 5
     max_review_rounds: int = 2
     approval: str = "critical"
+    log_path: Path = Path(".sensai/logs.db")
+    log_content: bool = True
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int | None = None) -> int:
@@ -179,9 +205,22 @@ def load_config(path: Path | None = None) -> Config:
         mcp_path=Path(os.getenv("SENSAI_MCP_PATH", str(Config.mcp_path))),
         examples_path=Path(os.getenv("SENSAI_EXAMPLES_PATH", str(Config.examples_path))),
         examples_k=_int_env("SENSAI_EXAMPLES_K", Config.examples_k, minimum=0, maximum=5),
+        prompts_dir=Path(os.getenv("SENSAI_PROMPTS_DIR", str(Config.prompts_dir))),
+        prompt_cases_path=Path(os.getenv("SENSAI_PROMPT_CASES_PATH", str(Config.prompt_cases_path))),
+        schedule_path=Path(os.getenv("SENSAI_SCHEDULE_PATH", str(Config.schedule_path))),
+        reports_dir=Path(os.getenv("SENSAI_REPORTS_DIR", str(Config.reports_dir))),
+        shares_dir=Path(os.getenv("SENSAI_SHARES_DIR", str(Config.shares_dir))),
+        public_port=_int_env("SENSAI_PUBLIC_PORT", Config.public_port, minimum=1, maximum=65535),
+        public_url=os.getenv("SENSAI_PUBLIC_URL", Config.public_url).strip(),
+        judge_model=os.getenv("SENSAI_JUDGE_MODEL", Config.judge_model).strip(),
+        judge_max_tokens=_int_env("SENSAI_JUDGE_MAX_TOKENS", Config.judge_max_tokens, minimum=200, maximum=8000),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
+        rag_candidates=_int_env("SENSAI_RAG_CANDIDATES", Config.rag_candidates, minimum=1, maximum=200),
+        rerank_model=os.getenv("SENSAI_RERANK_MODEL", Config.rerank_model).strip() or Config.rerank_model,
+        rerank_threshold=_int_env("SENSAI_RERANK_THRESHOLD", Config.rerank_threshold, minimum=0, maximum=100),
+        rag_neighbors=_int_env("SENSAI_RAG_NEIGHBORS", Config.rag_neighbors, minimum=0, maximum=3),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
         cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),
@@ -197,6 +236,8 @@ def load_config(path: Path | None = None) -> Config:
         max_tool_rounds=_int_env("SENSAI_MAX_TOOL_ROUNDS", Config.max_tool_rounds, minimum=1, maximum=20),
         max_review_rounds=_int_env("SENSAI_MAX_REVIEW_ROUNDS", Config.max_review_rounds, minimum=1, maximum=5),
         approval=_choice_env("SENSAI_APPROVAL", Config.approval, APPROVAL_MODES),
+        log_path=Path(os.getenv("SENSAI_LOG_PATH", str(Config.log_path))),
+        log_content=_bool_env("SENSAI_LOG_CONTENT") is not False,
     )
     if config.chunk_overlap >= config.chunk_size:
         raise ConfigError("SENSAI_RAG_CHUNK_OVERLAP must be smaller than SENSAI_RAG_CHUNK_SIZE")

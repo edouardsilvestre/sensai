@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from sensai.core.cache import CachedAnswer
 from sensai.core.document.document import EditReport
+from sensai.core.evaluation.judge import Judgement
 from sensai.core.examples import Example
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
@@ -14,6 +15,15 @@ from sensai.core.tools.registry import ToolResult
 @dataclass
 class SourcesEvent:
     sources: list[SearchResult]
+
+
+@dataclass
+class RerankEvent:
+    """The candidates read by the reranker: `kept` were sent to the model, `dropped` were under the threshold."""
+
+    candidates: int
+    kept: int
+    dropped: list[SearchResult]
 
 
 @dataclass
@@ -67,6 +77,27 @@ class ExamplesFailedEvent:
 
 
 @dataclass
+class LogFailedEvent:
+    message: str
+
+
+@dataclass
+class CheckStartedEvent:
+    sentences: int
+    model: str
+
+
+@dataclass
+class CheckEvent:
+    judgement: Judgement
+
+
+@dataclass
+class CheckFailedEvent:
+    message: str
+
+
+@dataclass
 class DoneEvent:
     content: str
 
@@ -76,6 +107,13 @@ class DocumentEvent:
     """The edits applied to the working document after the answer, and the ones rejected with their reason."""
 
     report: EditReport
+
+
+@dataclass
+class RerankFailedEvent:
+    """The search was not reranked: its excerpts are in the order of the search."""
+
+    message: str
 
 
 @dataclass
@@ -127,6 +165,8 @@ class CacheFailedEvent:
 
 Event = (
     SourcesEvent
+    | RerankEvent
+    | RerankFailedEvent
     | TokenEvent
     | ToolCallEvent
     | ApprovalEvent
@@ -137,6 +177,10 @@ Event = (
     | ExamplesEvent
     | ExamplesFailedEvent
     | DoneEvent
+    | LogFailedEvent
+    | CheckStartedEvent
+    | CheckEvent
+    | CheckFailedEvent
     | DocumentEvent
     | DocumentFailedEvent
     | AgentStartedEvent

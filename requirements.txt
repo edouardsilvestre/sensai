@@ -2,7 +2,13 @@ ollama>=0.6
 python-dotenv>=1.0
 sqlite-vec>=0.1.6
 pypdf>=4.0
+fastapi>=0.115
+uvicorn>=0.30
 openpyxl>=3.1
+reportlab>=5.0
+# The cross-encoder of the rerank feature. Without a GPU, install torch first, from
+# https://download.pytorch.org/whl/cpu: the default one comes with gigabytes of CUDA libraries.
+sentence-transformers>=4.0
 mcp>=2.3
 # Imported for the MCP servers that need headers; installed with mcp.
 httpx2>=2.10

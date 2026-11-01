@@ -4,6 +4,7 @@ import re
 import pytest
 
 from sensai.core.config import Config
+from sensai.core.rag.reranker import Reranker
 
 
 class FakeClient:
@@ -85,6 +86,21 @@ class FakeClient:
         return self.capable
 
 
+def word_overlap(pairs: list[tuple[str, str]]) -> list[float]:
+    """A raw score like a cross-encoder's, from -4 to 4: the share of the words of the question in the passage."""
+    scores = []
+    for question, passage in pairs:
+        asked, found = set(re.findall(r"\w+", question.lower())), set(re.findall(r"\w+", passage.lower()))
+        scores.append(8 * len(asked & found) / max(len(asked), 1) - 4)
+    return scores
+
+
+@pytest.fixture(autouse=True)
+def fake_cross_encoder(monkeypatch):
+    # A real model is downloaded once, then takes seconds to load and to read the candidates of each search.
+    monkeypatch.setattr(Reranker, "_load", lambda self: word_overlap)
+
+
 @pytest.fixture
 def client() -> FakeClient:
     return FakeClient()
@@ -100,9 +116,15 @@ def config(tmp_path) -> Config:
         chunk_size=200,
         chunk_overlap=40,
         sessions_dir=tmp_path / "sessions",
+        shares_dir=tmp_path / "shared",
         profile_path=tmp_path / "profile.md",
         memory_path=tmp_path / "memory.db",
         mcp_path=tmp_path / "mcp.json",
         cache_path=tmp_path / "cache.db",
         examples_path=tmp_path / "examples.json",
+        log_path=tmp_path / "logs.db",
+        prompts_dir=tmp_path / "prompts",
+        prompt_cases_path=tmp_path / "prompt_cases.json",
+        schedule_path=tmp_path / "schedule.json",
+        reports_dir=tmp_path / "reports",
     )

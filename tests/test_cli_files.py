@@ -11,7 +11,8 @@ from sensai.core.tools.catalog import build_registry
 from sensai.core.tools.files import FileTools
 from sensai.core.tools.permissions import Permissions
 from sensai.core.tools.registry import ToolRegistry
-from sensai.interfaces.cli.main import Session, handle_command
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
 
 WRITE = ToolCall("write_file", {"path": "drafts/article.md", "content": "Claire Benoit a refusé le virement."})
 

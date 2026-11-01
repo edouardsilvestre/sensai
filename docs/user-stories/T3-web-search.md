@@ -18,7 +18,7 @@ Acceptance criteria:
 - Without `SENSAI_FEATURE_WEB_SEARCH=true`, no tool is sent to the model and no network request is made apart from the local Ollama server; `/tools` says that no tool is enabled.
 - With web search enabled, `/feature web_search off` stops the model from searching for the rest of the session, and `/feature web_search on` allows it again (it refuses without `OLLAMA_API_KEY`).
 - Each query is printed before it is sent, never after.
-- The search results are only sent for the current message: they are not stored in the conversation history.
+- The search results are only sent for the current message: the conversation history only keeps a short record of the search.
 
 ## Get recent facts the model was not trained on
 

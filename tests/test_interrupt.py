@@ -14,7 +14,10 @@ from sensai.core.persona import load_personas
 from sensai.core.rag.models import SearchResult
 from sensai.core.structured import ANSWER_SCHEMA
 from sensai.core.tools.registry import ToolRegistry
-from sensai.interfaces.cli.main import Session, chat_turn, handle_command, json_command
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.conversation import json_command
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
 
 
 # Long enough for the guardrails filter, which holds back the last 80 characters, to show the beginning.
@@ -94,7 +97,7 @@ class Excerpts:
     STATUTES = SearchResult(chunk_id=1, text="Orion statutes", location="p. 1", source="statutes.pdf", description="", score=0.9)
     STATEMENT = SearchResult(chunk_id=2, text="Vidal statement", location="p. 2", source="statement.pdf", description="", score=0.9)
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return [self.STATEMENT if "Vidal" in query else self.STATUTES]
 
 

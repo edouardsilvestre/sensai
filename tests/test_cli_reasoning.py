@@ -6,7 +6,10 @@ from sensai.core.agent import Agent
 from sensai.core.memory.sessions import SessionStore
 from sensai.core.reasoning import ANSWER
 from sensai.core.tools.registry import ToolRegistry
-from sensai.interfaces.cli.main import Session, chat_turn, handle_command, load_memory
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory
 
 FOUND = "statuts_orion.pdf: Marc Vidal is the manager of Orion Delta Consulting."
 

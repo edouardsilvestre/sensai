@@ -6,10 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 from sensai.core.document.document import Document
-from sensai.core.memory.conversation import Branch, ConversationMemory, Turn
+from sensai.core.memory.conversation import Branch, ConversationMemory, ToolUse, Turn
 
 FORMAT_VERSION = 1
 TITLE_CHARS = 60
+# The conversations of the scheduled tasks: they are listed, but are never "the last conversation".
+TASK_PREFIX = "task-"
 
 # Ids are file names: nothing that could point outside the sessions folder.
 _ID = re.compile(r"^[\w-]+$")
@@ -27,9 +29,13 @@ class SessionInfo:
     title: str
 
 
-def _title(turns: list[Turn]) -> str:
-    text = " ".join(turns[0].user.split()) if turns else "(condensed conversation)"
+def short_title(message: str) -> str:
+    text = " ".join(message.split())
     return text if len(text) <= TITLE_CHARS else text[: TITLE_CHARS - 3].rstrip() + "..."
+
+
+def conversation_title(turns: list[Turn]) -> str:
+    return short_title(turns[0].user) if turns else "(condensed conversation)"
 
 
 def _position(branch: Branch) -> dict:
@@ -42,9 +48,17 @@ def _saved_branch(branch: Branch) -> dict:
     }
 
 
+def _read_tools(saved: list[dict]) -> list[ToolUse]:
+    return [ToolUse(str(tool["name"]), dict(tool["arguments"]), str(tool["result"])) for tool in saved]
+
+
 def _read_turns(saved: list[dict]) -> list[Turn]:
+    # Sessions saved before the tool calls were kept do not have them.
     return [
-        Turn(turn["user"], turn["assistant"], list(turn.get("citations", [])), str(turn.get("document", "")))
+        Turn(
+            turn["user"], turn["assistant"], list(turn.get("citations", [])), str(turn.get("document", "")),
+            _read_tools(turn.get("tools", [])),
+        )
         for turn in saved
     ]
 
@@ -55,6 +69,26 @@ def _read_branch(saved: dict) -> Branch:
         int(saved["number"]), None if parent is None else int(parent), int(saved["turn"]), str(saved["label"]),
         str(saved.get("summary", "")), _read_turns(saved.get("turns", [])), Document(saved.get("document", "")),
     )
+
+
+def session_data(
+    session_id: str | None, memory: ConversationMemory, model: str,
+    persona: str | None = None, prompt_version: int | None = None,
+) -> dict:
+    return {
+        "version": FORMAT_VERSION,
+        "id": session_id,
+        "updated": datetime.now().isoformat(timespec="seconds"),
+        "model": model,
+        # Which system prompt the last answers came from: /prompts lists the versions.
+        "persona": persona,
+        "prompt_version": prompt_version if isinstance(prompt_version, int) else None,
+        "summary": memory.summary,
+        "turns": [asdict(turn) for turn in memory.turns],
+        "document": memory.document.markdown(),
+        "branch": _position(memory.branch),
+        "other_branches": [_saved_branch(branch) for branch in memory.other_branches],
+    }
 
 
 class SessionStore:
@@ -71,6 +105,9 @@ class SessionStore:
             raise SessionError(f"Invalid session id '{session_id}'")
         return self.directory / f"{session_id}.json"
 
+    def exists(self, session_id: str) -> bool:
+        return self._path(session_id).exists()
+
     def new_id(self) -> str:
         base = datetime.now().strftime("%Y%m%d-%H%M%S")
         session_id, number = base, 2
@@ -78,18 +115,11 @@ class SessionStore:
             session_id, number = f"{base}-{number}", number + 1
         return session_id
 
-    def save(self, session_id: str, memory: ConversationMemory, model: str) -> None:
-        data = {
-            "version": FORMAT_VERSION,
-            "id": session_id,
-            "updated": datetime.now().isoformat(timespec="seconds"),
-            "model": model,
-            "summary": memory.summary,
-            "turns": [asdict(turn) for turn in memory.turns],
-            "document": memory.document.markdown(),
-            "branch": _position(memory.branch),
-            "other_branches": [_saved_branch(branch) for branch in memory.other_branches],
-        }
+    def save(
+        self, session_id: str, memory: ConversationMemory, model: str,
+        persona: str | None = None, prompt_version: int | None = None,
+    ) -> None:
+        data = session_data(session_id, memory, model, persona, prompt_version)
         path = self._path(session_id)
         # Written next to the session then renamed, so that a crash never leaves half a conversation.
         temporary = path.with_name(path.name + ".tmp")
@@ -135,9 +165,8 @@ class SessionStore:
                 data = self._read(path)
             except SessionError:
                 continue
-            sessions.append(SessionInfo(path.stem, data["updated"], len(data["turns"]), _title(data["turns"])))
+            sessions.append(SessionInfo(path.stem, data["updated"], len(data["turns"]), conversation_title(data["turns"])))
         return sorted(sessions, key=lambda session: (session.updated, session.id), reverse=True)
 
     def latest(self) -> str | None:
-        sessions = self.list()
-        return sessions[0].id if sessions else None
+        return next((session.id for session in self.list() if not session.id.startswith(TASK_PREFIX)), None)

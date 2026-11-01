@@ -10,10 +10,12 @@ from sensai.core.config import Config
 from sensai.core.guardrails.detectors import DETECTORS, Span
 from sensai.core.llm.ollama import OllamaClient, ToolCall
 
-STAGES = ("input", "output", "tools")
+STAGES = ("input", "output", "tools", "publish")
+# A public page answers to these: what protects a text in a chat protects it even more on a page anyone can read.
+PUBLICATION_STAGES = frozenset({"input", "output", "publish"})
 ACTIONS = ("block", "redact", "warn")
 
-# Personal data never goes out through a tool that reaches the network, unless a rules file says otherwise.
+# Personal data never goes out through a tool or on a public page, unless a rules file says otherwise.
 DEFAULT_RULES = [
     {
         "name": "personal-data",
@@ -22,7 +24,8 @@ DEFAULT_RULES = [
         "tools": ["web_search"],
         "action": "block",
         "message": "The arguments contain personal data, which must not leave the machine. Search without it.",
-    }
+    },
+    {"name": "published-personal-data", "detectors": list(DETECTORS), "on": ["publish"], "action": "redact"},
 ]
 
 # Asks the local model whether a message breaks a policy: returns why it does, or None when it does not.
@@ -213,9 +216,16 @@ class Guardrails:
         return [r for r in self.rules if stage in r.stages and (not tool or not r.tools or tool in r.tools)]
 
     def check(self, stage: str, text: str, tool: str = "") -> Checked:
+        return self._check(stage, text, self._rules(stage, tool))
+
+    def check_publication(self, text: str) -> Checked:
+        """The text of a public page. The judge rules are left out: they are about what the user may ask."""
+        return self._check("publish", text, [r for r in self.rules if r.stages & PUBLICATION_STAGES and not r.judge])
+
+    def _check(self, stage: str, text: str, rules: list[Rule]) -> Checked:
         checked = Checked(text)
         spans: list[Span] = []
-        for rule in self._rules(stage, tool):
+        for rule in rules:
             if rule.judge:
                 reason = self.judge(rule.judge, text) if self.judge else None
                 found = [Span(0, 0, reason)] if reason else []

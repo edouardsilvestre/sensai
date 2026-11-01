@@ -8,13 +8,14 @@ from sensai.core.events import (
     CompactionFailedEvent,
     CompactionStartedEvent,
     DoneEvent,
+    RerankEvent,
     SourcesEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from sensai.core.llm.ollama import LLMError, ToolCall
-from sensai.core.rag.models import SearchResult
+from sensai.core.rag.models import SearchFilter, SearchReport, SearchResult
 from sensai.core.tools.registry import SchemaTool, ToolRegistry, ToolResult, requires_approval
 from sensai.core.tools.code_runner import CodeRunner, Execution
 from sensai.core.tools.registry import ToolRegistry, ToolResult
@@ -24,9 +25,11 @@ class FakeRetriever:
     def __init__(self, results: list[SearchResult]):
         self.results = results
         self.queries: list[tuple[str, int]] = []
+        self.filters: list[list] = []
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         self.queries.append((query, k))
+        self.filters.append(list(filters))
         return self.results
 
 
@@ -65,6 +68,69 @@ def test_excerpts_are_added_to_the_prompt_only(config, client):
     assert "Alice approved the transfer." in prompt
     assert prompt.endswith("Message: Who approved it?")
     assert agent.messages[0] == {"role": "user", "content": "Who approved it?"}
+
+
+def test_the_search_keeps_to_the_filter_of_the_user(config, client):
+    retriever = FakeRetriever([RESULT])
+    agent = Agent(config, client, retriever)
+    agent.search_filter = SearchFilter(author="alice", kind="email")
+    list(agent.run("Who approved it?"))
+    assert retriever.filters == [[SearchFilter(author="alice", kind="email")]]
+
+
+class RerankingRetriever(FakeRetriever):
+    """Keeps its results and reports the dropped ones, like the index with the reranker on."""
+
+    def __init__(self, results: list[SearchResult], dropped: list[SearchResult]):
+        super().__init__(results)
+        self.dropped = dropped
+
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
+        report.candidates, report.kept = len(self.results) + len(self.dropped), len(self.results)
+        report.dropped = list(self.dropped)
+        return super().search(query, k, filters)
+
+
+NEAR_MISS = SearchResult(
+    chunk_id=2, text="Bob approved the transfer of May.", location="", source="leak/may.eml", description="",
+    score=0.8, relevance=0.05,
+)
+
+
+def test_the_dropped_excerpts_are_reported_but_never_sent(config, client):
+    agent = Agent(config, client, RerankingRetriever([RESULT], [NEAR_MISS]))
+    events = list(agent.run("Who approved it?"))
+
+    assert events[:2] == [RerankEvent(2, 1, [NEAR_MISS]), SourcesEvent([RESULT])]
+    prompt = client.chats[0][0][-1]["content"]
+    assert "Alice approved the transfer." in prompt
+    assert "May" not in prompt
+
+
+def test_when_every_excerpt_is_dropped_the_model_is_told_they_do_not_answer(config, client):
+    agent = Agent(config, client, RerankingRetriever([], [NEAR_MISS]))
+    events = list(agent.run("Who approved the transfer of March?"))
+
+    assert events[0] == RerankEvent(1, 0, [NEAR_MISS])
+    assert not any(isinstance(event, SourcesEvent) for event in events)
+    prompt = client.chats[0][0][-1]["content"]
+    assert "none of their excerpts answers it" in prompt
+    assert "May" not in prompt
+    assert prompt.endswith("Message: Who approved the transfer of March?")
+    assert agent.messages[0] == {"role": "user", "content": "Who approved the transfer of March?"}
+
+
+def test_the_agent_gives_the_search_a_report(config, client):
+    reports = []
+
+    class Recording(FakeRetriever):
+        def search(self, query, k, filters=(), report=None):
+            reports.append(report)
+            return super().search(query, k, filters)
+
+    events = list(Agent(config, client, Recording([RESULT])).run("Who approved it?"))
+    assert reports == [SearchReport()]
+    assert not any(isinstance(event, RerankEvent) for event in events)
 
 
 def test_no_results_means_a_plain_prompt(config, client):
@@ -214,12 +280,14 @@ def test_tool_call_is_run_and_its_result_sent_back(config, client):
     assert messages[-1] == {"role": "tool", "tool_name": "lookup", "content": "Alvor is registered in Lisbon."}
 
 
-def test_only_the_final_answer_is_kept_in_memory(config, client):
+def test_the_memory_keeps_the_final_answer_and_a_short_record_of_the_call(config, client):
     agent, _ = tool_agent(config, client)
     client.tool_rounds = [[ToolCall("lookup", {"query": "Alvor"})]]
     list(agent.run("Where is Alvor based?"))
     assert agent.messages == [
         {"role": "user", "content": "Where is Alvor based?"},
+        {"role": "assistant", "content": "", "tool_calls": [ToolCall("lookup", {"query": "Alvor"}).message()]},
+        {"role": "tool", "tool_name": "lookup", "content": "Alvor is registered in Lisbon."},
         {"role": "assistant", "content": "Hello there "},
     ]
 
@@ -310,13 +378,11 @@ def test_refused_critical_call_is_not_run_and_the_model_gets_the_reason(config, 
     assert events[-1] == DoneEvent("Hello there ")
 
 
-def test_refusal_is_not_kept_in_memory(config, client):
-    agent, _, _ = approval_agent(config, client, Approval(False))
+def test_the_reason_of_a_refusal_is_not_kept_in_memory(config, client):
+    agent, _, _ = approval_agent(config, client, Approval(False, "keep the source secret"))
     list(agent.run("Where is Alvor based?"))
-    assert agent.messages == [
-        {"role": "user", "content": "Where is Alvor based?"},
-        {"role": "assistant", "content": "Hello there "},
-    ]
+    assert agent.memory.turns[0].tools[0].result == "refused"
+    assert "keep the source secret" not in str(agent.messages)
 
 
 def test_tools_that_are_not_critical_run_without_asking(config, client):

@@ -4,7 +4,8 @@ from sensai.core.agent import Agent
 from sensai.core.approval import Approval
 from sensai.core.llm.ollama import ToolCall
 from sensai.core.tools.registry import ToolRegistry, requires_approval
-from sensai.interfaces.cli.main import Session, approval_command, ask_approval
+from sensai.interfaces.cli.commands.settings import approval_command
+from sensai.interfaces.cli.session import Session, ask_approval
 
 CALL = ToolCall("web_search", {"query": "Orion Delta Consulting"})
 REASON = "the query is sent to an external search engine"

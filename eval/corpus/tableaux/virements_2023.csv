@@ -1,0 +1,9 @@
+date,beneficiaire,montant,iban,valide_par,motif
+2023-01-15,Loyer SCI Paix,8 200,FR76 3000 4000 1200 0012 3456 789,Bob Laurent,loyer janvier
+2023-02-03,Omega Corp,4 500,FR76 3000 6000 0112 3456 7890 189,Bob Laurent,licences
+2023-03-14,Delta Holding,48 500,CH93 0076 2011 6238 5295 7,Marc Vidal,conseil T1
+2023-04-11,BTP Rhône,62 000,FR76 1027 8073 0000 0204 5310 141,Bob Laurent,travaux Lyon
+2023-05-02,Omega Corp,12 000,FR76 3000 6000 0112 3456 7890 189,Bob Laurent,maintenance serveur
+2023-06-02,Delta Holding,52 000,CH93 0076 2011 6238 5295 7,Marc Vidal,conseil T2
+2023-07-20,URSSAF,31 400,FR76 3000 1000 0100 0000 0000 123,Alice Martin,cotisations
+2023-09-09,Delta Holding,45 000,CH93 0076 2011 6238 5295 7,Marc Vidal,conseil T3

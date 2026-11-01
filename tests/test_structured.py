@@ -6,7 +6,8 @@ from conftest import FakeClient
 from sensai.core.agent import Agent
 from sensai.core.rag.models import SearchResult
 from sensai.core.structured import ANSWER_SCHEMA, StructuredError, cited_sources, parse_answer, schema_errors
-from sensai.interfaces.cli.main import Session, handle_command
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.session import Session
 
 ANSWER = {
     "answer": "Orion paid Delta 2M on 4 April.",
@@ -23,7 +24,7 @@ class FakeRetriever:
     def __init__(self, results: list[SearchResult]):
         self.results = results
 
-    def search(self, query: str, k: int) -> list[SearchResult]:
+    def search(self, query: str, k: int, filters=(), report=None) -> list[SearchResult]:
         return self.results
 
 

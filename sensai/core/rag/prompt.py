@@ -11,6 +11,13 @@ Use the excerpts below, taken from the user's indexed documents, to answer the m
 - If the message is not a question about the documents (a greeting, a thank-you...), just answer it normally.
 - Answer in the language of the message."""
 
+_NO_EXCERPT = """\
+The user's indexed documents were searched for the message at the end, and none of their excerpts answers it.
+
+- If the message asks about the documents, say plainly that the documents do not contain this information. Do not guess, and cite nothing.
+- If the message is not a question about the documents (a greeting, a thank-you...), just answer it normally.
+- Answer in the language of the message."""
+
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 
 
@@ -28,6 +35,11 @@ def build_prompt(message: str, results: list[SearchResult]) -> str:
         body = body.replace("</excerpt", "<\\/excerpt")
         excerpts.append(f"<excerpt {attributes}>\n{body}\n</excerpt>")
     return f"{_INSTRUCTIONS}\n\n<excerpts>\n" + "\n".join(excerpts) + f"\n</excerpts>\n\nMessage: {message}"
+
+
+def build_no_excerpt_prompt(message: str) -> str:
+    """For a search whose excerpts were all dropped: without them, the model would answer from what it knows."""
+    return f"{_NO_EXCERPT}\n\nMessage: {message}"
 
 
 def cited_numbers(answer: str) -> list[int]:

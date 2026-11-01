@@ -4,7 +4,11 @@ from sensai.core.agent import Agent
 from sensai.core.memory.conversation import Turn
 from sensai.core.memory.profile import PROFILE_HEADER, Profile
 from sensai.core.memory.sessions import SessionStore
-from sensai.interfaces.cli.main import Session, chat_turn, handle_command, load_memory, parse_args
+from sensai.interfaces.cli.answer import chat_turn
+from sensai.interfaces.cli.commands.dispatch import handle_command
+from sensai.interfaces.cli.main import parse_args
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_memory
 
 
 @pytest.fixture

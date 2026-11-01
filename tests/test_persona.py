@@ -5,7 +5,9 @@ import pytest
 from sensai.core.agent import Agent
 from sensai.core.config import DEFAULT_PERSONAS_DIR
 from sensai.core.persona import Persona, PersonaError, load_persona, load_personas
-from sensai.interfaces.cli.main import Session, load_persona as load_startup_persona, persona_command
+from sensai.interfaces.cli.commands.personas import persona_command
+from sensai.interfaces.cli.session import Session
+from sensai.interfaces.cli.startup import load_persona as load_startup_persona
 
 INVESTIGATOR = Persona("investigator", "Investigator", "a researcher.", "neutral.", "find leads.")
 EDITOR = Persona("editor", "Editor", "an editor.", "clear.", "write drafts.")
@@ -50,6 +52,12 @@ def test_missing_directory_means_no_persona(tmp_path):
 
 def test_shipped_personas_are_valid():
     assert set(load_personas(DEFAULT_PERSONAS_DIR)) == {"investigator", "fact_checker", "editor"}
+
+
+def test_the_scope_is_not_a_task_to_start():
+    prompt = Persona("p", "Ana", "a role.", "calm.", "find leads.").system_prompt()
+    assert "Answer the user's message and nothing else." in prompt
+    assert "When the user asks for it, you can help with this work: find leads." in prompt
 
 
 def test_system_prompt_contains_every_field():

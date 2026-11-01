@@ -108,8 +108,7 @@ class MemoryTools:
 
     def memory_link(self, subject: str, relation: str, object: str) -> ToolResult:
         """
-        Save a relation between two people, companies or places in the long-term memory,
-        such as "Jean Dupont" "runs" "Alvor Consulting".
+        Save a relation between two people, companies or places in the long-term memory.
 
         Args:
           subject: The name of the first entity
