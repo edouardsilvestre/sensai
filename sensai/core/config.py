@@ -38,6 +38,8 @@ FEATURES = {
     "document": Feature("keep a working document of the established facts, updated after every answer"),
     "guardrails": Feature("check the messages, the answers and the tool calls against the guardrail rules"),
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
+    "reasoning": Feature("reason step by step and show each step before answering", default=False),
+    "cache": Feature("reuse the answer to a close question already asked, once you confirm it"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
 
@@ -75,6 +77,8 @@ class Config:
     rag_top_k: int = 5
     chunk_size: int = 1200
     chunk_overlap: int = 200
+    cache_path: Path = Path(".sensai/cache.db")
+    cache_threshold: int = 90
 
     ollama_api_key: str = field(default="", repr=False)
     web_search_results: int = 5
@@ -175,6 +179,8 @@ def load_config(path: Path | None = None) -> Config:
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),
         chunk_size=_int_env("SENSAI_RAG_CHUNK_SIZE", Config.chunk_size, minimum=100),
         chunk_overlap=_int_env("SENSAI_RAG_CHUNK_OVERLAP", Config.chunk_overlap, minimum=0),
+        cache_path=Path(os.getenv("SENSAI_CACHE_PATH", str(Config.cache_path))),
+        cache_threshold=_int_env("SENSAI_CACHE_THRESHOLD", Config.cache_threshold, minimum=50, maximum=100),
         ollama_api_key=os.getenv("OLLAMA_API_KEY", Config.ollama_api_key).strip(),
         web_search_results=_int_env("SENSAI_WEB_SEARCH_RESULTS", Config.web_search_results, minimum=1, maximum=10),
         code_timeout=_int_env("SENSAI_CODE_TIMEOUT", Config.code_timeout, minimum=1, maximum=60),

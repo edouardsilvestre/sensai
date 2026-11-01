@@ -70,6 +70,16 @@ def test_modified_file_is_reindexed(index, corpus):
     assert "Omega" in index.search("loan to Omega", k=1)[0].text
 
 
+def test_the_fingerprint_changes_when_a_file_changes(index, corpus):
+    index.ingest([corpus])
+    before = index.fingerprint()
+    index.ingest([corpus])
+    assert index.fingerprint() == before
+    (corpus / "minutes.md").write_text("The board approved a loan to Omega.", encoding="utf-8")
+    index.ingest([corpus])
+    assert index.fingerprint() != before
+
+
 def test_deleted_file_is_removed_from_the_index(index, corpus):
     index.ingest([corpus])
     (corpus / "accounts.csv").unlink()

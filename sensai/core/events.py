@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from sensai.core.cache import CachedAnswer
 from sensai.core.document.document import EditReport
 from sensai.core.guardrails.rules import Hit
 from sensai.core.approval import Approval
@@ -41,6 +42,17 @@ class GuardrailEvent:
     """A rule found something: in the message (input), a tool call (tools) or the answer (output)."""
 
     hit: Hit
+
+
+@dataclass
+class ThoughtEvent:
+    number: int
+    thought: str
+
+
+@dataclass
+class ReasoningStoppedEvent:
+    reason: str
 
 
 @dataclass
@@ -92,6 +104,16 @@ class CompactionFailedEvent:
     message: str
 
 
+@dataclass
+class CacheHitEvent:
+    cached: CachedAnswer
+
+
+@dataclass
+class CacheFailedEvent:
+    message: str
+
+
 Event = (
     SourcesEvent
     | TokenEvent
@@ -99,6 +121,8 @@ Event = (
     | ApprovalEvent
     | ToolResultEvent
     | GuardrailEvent
+    | ThoughtEvent
+    | ReasoningStoppedEvent
     | DoneEvent
     | DocumentEvent
     | DocumentFailedEvent
@@ -107,4 +131,6 @@ Event = (
     | CompactionStartedEvent
     | CompactionEvent
     | CompactionFailedEvent
+    | CacheHitEvent
+    | CacheFailedEvent
 )

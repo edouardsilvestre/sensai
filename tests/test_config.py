@@ -11,6 +11,7 @@ VARIABLES = [
     "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
+    "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
     "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
     "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE", "SENSAI_FILES_READ", "SENSAI_FILES_WRITE", "SENSAI_FILES_DENY",
@@ -34,7 +35,7 @@ def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "questions": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
-        "orchestration": True,
+        "orchestration": True, "reasoning": False, "cache": True,
     }
 
 
@@ -44,6 +45,14 @@ def test_rag_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_RAG_TOP_K", "8")
     config = load_config(env_file)
     assert (config.embed_model, config.index_path, config.rag_top_k) == ("bge-m3", Path("/tmp/case.db"), 8)
+
+
+def test_cache_settings_from_environment(env_file, monkeypatch):
+    assert (load_config(env_file).cache_path, load_config(env_file).cache_threshold) == (Path(".sensai/cache.db"), 90)
+    monkeypatch.setenv("SENSAI_CACHE_PATH", "/cases/alvor/cache.db")
+    monkeypatch.setenv("SENSAI_CACHE_THRESHOLD", "95")
+    config = load_config(env_file)
+    assert (config.cache_path, config.cache_threshold) == (Path("/cases/alvor/cache.db"), 95)
 
 
 def test_memory_files_from_environment(env_file, monkeypatch):
@@ -234,6 +243,9 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
         ("SENSAI_MAX_REVIEW_ROUNDS", "0"),
         ("SENSAI_MAX_REVIEW_ROUNDS", "6"),
         ("SENSAI_FEATURE_ORCHESTRATION", "maybe"),
+        ("SENSAI_FEATURE_CACHE", "maybe"),
+        ("SENSAI_CACHE_THRESHOLD", "40"),
+        ("SENSAI_CACHE_THRESHOLD", "101"),
     ],
 )
 def test_invalid_values_are_rejected(env_file, monkeypatch, name, value):
