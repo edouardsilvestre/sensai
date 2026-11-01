@@ -12,6 +12,7 @@ VARIABLES = [
     "SENSAI_KEEP_RECENT_TURNS", "SENSAI_GUARDRAILS_PATH", "SENSAI_EMBED_MODEL", "SENSAI_PERSONA", "SENSAI_PERSONAS_DIR",
     "SENSAI_INDEX_PATH", "SENSAI_RAG_TOP_K", "SENSAI_RAG_CHUNK_SIZE", "SENSAI_RAG_CHUNK_OVERLAP",
     "SENSAI_CACHE_PATH", "SENSAI_CACHE_THRESHOLD", "SENSAI_LOG_PATH", "SENSAI_LOG_CONTENT",
+    "SENSAI_EXAMPLES_PATH", "SENSAI_EXAMPLES_K",
     "SENSAI_TOOLS", "SENSAI_WEB_SEARCH", "OLLAMA_API_KEY", "SENSAI_WEB_SEARCH_RESULTS", "SENSAI_MAX_TOOL_ROUNDS",
     "SENSAI_APPROVAL", "SENSAI_MAX_REVIEW_ROUNDS", "SENSAI_MCP_PATH", "SENSAI_MCP_TIMEOUT",
     "SENSAI_CODE_TIMEOUT", "SENSAI_SANDBOX_IMAGE", "SENSAI_FILES_READ", "SENSAI_FILES_WRITE", "SENSAI_FILES_DENY",
@@ -35,7 +36,7 @@ def test_features_have_their_default(env_file):
     assert load_config(env_file).features == {
         "rag": True, "tools": True, "web_search": False, "code_exec": False, "files": False, "memory": True,
         "mcp": True, "sessions": True, "profile": True, "document": True, "guardrails": True,
-        "orchestration": True, "reasoning": False, "cache": True, "logging": True,
+        "orchestration": True, "reasoning": False, "cache": True, "examples": True, "logging": True,
     }
 
 
@@ -53,6 +54,15 @@ def test_cache_settings_from_environment(env_file, monkeypatch):
     monkeypatch.setenv("SENSAI_CACHE_THRESHOLD", "95")
     config = load_config(env_file)
     assert (config.cache_path, config.cache_threshold) == (Path("/cases/alvor/cache.db"), 95)
+
+
+def test_examples_settings_from_environment(env_file, monkeypatch):
+    config = load_config(env_file)
+    assert (config.examples_path, config.examples_k) == (Path(".sensai/examples.json"), 2)
+    monkeypatch.setenv("SENSAI_EXAMPLES_PATH", "/cases/alvor/examples.json")
+    monkeypatch.setenv("SENSAI_EXAMPLES_K", "0")
+    config = load_config(env_file)
+    assert (config.examples_path, config.examples_k) == (Path("/cases/alvor/examples.json"), 0)
 
 
 def test_memory_files_from_environment(env_file, monkeypatch):
@@ -259,6 +269,9 @@ def test_empty_read_setting_allows_no_folder(env_file, monkeypatch):
         ("SENSAI_FEATURE_CACHE", "maybe"),
         ("SENSAI_CACHE_THRESHOLD", "40"),
         ("SENSAI_CACHE_THRESHOLD", "101"),
+        ("SENSAI_FEATURE_EXAMPLES", "maybe"),
+        ("SENSAI_EXAMPLES_K", "-1"),
+        ("SENSAI_EXAMPLES_K", "6"),
     ],
 )
 def test_invalid_values_are_rejected(env_file, monkeypatch, name, value):

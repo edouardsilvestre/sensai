@@ -39,6 +39,7 @@ FEATURES = {
     "orchestration": Feature("let /review have the answer checked by the fact-checker and written by the editor"),
     "reasoning": Feature("reason step by step and show each step before answering", default=False),
     "cache": Feature("reuse the answer to a close question already asked, once you confirm it"),
+    "examples": Feature("show the model your answers kept as examples, for similar questions"),
     "logging": Feature("log every message with its prompt, answer, tools, time and tokens"),
 }
 APPROVAL_MODES = ("critical", "all", "off")
@@ -71,6 +72,8 @@ class Config:
     memory_path: Path = Path(".sensai/memory.db")
     guardrails_path: Path = Path(".sensai/guardrails.json")
     mcp_path: Path = Path(".sensai/mcp.json")
+    examples_path: Path = Path(".sensai/examples.json")
+    examples_k: int = 2
 
     embed_model: str = "qwen3-embedding:0.6b"
     index_path: Path = Path(".sensai/index.db")
@@ -176,6 +179,8 @@ def load_config(path: Path | None = None) -> Config:
         memory_path=Path(os.getenv("SENSAI_MEMORY_PATH", str(Config.memory_path))),
         guardrails_path=Path(os.getenv("SENSAI_GUARDRAILS_PATH", str(Config.guardrails_path))),
         mcp_path=Path(os.getenv("SENSAI_MCP_PATH", str(Config.mcp_path))),
+        examples_path=Path(os.getenv("SENSAI_EXAMPLES_PATH", str(Config.examples_path))),
+        examples_k=_int_env("SENSAI_EXAMPLES_K", Config.examples_k, minimum=0, maximum=5),
         embed_model=os.getenv("SENSAI_EMBED_MODEL", Config.embed_model),
         index_path=Path(os.getenv("SENSAI_INDEX_PATH", str(Config.index_path))),
         rag_top_k=_int_env("SENSAI_RAG_TOP_K", Config.rag_top_k, minimum=1, maximum=50),

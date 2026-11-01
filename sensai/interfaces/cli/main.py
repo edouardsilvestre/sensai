@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from collections.abc import Iterator
 from pathlib import Path
 
-from sensai.core.agent import Agent, EmptyInputError
+from sensai.core.agent import STOPPED, Agent, EmptyInputError
 from sensai.core.approval import Approval
 from sensai.core.cache import CachedAnswer, CacheError, SemanticCache
 from sensai.core.config import API_KEY_HELP, APPROVAL_MODES, FEATURES, Config, ConfigError, load_config
@@ -23,6 +23,8 @@ from sensai.core.events import (
     DocumentFailedEvent,
     DoneEvent,
     Event,
+    ExamplesEvent,
+    ExamplesFailedEvent,
     GuardrailEvent,
     LogFailedEvent,
     ReasoningStoppedEvent,
@@ -34,8 +36,10 @@ from sensai.core.events import (
     ToolResultEvent,
 )
 from sensai.core.document.document import Document, Edit, EditReport
+from sensai.core.examples import Example, ExampleError, ExampleLibrary, make_example
 from sensai.core.guardrails.rules import STAGES, GuardrailError, Guardrails, Hit, load_rules, model_judge
 from sensai.core.llm.ollama import LLMError, OllamaClient, ToolCall
+from sensai.core.memory.conversation import Turn
 from sensai.core.memory.profile import Profile, ProfileError
 from sensai.core.memory.sessions import SessionError, SessionStore
 from sensai.core.memory.store import MemoryStoreError
@@ -89,6 +93,8 @@ Commands:
   /approval [MODE]        show or change when to ask before running a tool: critical, all or off
   /reasoning [N]          list the questions reasoned about, or show the steps of question N
   /cache [clear]          show the answers kept to reuse, or remove them all
+  /examples               list the answers kept as examples, * marks those shown for the last answer
+  /example add|remove N   keep the last answer as an example for similar questions, or remove example N
   /stats [DAYS|clear]     show the metrics of the last DAYS days (7 by default), or clear the log
   /exit, /quit            leave (or press Ctrl+D)"""
 
@@ -303,6 +309,9 @@ class Session:
     always_allowed: set[str] = field(default_factory=set)
     personas: dict[str, Persona] = field(default_factory=dict)
     cache: SemanticCache | None = None
+    examples: ExampleLibrary | None = None
+    examples_used: list[Example] = field(default_factory=list)
+    answered: tuple[Turn, list[SearchResult]] | None = None
     log: InteractionLog | None = None
 
 
@@ -404,7 +413,13 @@ def print_guardrail(hit: Hit) -> None:
 def chat_turn(session: Session, line: str) -> None:
     if line.strip():
         session.last_sources = []
+        session.examples_used = []
+    turns = session.agent.memory.turns
+    last = turns[-1] if turns else None
     show_events(session, session.agent.run(line))
+    turns = session.agent.memory.turns
+    if turns and turns[-1] is not last:
+        session.answered = (turns[-1], list(session.last_sources))
 
 
 def name_conversation(session: Session) -> None:
@@ -431,6 +446,12 @@ def show_events(session: Session, events: Iterator[Event], structured: bool = Fa
                 print("[cache] Answer reused, the model was not called.")
             elif isinstance(event, CacheFailedEvent):
                 warning(f"The cache could not be used: {event.message}")
+            elif isinstance(event, ExamplesEvent):
+                session.examples_used = event.examples
+                questions = ", ".join(f'"{example.question}"' for example in event.examples)
+                print(f"[examples] {plural(len(event.examples), 'example')}: {questions}")
+            elif isinstance(event, ExamplesFailedEvent):
+                warning(f"No examples were shown to the model: {event.message}")
             elif isinstance(event, LogFailedEvent):
                 warning(f"This message was not logged: {event.message}")
             elif isinstance(event, ReviewDoneEvent):
@@ -563,6 +584,8 @@ def resume(session: Session, session_id: str) -> bool:
     session.session_id = session_id
     session.last_sources = []
     session.agent.reasoning.clear()
+    memory_turns = session.agent.memory.turns
+    session.answered = (memory_turns[-1], []) if memory_turns else None
     summary = ", plus a summary of older turns" if session.agent.memory.summary else ""
     print(f"Resumed conversation {session_id}: {plural(turns, 'turn')}{summary}. /context shows them.")
     return True
@@ -583,6 +606,7 @@ def new_command(session: Session) -> None:
     session.agent.session_id = ""
     session.last_sources = []
     session.agent.reasoning.clear()
+    session.answered = None
     saved = f" Conversation {previous} is saved: /resume {previous} to come back to it." if previous else ""
     print(f"New conversation.{saved}")
 
@@ -794,6 +818,8 @@ def feature_command(session: Session, argument: str) -> None:
             print("No documents indexed yet: /ingest PATH to search your files.")
     if name == "cache" and value == "on" and session.cache is None:
         session.cache = session.agent.cache = load_cache(config, session.agent.client)
+    if name == "examples" and value == "on" and session.examples is None:
+        session.examples = session.agent.examples = load_examples(config, session.agent.client)
     if name == "logging" and value == "on" and session.log is None:
         session.log = session.agent.log = load_log(config)
 
@@ -868,7 +894,7 @@ def reasoning_command(session: Session, argument: str) -> None:
             print(f"  {number}. {reasoning.question} ({plural(len(reasoning.steps), 'step')})")
         print("/reasoning N to read the steps of question N.")
         return
-    if not argument.isdigit() or not 1 <= int(argument) <= len(history):
+    if not argument.isdecimal() or not 1 <= int(argument) <= len(history):
         error(f"Usage: /reasoning [N], with N between 1 and {len(history)}")
         return
     reasoning = history[int(argument) - 1]
@@ -902,6 +928,71 @@ def cache_command(session: Session, argument: str) -> None:
     )
     if not config.features["cache"]:
         print("The cache feature is off: /feature cache on to reuse them.")
+
+
+def kept_on(example: Example) -> str:
+    if not example.created_at:
+        return ""
+    return f" (kept on {datetime.fromisoformat(example.created_at).astimezone():%Y-%m-%d})"
+
+
+def examples_off(session: Session) -> None:
+    if not session.config.features["examples"]:
+        print("The examples feature is off: /feature examples on to show them to the model.")
+
+
+def list_examples(session: Session) -> None:
+    if session.examples is None:
+        print("The examples could not be loaded: /feature examples on to try again.")
+        return
+    examples = session.examples.examples
+    if not examples:
+        print("No examples yet: /example add after a good answer to keep it.")
+    else:
+        print("Answers kept as examples (* shown to the model for the last answer):")
+        for number, example in enumerate(examples, start=1):
+            mark = "*" if any(example is used for used in session.examples_used) else " "
+            print(f"  {mark} {number}. {example.question}{kept_on(example)}")
+    examples_off(session)
+
+
+def add_example(session: Session) -> None:
+    turns = session.agent.memory.turns
+    if session.answered is None or not turns or turns[-1] is not session.answered[0]:
+        error("No answer to keep yet: ask a question, then /example add to keep its answer.")
+        return
+    turn, sources = session.answered
+    if STOPPED in turn.assistant:
+        error("An answer stopped by a guardrail cannot be kept as an example.")
+        return
+    try:
+        example = make_example(turn.user, turn.assistant, sources)
+        session.examples.add(example)
+    except ExampleError as e:
+        error(str(e))
+        return
+    print(f'Answer kept as example {len(session.examples.examples)}: "{example.question}"')
+    examples_off(session)
+
+
+def example_command(session: Session, argument: str) -> None:
+    action, _, number = argument.partition(" ")
+    number = number.strip()
+    if not (action == "add" and not number) and not (action == "remove" and number.isdecimal()):
+        error("Usage: /example add, or /example remove N")
+        return
+    if session.examples is None:
+        print("The examples could not be loaded: /feature examples on to try again.")
+        return
+    if action == "add":
+        add_example(session)
+        return
+    try:
+        removed = session.examples.remove(int(number))
+    except ExampleError as e:
+        error(str(e))
+        return
+    print(f'Example {number} removed: "{removed.question}"')
 
 
 def stats_command(session: Session, argument: str) -> None:
@@ -979,6 +1070,10 @@ def handle_command(session: Session, line: str) -> bool:
         reasoning_command(session, argument)
     elif name == "/cache":
         cache_command(session, argument.lower())
+    elif name == "/examples":
+        list_examples(session)
+    elif name == "/example":
+        example_command(session, argument.lower())
     elif name == "/stats":
         stats_command(session, argument.lower())
     elif name == "/features":
@@ -1016,6 +1111,18 @@ def load_cache(config: Config, client: OllamaClient) -> SemanticCache | None:
     except (LLMError, CacheError) as e:
         warning(f"Cache disabled: {e}")
         return None
+
+
+def load_examples(config: Config, client: OllamaClient) -> ExampleLibrary | None:
+    embedder = Embedder(client, config.embed_model, max_chars=config.chunk_size)
+    try:
+        examples = ExampleLibrary(config.examples_path, embedder.embed_query)
+        if examples.examples and config.features["examples"]:
+            client.ensure_model(config.embed_model)
+    except (ExampleError, LLMError) as e:
+        warning(f"Examples disabled: {e}")
+        return None
+    return examples
 
 
 def load_log(config: Config) -> InteractionLog | None:
@@ -1092,6 +1199,7 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
         agent.retriever = session.index
     if config.features["cache"]:
         session.cache = agent.cache = load_cache(config, agent.client)
+    session.examples = agent.examples = load_examples(config, agent.client)
     if config.features["logging"]:
         session.log = agent.log = load_log(config)
     agent.approver = lambda call, reason: ask_approval(session, call, reason)
@@ -1108,6 +1216,9 @@ def run_chat(config: Config, resume_id: str | None = None) -> int:
             print("No documents indexed yet: /ingest PATH to search your files.")
     if session.cache is not None:
         print(f"Cache: {plural(session.cache.stats().answers, 'answer')} kept. /cache to see them.")
+    if session.examples is not None and session.examples.examples and config.features["examples"]:
+        kept = plural(len(session.examples.examples), "answer")
+        print(f"Examples: {kept} kept as examples. /examples to list them.")
     if agent.tools:
         print(f"Tools: {', '.join(agent.tools.names())}. /tools to see what they do.")
     if agent.persona:

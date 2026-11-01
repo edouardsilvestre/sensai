@@ -21,6 +21,7 @@ Everything stays local, because protecting sources is non-negotiable. And every 
 - 🧾 **Structured outputs**: `/json` answers in JSON that follows a fixed schema (the answer, its claims with their excerpts, the people and companies, the events), ready for a database or another tool.
 - 🧠 **Traceable reasoning**: when turned on, Sensai reasons step by step (what it knows, what is missing, which document or tool to check next) and every step can be read again with `/reasoning`, so a conclusion can be checked before it is published.
 - ♻️ **Semantic cache**: a question close to one already answered, in the same context, can get the same answer instantly once you confirm it, without calling the model again.
+- 💡 **Answer examples**: keep your best answers with `/example add`, and Sensai shows the closest ones to the model for each new question, so that even a small model cites its excerpts and says what the documents do not say.
 - 📈 **Logs & metrics**: every message is logged on the machine with the prompt sent, the answer, the tools, the time and the tokens, and `/stats` shows the volume, the response time, the error rate and the prompt changes that slowed Sensai down.
 - 🛡️ **Hallucination detection**: each generated statement is checked against the source documents; anything unsupported is flagged instead of presented as fact.
 ## How does it work?
@@ -193,9 +194,45 @@ La capitale de l'Australie est Sydney.
 
 With `qwen2.5:1.5b`, an answer took 8.1 seconds and its reuse 0.6 seconds, the time to embed the new question. The answer above is also wrong, and the cache served it again as it was: the cache saves the model's time, it does not check what it says. `n` lets the model answer again, and `/cache clear` removes every answer kept.
 
-`cache.py`: `SemanticCache` embeds the question with `SENSAI_EMBED_MODEL` and keeps the vector, the answer, its sources and its date in a SQLite file at `SENSAI_CACHE_PATH`. A new question is compared to the questions kept in the same context by cosine similarity, and the closest one is offered when it reaches `SENSAI_CACHE_THRESHOLD` percent. The context is a hash of the model, the conversation sent to the model (the system prompt or the persona, the profile, the earlier turns), the indexed documents, the guardrail rules and the `rag`, `tools` and `reasoning` features: a follow-up question, another persona, a changed document or a new rule is another context, and is never answered from the cache. A cached answer is not checked again by the guardrails, so a rule added to protect a name never lets an answer kept before it show that name. Only the answers given from the documents alone are kept: an answer that called a tool (a web search, the memory, a search during the reasoning) depends on more than the question, and an answer stopped by a guardrail, empty or in JSON is not kept either. Like the approver, the confirmation is asked by the interface (`Agent.confirm_cache`): without it, the cache is not used.
+`cache.py`: `SemanticCache` embeds the question with `SENSAI_EMBED_MODEL` and keeps the vector, the answer, its sources and its date in a SQLite file at `SENSAI_CACHE_PATH`. A new question is compared to the questions kept in the same context by cosine similarity, and the closest one is offered when it reaches `SENSAI_CACHE_THRESHOLD` percent. The context is a hash of the model, the conversation sent to the model (the system prompt or the persona, the profile, the earlier turns), the indexed documents, the guardrail rules, the answers kept as examples shown to the model and the `rag`, `tools` and `reasoning` features: a follow-up question, another persona, a changed document, a new rule or a new example is another context, and is never answered from the cache. A cached answer is not checked again by the guardrails, so a rule added to protect a name never lets an answer kept before it show that name. Only the answers given from the documents alone are kept: an answer that called a tool (a web search, the memory, a search during the reasoning) depends on more than the question, and an answer stopped by a guardrail, empty or in JSON is not kept either. Like the approver, the confirmation is asked by the interface (`Agent.confirm_cache`): without it, the cache is not used.
 
 Serving the closest answer automatically above the threshold was considered and ruled out. With `qwen3-embedding:0.6b`, rephrasings of the same question scored between 0.911 and 0.974, but different questions scored up to 0.970: "Quel montant Nordbank a-t-elle viré à Marc Vidal ?" and "Quel montant Marc Vidal a-t-il viré à Nordbank ?" are 0.970 close, with opposite answers, and asking when instead of how much still scored 0.946. No threshold separates them, so the journalist decides, with the question kept and its similarity in front of them.
+
+### Answer examples
+
+A small model follows an example better than an instruction. With the `examples` feature (on by default), the journalist keeps the answers they find good with `/example add`, and for each new question Sensai shows the model the closest ones, as examples of how to answer:
+
+```
+> Quel bonus touche Marc Vidal ?
+Le bonus de Marc Vidal n'est pas mentionné dans les documents fournis.
+> /example add
+Answer kept as example 1: "Quel bonus touche Marc Vidal ?"
+
+> Quel salaire touche Marc Vidal ?
+[examples] 1 example: "Quel bonus touche Marc Vidal ?"
+Le document n'évoque pas le salaire de Marc Vidal. [...]
+
+> /examples
+Answers kept as examples (* shown to the model for the last answer):
+  * 1. Quel bonus touche Marc Vidal ? (kept on 2026-10-31)
+```
+
+`examples.py`: `ExampleLibrary` keeps the examples in `SENSAI_EXAMPLES_PATH`, each with its question, its answer and the excerpts the answer cites, under their number so that `[2]` keeps its meaning. For each message, the question is embedded with `SENSAI_EMBED_MODEL` and compared by cosine similarity to the questions kept, and the `SENSAI_EXAMPLES_K` closest ones (2 by default) above a similarity of 0.5 are sent in a system message just before the question, with the instruction to answer the same way without reusing their facts. They never go to the history, and the step-by-step reasoning gets them too. Only plain answers can be kept: not `/json` nor `/review`, not an answer stopped by a guardrail, and never the same answer twice. Sensai ships no examples: only the journalist decides what a good answer is, and their examples stay on the machine, since they hold the names of the case.
+
+The threshold comes from `qwen3-embedding:0.6b`: with examples from the same case, the questions on the same subject scored between 0.68 and 0.88, and messages like "Bonjour", "Merci" or a question off the case at most 0.30. With examples from another case, the right example still came first, but at 0.35 to 0.48, as close as "Bonjour": the examples of another case are not shown.
+
+Measured with `qwen2.5:1.5b` on three documents of a fictional case and five examples kept on it, asking ten new questions twice without and twice with the examples:
+
+| | Without examples | With examples |
+|---|---|---|
+| The documents do not say: the answer says so, without making it up | 6 / 10 | 9 / 10 |
+| The documents say: the answer cites an excerpt | 0 / 10 | 5 / 10 |
+| The documents say: the answer is entirely right | 10 / 10 | 8 / 10 |
+| Average time per answer | 4.6 s | 9.1 s |
+
+Without examples, the model made up four answers: the company's address as Marc Vidal's home (twice), "Marc Vidal has no account in Switzerland", and 12 € of bank fees as the company's taxes. With them, only the address was made up, once. But the answers got longer, and twice the model added a wrong detail to a right answer ("a dinner" for a lunch, "an expense report" for a bank statement), and it took twice as long, since the prompt and the answers are longer. An example also only teaches what it shows: an answer kept without a citation does not teach the model to cite. Ten questions asked twice is a small sample, and the model does not always answer the same way.
+
+The other ways to optimize a prompt were considered and ruled out. Rewriting the question before answering it costs one more call to the model per message, and optimizing the prompt against a score, like [DSPy](https://dspy.ai), tries dozens of prompts, hundreds of calls that a CPU cannot afford. Shipping examples with Sensai and keeping the answers approved by the fact-checker of `/review` automatically were ruled out too: an approved answer is not always well written, and the journalist should decide what the model imitates.
 
 ### Logs & metrics
 
@@ -410,6 +447,8 @@ Sources:
 | `/approval [MODE]` | show when Sensai asks before running a tool, or change it: `critical`, `all` or `off` |
 | `/reasoning [N]` | list the questions reasoned about in this conversation, or show the steps of question N |
 | `/cache [clear]` | show how many answers the cache keeps and how often they were reused, or remove them all |
+| `/examples` | list the answers kept as examples, `*` marks those shown to the model for the last answer |
+| `/example add\|remove N` | keep the last answer as an example for similar questions, or remove example N |
 | `/stats [DAYS\|clear]` | show the metrics of the messages of the last DAYS days (7 by default), or empty the log |
 | `/help` | list the commands |
 
@@ -537,6 +576,7 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_FEATURE_PROFILE` | `true` | send the profile to the model |
 | `SENSAI_FEATURE_DOCUMENT` | `true` | update the working document after every answer, with one more call to the model |
 | `SENSAI_FEATURE_CACHE` | `true` | offer the answer to a close question already asked, in the same context |
+| `SENSAI_FEATURE_EXAMPLES` | `true` | show the model the answers kept as examples, for the questions close to theirs |
 | `SENSAI_FEATURE_LOGGING` | `true` | log every message with its prompt, answer, tools, time and tokens |
 | `SENSAI_COMPACT_THRESHOLD` | `75` | percentage of `SENSAI_NUM_CTX` at which the oldest turns are condensed (10-95) |
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
@@ -550,6 +590,8 @@ Configuration lives in `.env` (see `.env.example`). Environment variables take p
 | `SENSAI_KEEP_RECENT_TURNS` | `4` | most recent turns always kept verbatim |
 | `SENSAI_GUARDRAILS_PATH` | `.sensai/guardrails.json` | guardrail rules (see `guardrails.example.json`); without it, personal data is blocked in web searches |
 | `SENSAI_MCP_PATH` | `.sensai/mcp.json` | URLs of the MCP servers (see `mcp.example.json`); without it, no server is reached |
+| `SENSAI_EXAMPLES_PATH` | `.sensai/examples.json` | the answers kept as examples with `/example add` |
+| `SENSAI_EXAMPLES_K` | `2` | examples shown to the model for each question, the closest ones first (0-5) |
 | `SENSAI_EMBED_MODEL` | `qwen3-embedding:0.6b` | embedding model; changing it requires `ingest --rebuild` |
 | `SENSAI_INDEX_PATH` | `.sensai/index.db` | SQLite file holding the index |
 | `SENSAI_RAG_TOP_K` | `5` | excerpts added to the prompt for each message |
@@ -583,6 +625,7 @@ Each feature can be turned on or off with a `SENSAI_FEATURE_<NAME>` variable (`t
 | `document` | the update of the working document after each answer; the document is kept, but not updated nor sent to the model, when it is off |
 | `reasoning` | the step-by-step reasoning shown before each answer, off by default because each step is a call to the model |
 | `cache` | the offer to reuse the answer to a close question; the answers are kept, but not offered nor added, when it is off |
+| `examples` | the answers kept as examples shown to the model; they are kept, and `/example add` still works, when it is off |
 | `logging` | the log of every message; the log is kept, and `python -m sensai stats` still reads it, when it is off |
 
 The features are on by default, except `web_search`, `code_exec`, `files` and `reasoning`. `SENSAI_TOOLS` and `SENSAI_WEB_SEARCH` became `SENSAI_FEATURE_TOOLS` and `SENSAI_FEATURE_WEB_SEARCH`: an `.env` that still uses them stops Sensai with the new name, instead of being ignored.

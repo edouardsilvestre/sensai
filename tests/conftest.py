@@ -104,5 +104,6 @@ def config(tmp_path) -> Config:
         memory_path=tmp_path / "memory.db",
         mcp_path=tmp_path / "mcp.json",
         cache_path=tmp_path / "cache.db",
+        examples_path=tmp_path / "examples.json",
         log_path=tmp_path / "logs.db",
     )
